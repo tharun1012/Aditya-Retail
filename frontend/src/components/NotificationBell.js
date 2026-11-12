@@ -1,0 +1,514 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { BACKEND_URL as API_URL } from '../config/api';
+import { Bell, Check, CheckCheck, X, Package, Truck, ShoppingCart, AlertTriangle, FileText, ArrowRight, Wifi, WifiOff } from 'lucide-react';
+
+const NotificationBell = ({ userRole, storeId, userId }) => {
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [highPriorityCount, setHighPriorityCount] = useState(0);
+  const [isOpen, setIsOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const dropdownRef = useRef(null);
+  const bellRef = useRef(null);
+  const wsRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+  const pollIntervalRef = useRef(null);
+
+  
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (
+        dropdownRef.current && 
+        !dropdownRef.current.contains(event.target) &&
+        bellRef.current &&
+        !bellRef.current.contains(event.target)
+      ) {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Fetch notifications function - defined first so it can be used by WebSocket fallback
+  const fetchNotifications = useCallback(async () => {
+    setLoading(true);
+    try {
+      let url = `${API_URL}/api/notifications/?limit=15&`;
+      if (userRole) url += `user_role=${userRole}&`;
+      if (storeId) url += `store_id=${storeId}&`;
+      if (userId) url += `user_id=${userId}`;
+
+      const response = await fetch(url);
+      if (response.ok) {
+        const data = await response.json();
+        setNotifications(data.notifications || []);
+        setUnreadCount(data.unread_count || 0);
+        
+        // Count high priority
+        const highPriority = (data.notifications || []).filter(
+          n => !n.is_read && (n.priority === 'high' || n.priority === 'urgent')
+        ).length;
+        setHighPriorityCount(highPriority);
+      }
+    } catch (error) {
+      console.error('Error fetching notifications:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [API_URL, userRole, storeId, userId]);
+
+  // Play notification sound
+  const playNotificationSound = useCallback(() => {
+    try {
+      const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleRQOIIjc7b2SQhALQKfe6K6YVQ8VS6ve36l7NhALYsPp1aWGPxAJgNPrsKeDSgkIm+bfsJNqSgAAqO7dq5BlQAAEu/HYqYhYQAAI1PLOo4RbPQAG5/HIpoNYOwAL9ezMqIlbOAAP/OjLq41cNAAT/+jLq4xcMwAV/+fLq41cMgAX/+bLq41cMQAZ/+XLqotcMAAa/+TLqotcLwAb/+PLqYpcLwAc/+LLqYpcLgAd/+HLqYpbLQAe/+DLqIlbLAAf/9/LqIlbKwAg/97Lp4lbKgAh/9zLp4hbKQAi/9vLp4hbKAAj/9rLpodaJwAk/9nLpodaJgAl/9jLpYdaJQAm/9fLpYZaJAAn/9bLpYZaIwAo/9XLpIZaIgAp/9TLpIVaIQAq/9PLpIVZIAAr/9LLoYVZHwAs/9HLoYRZHgAt/9DLoYRZHQAu/8/LoIRZHAAv/87Ln4NZHAA+/83Ln4NYHQA9/8zLnoNYHAA8/8vLnoJYGwA7/8rLnYJYGgA6/8nLnYFYGQA5/8jLnYFXGAA4/8fLnIFXFwA3/8bLnIBXFgA2/8XLm4BXFQA1/8TLm39WFAA0/8PLm39WFAA0/8LLmn9WEwA0/8HLmn5WEgA0/8DLmX5VEQAz/7/Lmn5VEAA=');
+      audio.volume = 0.3;
+      audio.play().catch(() => {});
+    } catch (e) {
+      // Ignore audio errors
+    }
+  }, []);
+
+  // Show browser notification
+  const showBrowserNotification = useCallback((notification) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(notification.title, {
+        body: notification.message,
+        icon: '/logo192.png',
+        tag: notification.id
+      });
+    }
+  }, []);
+
+  // Request notification permission on mount
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // Initial fetch
+  useEffect(() => {
+    fetchNotifications();
+  }, [fetchNotifications]);
+
+  // Fetch when dropdown opens
+  useEffect(() => {
+    if (isOpen) {
+      fetchNotifications();
+    }
+  }, [isOpen, fetchNotifications]);
+
+  // WebSocket connection with fallback to polling
+  useEffect(() => {
+    let pingInterval = null;
+    let wsConnectionFailed = false;
+    let wsAttempts = 0;
+    
+    const getWebSocketUrl = () => {
+      try {
+        const url = new URL(API_URL);
+        const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        let wsUrl = `${wsProtocol}//${url.host}/api/ws/notifications?`;
+        
+        if (userId) wsUrl += `user_id=${userId}&`;
+        if (storeId) wsUrl += `store_id=${storeId}&`;
+        if (userRole) wsUrl += `role=${userRole}`;
+        
+        return wsUrl;
+      } catch (e) {
+        console.error('Failed to construct WebSocket URL:', e);
+        return null;
+      }
+    };
+    
+    const startPolling = () => {
+      if (!pollIntervalRef.current) {
+        console.log('Starting polling fallback (every 30s)');
+        pollIntervalRef.current = setInterval(fetchNotifications, 30000);
+      }
+    };
+    
+    const stopPolling = () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+    
+    const connectWebSocket = () => {
+      const wsUrl = getWebSocketUrl();
+      
+      if (!wsUrl || wsRef.current?.readyState === WebSocket.OPEN) {
+        if (!wsUrl) startPolling();
+        return;
+      }
+
+      console.log('Connecting to WebSocket:', wsUrl);
+      
+      try {
+        wsRef.current = new WebSocket(wsUrl);
+        
+        wsRef.current.onopen = () => {
+          console.log('WebSocket connected');
+          wsAttempts = 0;
+          setWsConnected(true);
+          wsConnectionFailed = false;
+          stopPolling();
+          
+          // Send ping every 30 seconds to keep connection alive
+          pingInterval = setInterval(() => {
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send('ping');
+            }
+          }, 30000);
+        };
+        
+        wsRef.current.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'notification') {
+              const newNotification = data.data;
+              
+              setNotifications(prev => [newNotification, ...prev].slice(0, 20));
+              setUnreadCount(prev => prev + 1);
+              
+              if (newNotification.priority === 'high' || newNotification.priority === 'urgent') {
+                setHighPriorityCount(prev => prev + 1);
+              }
+              
+              playNotificationSound();
+              showBrowserNotification(newNotification);
+            }
+          } catch (e) {
+            // Ignore non-JSON messages like "pong"
+          }
+        };
+        
+        wsRef.current.onclose = (event) => {
+          console.log('WebSocket disconnected:', event.code);
+          setWsConnected(false);
+          if (pingInterval) clearInterval(pingInterval);
+          
+          // Start polling as fallback
+          startPolling();
+          
+          // Try to reconnect after 5 seconds
+          wsAttempts += 1;
+          if (wsAttempts <= 5 && !reconnectTimeoutRef.current) {
+            const delay = Math.min(5000 * Math.pow(2, wsAttempts - 1), 300000);
+            reconnectTimeoutRef.current = setTimeout(() => {
+              reconnectTimeoutRef.current = null;
+              connectWebSocket();
+            }, delay);
+          }
+        };
+        
+        wsRef.current.onerror = (error) => {
+          console.warn('WebSocket error, falling back to polling');
+          setWsConnected(false);
+          wsConnectionFailed = true;
+          startPolling();
+        };
+        
+      } catch (error) {
+        console.warn('Failed to create WebSocket, using polling:', error);
+        setWsConnected(false);
+        startPolling();
+      }
+    };
+    
+    // Initial connection attempt
+    connectWebSocket();
+    
+    // Cleanup
+    return () => {
+      if (pingInterval) clearInterval(pingInterval);
+      stopPolling();
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [API_URL, userId, storeId, userRole, fetchNotifications, playNotificationSound, showBrowserNotification]);
+
+  // Mark notification as read
+  const markAsRead = async (notificationId) => {
+    try {
+      const response = await fetch(`${API_URL}/api/notifications/${notificationId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_read: true })
+      });
+
+      if (response.ok) {
+        setNotifications(prev => 
+          prev.map(n => n.id === notificationId ? { ...n, is_read: true } : n)
+        );
+        setUnreadCount(prev => Math.max(0, prev - 1));
+      }
+    } catch (error) {
+      console.error('Error marking as read:', error);
+    }
+  };
+
+  // Mark all as read
+  const markAllAsRead = async () => {
+    try {
+      let url = `${API_URL}/api/notifications/mark-all-read?`;
+      if (userRole) url += `user_role=${userRole}&`;
+      if (storeId) url += `store_id=${storeId}`;
+
+      const response = await fetch(url, { method: 'POST' });
+      if (response.ok) {
+        setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+        setUnreadCount(0);
+        setHighPriorityCount(0);
+      }
+    } catch (error) {
+      console.error('Error marking all as read:', error);
+    }
+  };
+
+  // Handle notification click
+  const handleNotificationClick = (notification) => {
+    if (!notification.is_read) {
+      markAsRead(notification.id);
+    }
+    if (notification.action_url) {
+      window.location.href = `#${notification.action_url}`;
+      setIsOpen(false);
+    }
+  };
+
+  // Get icon based on notification type
+  const getNotificationIcon = (type, priority) => {
+    const iconClass = `w-5 h-5 ${priority === 'high' || priority === 'urgent' ? 'text-red-500' : 'text-gray-500'}`;
+    
+    switch (type) {
+      case 'stock_transfer':
+      case 'stock_inward':
+        return <Package className={iconClass} />;
+      case 'delivery':
+        return <Truck className={iconClass} />;
+      case 'order':
+      case 'new_sales_order':
+        return <ShoppingCart className={iconClass} />;
+      case 'so_converted':
+        return <FileText className={iconClass} />;
+      case 'alert':
+        return <AlertTriangle className={iconClass} />;
+      case 'po_request':
+        return <FileText className={iconClass} />;
+      default:
+        return <Bell className={iconClass} />;
+    }
+  };
+
+  // Get priority badge color
+  const getPriorityColor = (priority) => {
+    switch (priority) {
+      case 'urgent': return 'bg-red-100 text-red-700 border-red-200';
+      case 'high': return 'bg-orange-100 text-orange-700 border-orange-200';
+      case 'normal': return 'bg-blue-100 text-blue-700 border-blue-200';
+      case 'low': return 'bg-gray-100 text-gray-600 border-gray-200';
+      default: return 'bg-gray-100 text-gray-600 border-gray-200';
+    }
+  };
+
+  // Format time ago
+  const formatTimeAgo = (dateString) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
+  };
+
+  return (
+    <div className="relative">
+      {/* Bell Button */}
+      <button
+        ref={bellRef}
+        onClick={() => setIsOpen(!isOpen)}
+        className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-500"
+        data-testid="notification-bell"
+      >
+        <Bell className={`w-5 h-5 ${unreadCount > 0 ? 'text-amber-600' : 'text-gray-600'}`} />
+        
+        {/* Unread Badge */}
+        {unreadCount > 0 && (
+          <span className="absolute -top-1 -right-1 flex items-center justify-center min-w-[20px] h-5 px-1 text-xs font-bold text-white bg-red-500 rounded-full animate-pulse">
+            {unreadCount > 99 ? '99+' : unreadCount}
+          </span>
+        )}
+        
+        {/* High Priority Indicator */}
+        {highPriorityCount > 0 && (
+          <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-orange-500 rounded-full border-2 border-white" />
+        )}
+        
+        {/* WebSocket Connection Indicator */}
+        <span className={`absolute -bottom-1 -left-1 w-2 h-2 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-gray-400'}`} 
+              title={wsConnected ? 'Real-time connected' : 'Polling mode'} />
+      </button>
+
+      {/* Dropdown */}
+      {isOpen && (
+ <div
+  ref={dropdownRef}
+  className="absolute right-0 mt-2 w-96 md:absolute max-md:fixed max-md:top-[72px] max-md:left-2 max-md:right-2 max-md:w-auto bg-white rounded-xl shadow-2xl border border-gray-200 overflow-hidden z-[9999]"
+>
+          {/* Header */}
+          <div className="sticky top-0 bg-gradient-to-r from-amber-50 to-orange-50 px-4 py-3 border-b flex items-center justify-between z-10">
+            <div>
+              <div className="flex items-center space-x-2">
+                <h3 className="font-semibold text-gray-900">Notifications</h3>
+                {wsConnected ? (
+                  <span className="flex items-center text-xs text-green-600">
+                    <Wifi className="w-3 h-3 mr-1" />
+                    Live
+                  </span>
+                ) : (
+                  <span className="flex items-center text-xs text-gray-400">
+                    <WifiOff className="w-3 h-3 mr-1" />
+                    Polling
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-gray-500">
+                {unreadCount > 0 ? `${unreadCount} unread` : 'All caught up!'}
+              </p>
+            </div>
+            <div className="flex items-center space-x-2">
+              {unreadCount > 0 && (
+                <button
+                  onClick={markAllAsRead}
+                  className="text-xs text-amber-600 hover:text-amber-700 font-medium flex items-center space-x-1"
+                >
+                  <CheckCheck className="w-4 h-4" />
+                  <span>Mark all read</span>
+                </button>
+              )}
+              <button
+                onClick={() => setIsOpen(false)}
+                className="p-1 hover:bg-white rounded-lg transition-colors"
+              >
+                <X className="w-4 h-4 text-gray-500" />
+              </button>
+            </div>
+          </div>
+
+          {/* Notifications List */}
+          <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 170px)' }}>
+            {loading && notifications.length === 0 ? (
+              <div className="p-5 text-center">
+                <div className="w-8 h-8 border-2 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto" />
+                <p className="text-sm text-gray-500 mt-2">Loading...</p>
+              </div>
+            ) : notifications.length === 0 ? (
+              <div className="p-5 text-center">
+                <Bell className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-500">No notifications yet</p>
+                <p className="text-xs text-gray-400 mt-1">You'll see updates here</p>
+              </div>
+            ) : (
+              <div className="divide-y">
+                {notifications.map((notification) => (
+                  <div
+                    key={notification.id}
+                    onClick={() => handleNotificationClick(notification)}
+                    className={`px-4 py-3 hover:bg-gray-50 cursor-pointer transition-colors ${
+                      !notification.is_read ? 'bg-amber-50/50' : ''
+                    }`}
+                    data-testid={`notification-item-${notification.id}`}
+                  >
+                    <div className="flex items-start space-x-3">
+                      {/* Icon */}
+                      <div className={`flex-shrink-0 p-2 rounded-lg ${
+                        notification.priority === 'high' || notification.priority === 'urgent'
+                          ? 'bg-red-100' 
+                          : 'bg-gray-100'
+                      }`}>
+                        {getNotificationIcon(notification.type, notification.priority)}
+                      </div>
+
+                      {/* Content */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-start justify-between">
+                          <p className={`text-sm ${!notification.is_read ? 'font-semibold text-gray-900' : 'font-medium text-gray-700'}`}>
+                            {notification.title}
+                          </p>
+                          {!notification.is_read && (
+                            <span className="flex-shrink-0 w-2 h-2 bg-amber-500 rounded-full ml-2 mt-1.5" />
+                          )}
+                        </div>
+                        
+                        <p className="text-sm text-gray-600 mt-0.5 line-clamp-2">
+                          {notification.message}
+                        </p>
+                        
+                        <div className="flex items-center justify-between mt-2">
+                          <span className="text-xs text-gray-400">
+                            {formatTimeAgo(notification.created_at)}
+                          </span>
+                          
+                          <div className="flex items-center space-x-2">
+                            {notification.priority !== 'normal' && notification.priority !== 'low' && (
+                              <span className={`text-xs px-2 py-0.5 rounded-full border ${getPriorityColor(notification.priority)}`}>
+                                {notification.priority}
+                              </span>
+                            )}
+                            
+                            {notification.action_label && (
+                              <span className="text-xs text-amber-600 font-medium flex items-center">
+                                {notification.action_label}
+                                <ArrowRight className="w-3 h-3 ml-1" />
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          {notifications.length > 0 && (
+            <div className="sticky bottom-0 bg-gray-50 px-4 py-2 border-t text-center">
+              <button
+                onClick={() => {
+                  window.location.href = '#/notifications';
+                  setIsOpen(false);
+                }}
+                className="text-sm text-amber-600 hover:text-amber-700 font-medium"
+              >
+                View all notifications
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default NotificationBell;

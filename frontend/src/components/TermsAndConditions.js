@@ -1,0 +1,190 @@
+import React from 'react';
+import { FileText, AlertTriangle } from 'lucide-react';
+
+const TermsAndConditions = () => {
+  return (
+    <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-md p-8">
+        <div className="flex items-center gap-3 mb-6">
+          <FileText className="w-8 h-8 text-blue-600" />
+          <h1 className="text-3xl font-bold text-gray-900">Terms & Conditions</h1>
+        </div>
+        
+        <p className="text-gray-600 mb-6">Last updated: December 2024</p>
+        
+        <div className="prose prose-gray max-w-none">
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">1. Agreement to Terms</h2>
+            <p className="text-gray-700 mb-4">
+              Welcome to Aditya Retail. These Terms and Conditions govern your use of our website and the purchase of products from us. By accessing our website or placing an order, you agree to be bound by these terms.
+            </p>
+            <p className="text-gray-700">
+              Please read these terms carefully before using our services. If you do not agree with any part of these terms, you may not use our services.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">2. Definitions</h2>
+            <ul className="list-disc pl-6 text-gray-700">
+              <li><strong>"Company," "We," "Us," "Our"</strong> refers to Aditya Retail</li>
+              <li><strong>"Website"</strong> refers to our e-commerce platform</li>
+              <li><strong>"Customer," "You," "Your"</strong> refers to the user or purchaser</li>
+              <li><strong>"Products"</strong> refers to items available for purchase on our website</li>
+              <li><strong>"Order"</strong> refers to a request to purchase products from us</li>
+            </ul>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">3. Products and Pricing</h2>
+            
+            <h3 className="text-lg font-medium text-gray-800 mb-2">3.1 Product Information</h3>
+            <p className="text-gray-700 mb-4">
+              We strive to provide accurate product descriptions, images, and specifications. However, we do not warrant that product descriptions or other content is accurate, complete, or error-free. Colors may vary slightly due to monitor settings.
+            </p>
+            
+            <h3 className="text-lg font-medium text-gray-800 mb-2">3.2 Pricing</h3>
+            <p className="text-gray-700 mb-4">
+              All prices are displayed in Indian Rupees (INR) and include applicable taxes unless otherwise stated. We reserve the right to modify prices at any time without prior notice. The price at the time of order placement will be honored.
+            </p>
+            
+            <h3 className="text-lg font-medium text-gray-800 mb-2">3.3 Availability</h3>
+            <p className="text-gray-700">
+              Product availability is subject to change. We reserve the right to limit quantities, discontinue products, or refuse orders at our discretion.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">4. Orders and Payment</h2>
+            
+            <h3 className="text-lg font-medium text-gray-800 mb-2">4.1 Order Acceptance</h3>
+            <p className="text-gray-700 mb-4">
+              Your order constitutes an offer to purchase. We reserve the right to accept or decline any order. An order is confirmed only when you receive an order confirmation email from us.
+            </p>
+            
+            <h3 className="text-lg font-medium text-gray-800 mb-2">4.2 Payment Methods</h3>
+            <p className="text-gray-700 mb-4">
+              We accept the following payment methods:
+            </p>
+            <ul className="list-disc pl-6 text-gray-700 mb-4">
+              <li>UPI (PhonePe, Google Pay, Paytm, etc.)</li>
+              <li>Credit/Debit Cards</li>
+              <li>Net Banking</li>
+              <li>Cash on Delivery (COD) - where available</li>
+            </ul>
+            
+            <h3 className="text-lg font-medium text-gray-800 mb-2">4.3 Payment Security</h3>
+            <p className="text-gray-700">
+              All payments are processed through secure, PCI-compliant payment gateways. We do not store your complete payment card details on our servers.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">5. Shipping and Delivery</h2>
+            <p className="text-gray-700 mb-4">
+              Please refer to our <a href="/shipping-policy" className="text-blue-600 hover:underline">Shipping Policy</a> for detailed information about delivery timelines, charges, and procedures.
+            </p>
+            <ul className="list-disc pl-6 text-gray-700">
+              <li>Delivery timelines are estimates and not guaranteed</li>
+              <li>Risk of loss passes to you upon delivery</li>
+              <li>You are responsible for providing accurate delivery information</li>
+              <li>We are not liable for delays due to unforeseen circumstances</li>
+            </ul>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">6. Returns and Refunds</h2>
+            <p className="text-gray-700 mb-4">
+              Please refer to our <a href="/return-policy" className="text-blue-600 hover:underline">Return Policy</a> for detailed information about returns, exchanges, and refunds.
+            </p>
+            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-4">
+              <div className="flex items-start">
+                <AlertTriangle className="w-5 h-5 text-yellow-600 mr-2 mt-0.5" />
+                <p className="text-yellow-800">
+                  <strong>Important:</strong> Returns on defective goods are handled directly by the Brand (Bosch, Siemens, etc.). Transit damages are handled by Aditya Retail upon inspection.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">7. Warranty</h2>
+            <p className="text-gray-700 mb-4">
+              All products sold by Aditya Retail come with the manufacturer's warranty as specified in the product documentation. Warranty claims must be directed to the respective brand's authorized service center.
+            </p>
+            <p className="text-gray-700">
+              We assist customers in connecting with brand service centers but are not responsible for warranty fulfillment, which is the sole responsibility of the manufacturer.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">8. Intellectual Property</h2>
+            <p className="text-gray-700">
+              All content on this website, including text, graphics, logos, images, and software, is the property of Aditya Retail or its content suppliers and is protected by intellectual property laws. You may not reproduce, distribute, or create derivative works without our express written permission.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">9. User Accounts</h2>
+            <p className="text-gray-700 mb-4">
+              When you create an account with us, you must provide accurate and complete information. You are responsible for:
+            </p>
+            <ul className="list-disc pl-6 text-gray-700">
+              <li>Maintaining the confidentiality of your account credentials</li>
+              <li>All activities that occur under your account</li>
+              <li>Notifying us immediately of any unauthorized use</li>
+            </ul>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">10. Limitation of Liability</h2>
+            <p className="text-gray-700 mb-4">
+              To the maximum extent permitted by law, Aditya Retail shall not be liable for:
+            </p>
+            <ul className="list-disc pl-6 text-gray-700">
+              <li>Any indirect, incidental, special, or consequential damages</li>
+              <li>Loss of profits, data, or business opportunities</li>
+              <li>Damages arising from your use or inability to use our services</li>
+              <li>Any third-party claims against you</li>
+            </ul>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">11. Indemnification</h2>
+            <p className="text-gray-700">
+              You agree to indemnify and hold harmless Aditya Retail, its officers, directors, employees, and agents from any claims, damages, losses, or expenses arising from your violation of these terms or your use of our services.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">12. Governing Law</h2>
+            <p className="text-gray-700">
+              These Terms and Conditions are governed by the laws of India. Any disputes arising from these terms shall be subject to the exclusive jurisdiction of the courts in Bangalore, Karnataka.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">13. Changes to Terms</h2>
+            <p className="text-gray-700">
+              We reserve the right to modify these terms at any time. Changes will be effective immediately upon posting on the website. Your continued use of our services after any changes constitutes acceptance of the new terms.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">14. Contact Information</h2>
+            <p className="text-gray-700 mb-4">
+              For any questions or concerns regarding these Terms and Conditions, please contact us at:
+            </p>
+            <div className="bg-gray-50 p-4 rounded-lg">
+              <p className="text-gray-700"><strong>Aditya Retail</strong></p>
+              <p className="text-gray-700">Email: orders@adityaretailonline.com</p>
+              <p className="text-gray-700">Phone: +91 98445 77440</p>
+              <p className="text-gray-700">Address: Bangalore, Karnataka, India</p>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default TermsAndConditions;

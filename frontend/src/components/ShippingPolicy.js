@@ -1,0 +1,235 @@
+import React from 'react';
+import { Truck, MapPin, Clock, Package, CheckCircle, AlertTriangle } from 'lucide-react';
+
+const ShippingPolicy = () => {
+  return (
+    <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-md p-8">
+        <div className="flex items-center gap-3 mb-6">
+          <Truck className="w-8 h-8 text-blue-600" />
+          <h1 className="text-3xl font-bold text-gray-900">Shipping Policy</h1>
+        </div>
+        
+        <p className="text-gray-600 mb-6">Last updated: December 2024</p>
+
+        {/* Shipping Partners Banner */}
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 rounded-lg mb-8">
+          <h3 className="text-lg font-semibold text-gray-800 mb-3">Our Trusted Shipping Partners</h3>
+          <div className="flex flex-wrap gap-4">
+            <span className="px-4 py-2 bg-white rounded-full text-gray-700 shadow-sm">Delhivery</span>
+            <span className="px-4 py-2 bg-white rounded-full text-gray-700 shadow-sm">Blue Dart</span>
+            <span className="px-4 py-2 bg-white rounded-full text-gray-700 shadow-sm">Xpressbees</span>
+            <span className="px-4 py-2 bg-white rounded-full text-gray-700 shadow-sm">DTDC</span>
+            <span className="px-4 py-2 bg-white rounded-full text-gray-700 shadow-sm">Ekart</span>
+            <span className="px-4 py-2 bg-white rounded-full text-gray-700 shadow-sm">Amazon Shipping</span>
+          </div>
+        </div>
+
+        <div className="prose prose-gray max-w-none">
+          
+          {/* Delivery Timelines */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <Clock className="w-6 h-6 text-blue-600" />
+              1. Delivery Timelines
+            </h2>
+            <table className="w-full border-collapse border border-gray-300 mb-4">
+              <thead>
+                <tr className="bg-gray-100">
+                  <th className="border border-gray-300 p-3 text-left">Location</th>
+                  <th className="border border-gray-300 p-3 text-left">Estimated Delivery</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className="border border-gray-300 p-3">
+                    <strong>Metro Cities</strong><br/>
+                    <span className="text-gray-600 text-sm">Mumbai, Delhi, Bangalore, Chennai, Hyderabad, Kolkata, Pune, Ahmedabad</span>
+                  </td>
+                  <td className="border border-gray-300 p-3 font-semibold text-green-600">3-5 Business Days</td>
+                </tr>
+                <tr>
+                  <td className="border border-gray-300 p-3">
+                    <strong>Tier 2 Cities</strong><br/>
+                    <span className="text-gray-600 text-sm">Jaipur, Lucknow, Chandigarh, Indore, Coimbatore, Kochi, Nagpur, Surat, etc.</span>
+                  </td>
+                  <td className="border border-gray-300 p-3 font-semibold text-blue-600">5-7 Business Days</td>
+                </tr>
+                <tr>
+                  <td className="border border-gray-300 p-3">
+                    <strong>Other Areas</strong><br/>
+                    <span className="text-gray-600 text-sm">Tier 3 cities and remote locations</span>
+                  </td>
+                  <td className="border border-gray-300 p-3 font-semibold text-orange-600">7-10 Business Days</td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="text-gray-600 text-sm">
+              *Delivery times are estimates and may vary due to unforeseen circumstances like weather, public holidays, or operational delays.
+            </p>
+          </section>
+
+          {/* Shipping Charges */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <Package className="w-6 h-6 text-blue-600" />
+              2. Shipping Charges
+            </h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div className="bg-green-50 p-4 rounded-lg border border-green-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <CheckCircle className="w-5 h-5 text-green-600" />
+                  <span className="font-semibold text-green-800">FREE Shipping</span>
+                </div>
+                <p className="text-green-700">On orders above ₹5,000</p>
+              </div>
+              <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <Truck className="w-5 h-5 text-blue-600" />
+                  <span className="font-semibold text-blue-800">Standard Shipping</span>
+                </div>
+                <p className="text-blue-700">₹99 - ₹299 based on location and weight</p>
+              </div>
+            </div>
+            
+            <p className="text-gray-700 mb-4">
+              Shipping charges are calculated based on:
+            </p>
+            <ul className="list-disc pl-6 text-gray-700">
+              <li>Delivery location (pincode)</li>
+              <li>Product weight and dimensions</li>
+              <li>Chosen courier service</li>
+            </ul>
+            <p className="text-gray-700 mt-4">
+              The exact shipping charge will be displayed at checkout before payment.
+            </p>
+          </section>
+
+          {/* Order Processing */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">3. Order Processing</h2>
+            <div className="space-y-4">
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                  <span className="text-blue-600 font-semibold">1</span>
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Order Confirmation</h3>
+                  <p className="text-gray-600">You will receive an order confirmation email within minutes of placing your order.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                  <span className="text-blue-600 font-semibold">2</span>
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Processing Time</h3>
+                  <p className="text-gray-600">Orders are processed within 1-2 business days. Orders placed after 2 PM may be processed the next business day.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                  <span className="text-blue-600 font-semibold">3</span>
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Shipping Notification</h3>
+                  <p className="text-gray-600">Once shipped, you will receive an email/SMS with tracking details.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+                  <span className="text-green-600 font-semibold">4</span>
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Delivery</h3>
+                  <p className="text-gray-600">Our delivery partner will contact you before delivery. Please ensure someone is available to receive the order.</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Tracking */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <MapPin className="w-6 h-6 text-blue-600" />
+              4. Order Tracking
+            </h2>
+            <p className="text-gray-700 mb-4">
+              You can track your order using any of these methods:
+            </p>
+            <ul className="list-disc pl-6 text-gray-700 mb-4">
+              <li>Click the tracking link in your shipping confirmation email</li>
+              <li>Log in to your account and view order status</li>
+              <li>Use the AWB number on the courier's website</li>
+              <li>Contact our customer support team</li>
+            </ul>
+          </section>
+
+          {/* Delivery Instructions */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">5. Delivery Instructions</h2>
+            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-4">
+              <div className="flex items-start">
+                <AlertTriangle className="w-5 h-5 text-yellow-600 mr-2 mt-0.5" />
+                <p className="text-yellow-800">
+                  <strong>Important:</strong> Please inspect the package at the time of delivery. If you notice any external damage to the packaging, please refuse the delivery or note it on the delivery receipt.
+                </p>
+              </div>
+            </div>
+            <ul className="list-disc pl-6 text-gray-700">
+              <li>Ensure the delivery address provided is complete and accurate</li>
+              <li>Include a contact number where you can be reached</li>
+              <li>If you won't be available, arrange for someone to receive the delivery</li>
+              <li>For large appliances, ensure there is adequate space/access for delivery</li>
+            </ul>
+          </section>
+
+          {/* Serviceability */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">6. Delivery Serviceability</h2>
+            <p className="text-gray-700 mb-4">
+              We deliver to most locations across India. To check if we deliver to your area:
+            </p>
+            <ul className="list-disc pl-6 text-gray-700 mb-4">
+              <li>Enter your pincode on the product page</li>
+              <li>Add items to cart and proceed to checkout to see delivery options</li>
+              <li>Contact our customer support if your area is not serviceable</li>
+            </ul>
+            <p className="text-gray-700">
+              <strong>Non-Serviceable Areas:</strong> Some remote locations may not be serviceable. In such cases, we will inform you and process a refund if payment has been made.
+            </p>
+          </section>
+
+          {/* Installation */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">7. Installation Services</h2>
+            <p className="text-gray-700 mb-4">
+              For products requiring installation (washing machines, dishwashers, built-in appliances):
+            </p>
+            <ul className="list-disc pl-6 text-gray-700">
+              <li>Installation is arranged separately by the brand's authorized service team</li>
+              <li>You will receive a call from the brand within 48-72 hours of delivery</li>
+              <li>Installation charges (if any) will be communicated by the brand</li>
+              <li>Free installation is available for select products - check product page for details</li>
+            </ul>
+          </section>
+
+          {/* Contact */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">8. Contact Us</h2>
+            <p className="text-gray-700 mb-4">For shipping-related queries:</p>
+            <div className="bg-gray-50 p-4 rounded-lg">
+              <p className="text-gray-700"><strong>Email:</strong> orders@adityaretailonline.com</p>
+              <p className="text-gray-700"><strong>Phone:</strong> +91 98445 77440</p>
+              <p className="text-gray-700"><strong>WhatsApp:</strong> +91 98445 77440</p>
+              <p className="text-gray-700"><strong>Working Hours:</strong> Monday to Saturday, 9:00 AM - 6:00 PM</p>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ShippingPolicy;

@@ -1,0 +1,106 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { BACKEND_URL } from '../config/api';
+import { imgSrc } from '../utils/img';
+
+const BannerCarousel = () => {
+  const navigate = useNavigate();
+  const [banners, setBanners] = useState([]);
+  const [i, setI] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const [broken, setBroken] = useState({});
+  const seen = useRef(new Set());
+  const touchX = useRef(null);
+
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/api/banners/active/homepage`)
+      .then((r) => r.json())
+      .then((d) => setBanners((d.banners || []).filter((b) => b.image_url)))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (paused || banners.length < 2) return undefined;
+    const t = setInterval(() => setI((p) => (p + 1) % banners.length), 5000);
+    return () => clearInterval(t);
+  }, [paused, banners.length]);
+
+  useEffect(() => {
+    const b = banners[i];
+    if (b && !seen.current.has(b.id)) {
+      seen.current.add(b.id);
+      fetch(`${BACKEND_URL}/api/banners/${b.id}/track-view`, { method: 'POST' }).catch(() => {});
+    }
+  }, [i, banners]);
+
+  if (banners.length === 0) return null;
+  const go = (n) => setI((n + banners.length) % banners.length);
+
+  const open = (b) => {
+    fetch(`${BACKEND_URL}/api/banners/${b.id}/track-click`, { method: 'POST', keepalive: true }).catch(() => {});
+    const u = b.link_url;
+    if (!u) return;
+    if (/^https?:/.test(u)) window.open(u, '_blank', 'noopener');
+    else navigate(u);
+  };
+
+  return (
+    <div className="relative w-full overflow-hidden bg-gray-100 select-none"
+      onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}
+      onTouchStart={(e) => { touchX.current = e.touches[0].clientX; }}
+      onTouchEnd={(e) => {
+        if (touchX.current == null) return;
+        const dx = e.changedTouches[0].clientX - touchX.current;
+        if (Math.abs(dx) > 50) go(i + (dx < 0 ? 1 : -1));
+        touchX.current = null;
+      }}>
+      <div className="flex transition-transform duration-500 ease-out"
+        style={{ transform: `translateX(-${i * 100}%)` }}>
+        {banners.map((b) => (
+          <div key={b.id} className="w-full shrink-0 relative cursor-pointer"
+            style={{ aspectRatio: '16 / 6', minHeight: 160 }}
+            onClick={() => open(b)} role="link" aria-label={b.title}>
+            {broken[b.id] ? (
+              <div className="absolute inset-0 bg-gradient-to-r from-amber-700 to-orange-500" />
+            ) : (
+              <img src={imgSrc(b.image_url)} alt={b.title} draggable={false}
+                onError={() => setBroken((p) => ({ ...p, [b.id]: true }))}
+                className="absolute inset-0 h-full w-full object-cover" />
+            )}
+            <div className="absolute inset-0 bg-gradient-to-r from-black/60 via-black/20 to-transparent" />
+            <div className="absolute inset-y-0 left-0 flex max-w-[85%] flex-col justify-center px-6 md:px-16 text-white">
+              <h2 className="text-2xl md:text-5xl font-bold leading-tight">{b.title}</h2>
+              {b.description && <p className="mt-2 hidden md:block text-lg text-white/90 max-w-xl">{b.description}</p>}
+              {b.link_url && (
+                <span className="mt-4 inline-block self-start rounded-full bg-white px-5 py-2 text-sm font-semibold text-gray-900">
+                  Shop now
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {banners.length > 1 && (
+        <>
+          <button onClick={() => go(i - 1)} aria-label="Previous"
+            className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-white/80 p-2 shadow hover:bg-white">
+            <ChevronLeft className="h-6 w-6" />
+          </button>
+          <button onClick={() => go(i + 1)} aria-label="Next"
+            className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-white/80 p-2 shadow hover:bg-white">
+            <ChevronRight className="h-6 w-6" />
+          </button>
+          <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 gap-2">
+            {banners.map((b, n) => (
+              <button key={b.id} onClick={() => go(n)} aria-label={`Banner ${n + 1}`}
+                className={`h-2 rounded-full transition-all ${n === i ? 'w-6 bg-white' : 'w-2 bg-white/60'}`} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+export default BannerCarousel;

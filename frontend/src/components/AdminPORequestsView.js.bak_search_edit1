@@ -1,0 +1,1541 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { 
+  Check, X, Clock, Package, RefreshCw, Eye, 
+  AlertTriangle, Truck, MapPin, User, Phone, 
+  FileText, Calendar, Building, ChevronDown, Plus, Pencil, Search
+} from 'lucide-react';
+
+const AdminPORequestsView = ({ formatCurrency }) => {
+  const [poRequests, setPORequests] = useState([]);
+  const [stores, setStores] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedRequest, setSelectedRequest] = useState(null);
+  const [showApprovalModal, setShowApprovalModal] = useState(false);
+  const [approvalAction, setApprovalAction] = useState('approve');
+  const [deliveryLocation, setDeliveryLocation] = useState('');
+  const [rejectionReason, setRejectionReason] = useState('');
+  const [processing, setProcessing] = useState(false);
+  const [message, setMessage] = useState({ type: '', text: '' });
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingRequest, setEditingRequest] = useState(null);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+
+  useEffect(() => {
+    fetchPORequests();
+    fetchStores();
+  }, []);
+
+  const fetchPORequests = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(`${BACKEND_URL}/api/stock-transfer/po-requests/all`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        setPORequests(data.requests || []);
+      }
+    } catch (error) {
+      console.error('Error fetching PO requests:', error);
+      setMessage({ type: 'error', text: 'Failed to load PO requests' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchStores = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/invoices/offline/stores`);
+      const data = await response.json();
+      if (data.stores) {
+        setStores(data.stores);
+      }
+    } catch (error) {
+      console.error('Error fetching stores:', error);
+    }
+  };
+
+  const handleApprove = async () => {
+    if (!selectedRequest) return;
+    
+    if (approvalAction === 'approve' && !deliveryLocation) {
+      setMessage({ type: 'error', text: 'Please select a delivery location' });
+      return;
+    }
+
+    setProcessing(true);
+    try {
+      const response = await fetch(
+        `${BACKEND_URL}/api/stock-transfer/po-requests/${selectedRequest.id}/approve`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: approvalAction,
+            delivery_location: (() => {
+              const selStore = stores.find(s => s.code === deliveryLocation);
+              return selStore ? `${selStore.name} (${selStore.code})` : deliveryLocation;
+            })(),
+            rejection_reason: approvalAction === 'reject' ? rejectionReason : null,
+            approved_by: localStorage.getItem('adminUser') 
+              ? JSON.parse(localStorage.getItem('adminUser')).email 
+              : 'admin'
+          })
+        }
+      );
+
+      const data = await response.json();
+      
+      if (response.ok) {
+        setMessage({ 
+          type: 'success', 
+          text: approvalAction === 'approve' 
+            ? 'PO Request approved successfully! It will now appear in Warehouse for GRN.' 
+            : 'PO Request rejected.'
+        });
+        fetchPORequests();
+        setShowApprovalModal(false);
+        setSelectedRequest(null);
+        setDeliveryLocation('');
+        setRejectionReason('');
+      } else {
+        setMessage({ type: 'error', text: data.detail || 'Failed to process request' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Error processing request: ' + error.message });
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const formatDate = (dateStr) => {
+    if (!dateStr) return 'N/A';
+    return new Date(dateStr).toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  const getStatusBadge = (status) => {
+    const styles = {
+      'pending': 'bg-yellow-100 text-yellow-700 border-yellow-200',
+      'pending_review': 'bg-yellow-100 text-yellow-700 border-yellow-200',
+      'approved': 'bg-green-100 text-green-700 border-green-200',
+      'rejected': 'bg-red-100 text-red-700 border-red-200',
+      'po_generated': 'bg-blue-100 text-blue-700 border-blue-200',
+      'ordered': 'bg-purple-100 text-purple-700 border-purple-200',
+      'draft': 'bg-gray-100 text-gray-600 border-gray-200'
+    };
+    
+    const icons = {
+      'pending': <Clock className="w-3 h-3" />,
+      'pending_review': <Clock className="w-3 h-3" />,
+      'approved': <Check className="w-3 h-3" />,
+      'rejected': <X className="w-3 h-3" />,
+      'po_generated': <FileText className="w-3 h-3" />,
+      'ordered': <Truck className="w-3 h-3" />,
+      'draft': <FileText className="w-3 h-3" />
+    };
+
+    return (
+      <span className={`inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-full border ${styles[status] || styles.draft}`}>
+        {icons[status] || icons.draft}
+        {status?.replace('_', ' ') || 'pending'}
+      </span>
+    );
+  };
+
+  const filteredRequests = filterStatus === 'all' 
+    ? poRequests 
+    : poRequests.filter(req => req.status === filterStatus);
+
+  const pendingCount = poRequests.filter(req => 
+    req.status === 'pending' || req.status === 'pending_review'
+  ).length;
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-xl shadow-sm p-8">
+        <div className="flex items-center justify-center">
+          <RefreshCw className="w-6 h-6 animate-spin text-blue-600" />
+          <span className="ml-2 text-gray-600">Loading PO requests...</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Message */}
+      {message.text && (
+        <div className={`p-4 rounded-lg flex items-center gap-2 ${
+          message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
+        }`}>
+          {message.type === 'success' ? <Check className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
+          {message.text}
+          <button onClick={() => setMessage({ type: '', text: '' })} className="ml-auto">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Header */}
+      <div className="bg-white rounded-xl shadow-sm">
+        <div className="p-4 border-b flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-800">Purchase Order Requests</h2>
+            <p className="text-sm text-gray-500">
+              Review and approve PO requests from stores
+              {pendingCount > 0 && (
+                <span className="ml-2 px-2 py-0.5 bg-yellow-100 text-yellow-700 rounded-full text-xs font-medium">
+                  {pendingCount} pending approval
+                </span>
+              )}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {/* Filter */}
+            <select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+              className="px-3 py-2 border rounded-lg text-sm"
+            >
+              <option value="all">All Status</option>
+              <option value="pending">Pending</option>
+              <option value="pending_review">Pending Review</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="ordered">Ordered</option>
+            </select>
+            <button
+              onClick={fetchPORequests}
+              className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg"
+              title="Refresh"
+            >
+              <RefreshCw className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
+            >
+              <Plus className="w-4 h-4" />
+              Create PO Request
+            </button>
+          </div>
+        </div>
+
+        {/* Stats */}
+        <div className="p-4 border-b bg-gray-50">
+          <div className="grid grid-cols-5 gap-4">
+            <div className="text-center p-3 bg-white rounded-lg shadow-sm">
+              <p className="text-2xl font-bold text-yellow-600">{pendingCount}</p>
+              <p className="text-xs text-gray-500">Pending Approval</p>
+            </div>
+            <div className="text-center p-3 bg-white rounded-lg shadow-sm">
+              <p className="text-2xl font-bold text-green-600">
+                {poRequests.filter(req => req.status === 'approved').length}
+              </p>
+              <p className="text-xs text-gray-500">Approved</p>
+            </div>
+            <div className="text-center p-3 bg-white rounded-lg shadow-sm">
+              <p className="text-2xl font-bold text-blue-600">
+                {poRequests.filter(req => req.status === 'po_generated').length}
+              </p>
+              <p className="text-xs text-gray-500">PO Generated</p>
+            </div>
+            <div className="text-center p-3 bg-white rounded-lg shadow-sm">
+              <p className="text-2xl font-bold text-purple-600">
+                {poRequests.filter(req => req.status === 'ordered').length}
+              </p>
+              <p className="text-xs text-gray-500">Ordered</p>
+            </div>
+            <div className="text-center p-3 bg-white rounded-lg shadow-sm">
+              <p className="text-2xl font-bold text-red-600">
+                {poRequests.filter(req => req.status === 'rejected').length}
+              </p>
+              <p className="text-xs text-gray-500">Rejected</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Request #</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Requesting Store</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Supplier</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Items</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Amount</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {filteredRequests.map((request) => (
+                <tr key={request.id} className={`hover:bg-gray-50 ${
+                  (request.status === 'pending' || request.status === 'pending_review') 
+                    ? 'bg-yellow-50/30' 
+                    : ''
+                }`}>
+                  <td className="px-4 py-3 text-sm font-medium text-blue-600">
+                    {request.request_number || `POR-${request.id?.slice(0, 8)}`}
+                  </td>
+                  <td className="px-4 py-3 text-sm">
+                    <div className="flex items-center gap-2">
+                      <Building className="w-4 h-4 text-gray-400" />
+                      <span className="text-gray-800">{request.store_name || request.requesting_store || 'N/A'}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-800">
+                    {request.supplier_name || request.vendor_name || 'Not specified'}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-500">
+                    {request.items?.length || 0} items
+                  </td>
+                  <td className="px-4 py-3 text-sm font-medium text-gray-800">
+                    {formatCurrency ? formatCurrency(request.total_amount || 0) : `₹${(request.total_amount || 0).toLocaleString()}`}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-500">
+                    {formatDate(request.created_at)}
+                  </td>
+                  <td className="px-4 py-3">
+                    {getStatusBadge(request.status)}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setSelectedRequest(request)}
+                        className="p-1.5 text-gray-500 hover:bg-gray-100 rounded"
+                        title="View Details"
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                      {(request.status === 'pending' || request.status === 'pending_review') && (
+                        <>
+                          <button
+                            onClick={() => {
+                              setEditingRequest(request);
+                              setShowEditModal(true);
+                            }}
+                            className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
+                            title="Edit"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              setSelectedRequest(request);
+                              setApprovalAction('approve');
+                              setShowApprovalModal(true);
+                            }}
+                            className="p-1.5 text-green-600 hover:bg-green-50 rounded"
+                            title="Approve"
+                          >
+                            <Check className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              setSelectedRequest(request);
+                              setApprovalAction('reject');
+                              setShowApprovalModal(true);
+                            }}
+                            className="p-1.5 text-red-600 hover:bg-red-50 rounded"
+                            title="Reject"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {filteredRequests.length === 0 && (
+            <div className="p-8 text-center text-gray-500">
+              <Package className="w-12 h-12 mx-auto mb-4 text-gray-300" />
+              <p className="text-lg font-medium mb-2">No PO requests found</p>
+              <p className="text-sm">
+                {filterStatus !== 'all' 
+                  ? `No requests with status "${filterStatus}"`
+                  : 'Stores will create PO requests when they need inventory'
+                }
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* View Details Modal */}
+      {selectedRequest && !showApprovalModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-hidden">
+            <div className="p-4 border-b bg-blue-600 text-white flex items-center justify-between">
+              <h3 className="text-lg font-bold">PO Request Details</h3>
+              <button onClick={() => setSelectedRequest(null)} className="p-1 hover:bg-white/20 rounded">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+              {/* Request Info */}
+              <div className="grid grid-cols-2 gap-6 mb-6">
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 uppercase">Request Number</label>
+                    <p className="text-lg font-semibold text-blue-600">
+                      {selectedRequest.request_number || `POR-${selectedRequest.id?.slice(0, 8)}`}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 uppercase">Requesting Store</label>
+                    <p className="text-gray-800 flex items-center gap-2">
+                      <Building className="w-4 h-4 text-gray-400" />
+                      {selectedRequest.store_name || selectedRequest.requesting_store || 'N/A'}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 uppercase">Request Date</label>
+                    <p className="text-gray-800 flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-gray-400" />
+                      {formatDate(selectedRequest.created_at)}
+                    </p>
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 uppercase">Status</label>
+                    <div className="mt-1">{getStatusBadge(selectedRequest.status)}</div>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 uppercase">Supplier/Vendor</label>
+                    <p className="text-gray-800">
+                      {selectedRequest.supplier_name || selectedRequest.vendor_name || 'Not specified'}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 uppercase">Urgency</label>
+                    <p className={`capitalize ${
+                      selectedRequest.urgency === 'urgent' ? 'text-red-600 font-medium' : 
+                      selectedRequest.urgency === 'high' ? 'text-orange-600' : 'text-gray-600'
+                    }`}>
+                      {selectedRequest.urgency || 'Normal'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Delivery Location */}
+              {selectedRequest.delivery_location && (
+                <div className="mb-6 p-4 bg-blue-50 rounded-lg">
+                  <label className="text-xs font-medium text-blue-800 uppercase flex items-center gap-2">
+                    <MapPin className="w-4 h-4" /> Delivery Location
+                  </label>
+                  <p className="text-gray-800 mt-1">{selectedRequest.delivery_location}</p>
+                </div>
+              )}
+
+              {/* Items */}
+              <div className="mb-6">
+                <label className="text-xs font-medium text-gray-500 uppercase mb-2 block">Requested Items</label>
+                <div className="border rounded-lg overflow-hidden">
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Product/Model</th>
+                        <th className="px-4 py-2 text-center text-xs font-medium text-gray-500">Quantity</th>
+                        <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">Unit Price</th>
+                        <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {selectedRequest.items?.map((item, idx) => (
+                        <tr key={idx}>
+                          <td className="px-4 py-3 text-sm">
+                            <p className="font-medium text-gray-800">{item.product_name || item.model_number}</p>
+                            {item.model_number && item.product_name && (
+                              <p className="text-xs text-gray-500">{item.model_number}</p>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-center">{item.quantity}</td>
+                          <td className="px-4 py-3 text-sm text-right">
+                            {formatCurrency ? formatCurrency(item.unit_price || item.cost_price || 0) : `₹${(item.unit_price || item.cost_price || 0).toLocaleString()}`}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-right font-medium">
+                            {formatCurrency ? formatCurrency((item.quantity || 0) * (item.unit_price || item.cost_price || 0)) : `₹${((item.quantity || 0) * (item.unit_price || item.cost_price || 0)).toLocaleString()}`}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-gray-50">
+                      <tr>
+                        <td colSpan="3" className="px-4 py-3 text-sm font-medium text-right">Total Amount:</td>
+                        <td className="px-4 py-3 text-sm font-bold text-right text-blue-600">
+                          {formatCurrency ? formatCurrency(selectedRequest.total_amount || 0) : `₹${(selectedRequest.total_amount || 0).toLocaleString()}`}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+
+              {/* Notes */}
+              {selectedRequest.notes && (
+                <div className="mb-6">
+                  <label className="text-xs font-medium text-gray-500 uppercase">Notes</label>
+                  <p className="text-gray-700 mt-1 p-3 bg-gray-50 rounded-lg">{selectedRequest.notes}</p>
+                </div>
+              )}
+
+              {/* Approval Info */}
+              {selectedRequest.approved_by && (
+                <div className="p-4 bg-green-50 rounded-lg">
+                  <label className="text-xs font-medium text-green-800 uppercase">Approved By</label>
+                  <p className="text-gray-800 mt-1">{selectedRequest.approved_by}</p>
+                  {selectedRequest.approved_at && (
+                    <p className="text-xs text-gray-500 mt-1">on {formatDate(selectedRequest.approved_at)}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Rejection Info */}
+              {selectedRequest.status === 'rejected' && selectedRequest.rejection_reason && (
+                <div className="p-4 bg-red-50 rounded-lg">
+                  <label className="text-xs font-medium text-red-800 uppercase">Rejection Reason</label>
+                  <p className="text-gray-800 mt-1">{selectedRequest.rejection_reason}</p>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t bg-gray-50 flex justify-between">
+              <button
+                onClick={() => setSelectedRequest(null)}
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+              >
+                Close
+              </button>
+              {(selectedRequest.status === 'pending' || selectedRequest.status === 'pending_review') && (
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setApprovalAction('reject');
+                      setShowApprovalModal(true);
+                    }}
+                    className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2"
+                  >
+                    <X className="w-4 h-4" /> Reject
+                  </button>
+                  <button
+                    onClick={() => {
+                      setApprovalAction('approve');
+                      setShowApprovalModal(true);
+                    }}
+                    className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2"
+                  >
+                    <Check className="w-4 h-4" /> Approve
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Approval Modal */}
+      {showApprovalModal && selectedRequest && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg">
+            <div className={`p-4 border-b ${approvalAction === 'approve' ? 'bg-green-600' : 'bg-red-600'} text-white flex items-center justify-between`}>
+              <h3 className="text-lg font-bold">
+                {approvalAction === 'approve' ? 'Approve PO Request' : 'Reject PO Request'}
+              </h3>
+              <button onClick={() => setShowApprovalModal(false)} className="p-1 hover:bg-white/20 rounded">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6">
+              <div className="mb-4 p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-500">Request Number</p>
+                <p className="font-semibold text-blue-600">
+                  {selectedRequest.request_number || `POR-${selectedRequest.id?.slice(0, 8)}`}
+                </p>
+                <p className="text-sm text-gray-500 mt-2">From Store</p>
+                <p className="font-medium">{selectedRequest.store_name || selectedRequest.requesting_store}</p>
+              </div>
+
+              {approvalAction === 'approve' ? (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Delivery Location *
+                    </label>
+                    <select
+                      value={deliveryLocation}
+                      onChange={(e) => setDeliveryLocation(e.target.value)}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500"
+                      required
+                    >
+                      <option value="">-- Select Delivery Location --</option>
+                      {stores.map(store => (
+                        <option key={store.code || store.id} value={store.code}>
+                          {store.name} ({store.code})
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Select where the goods should be delivered
+                    </p>
+                  </div>
+                  
+                  <div className="p-3 bg-green-50 rounded-lg text-sm text-green-700">
+                    <p className="font-medium">After Approval:</p>
+                    <ul className="list-disc list-inside mt-1 text-xs space-y-1">
+                      <li>Store will be notified of approval</li>
+                      <li>PO will appear in Warehouse for GRN entry</li>
+                      <li>It will reflect in Accounting section</li>
+                    </ul>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Rejection Reason
+                  </label>
+                  <textarea
+                    value={rejectionReason}
+                    onChange={(e) => setRejectionReason(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-red-500"
+                    rows={3}
+                    placeholder="Enter reason for rejection..."
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t bg-gray-50 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setShowApprovalModal(false);
+                  setDeliveryLocation('');
+                  setRejectionReason('');
+                }}
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                disabled={processing}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleApprove}
+                disabled={processing || (approvalAction === 'approve' && !deliveryLocation)}
+                className={`px-4 py-2 text-white rounded-lg flex items-center gap-2 ${
+                  approvalAction === 'approve' 
+                    ? 'bg-green-600 hover:bg-green-700 disabled:bg-green-300' 
+                    : 'bg-red-600 hover:bg-red-700 disabled:bg-red-300'
+                }`}
+              >
+                {processing ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Processing...
+                  </>
+                ) : (
+                  <>
+                    {approvalAction === 'approve' ? <Check className="w-4 h-4" /> : <X className="w-4 h-4" />}
+                    {approvalAction === 'approve' ? 'Approve' : 'Reject'}
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showEditModal && editingRequest && (
+        <EditPORequestModal
+          request={editingRequest}
+          onClose={() => { setShowEditModal(false); setEditingRequest(null); }}
+          onSuccess={() => {
+            setShowEditModal(false);
+            setEditingRequest(null);
+            fetchPORequests();
+          }}
+        />
+      )}
+
+      {showCreateModal && (
+        <AdminCreatePORequestModal
+          stores={stores}
+          onClose={() => setShowCreateModal(false)}
+          onSuccess={() => {
+            setShowCreateModal(false);
+            fetchPORequests();
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+const EditPORequestModal = ({ request, onClose, onSuccess }) => {
+  const [items, setItems] = useState(
+    (request.items || []).map(i => ({
+      model_number: i.model_number || '',
+      product_name: i.product_name || '',
+      sku: i.sku || '',
+      product_id: i.product_id || '',
+      quantity: i.quantity || 1,
+      cost_price: i.cost_price || i.unit_price || 0,
+      notes: i.notes || ''
+    }))
+  );
+  const [supplierName, setSupplierName] = useState(request.supplier_name || request.vendor_name || '');
+  const [urgency, setUrgency] = useState(request.urgency || 'normal');
+  const [notes, setNotes] = useState(request.notes || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const updateItem = (index, field, value) => {
+    const next = [...items];
+    next[index][field] = value;
+    setItems(next);
+  };
+
+  const addItem = () => {
+    setItems([...items, { model_number: '', product_name: '', sku: '', product_id: '', quantity: 1, cost_price: 0, notes: '' }]);
+  };
+
+  const removeItem = (index) => {
+    if (items.length > 1) setItems(items.filter((_, i) => i !== index));
+  };
+
+  const handleSave = async () => {
+    setError('');
+    setSaving(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/stock-transfer/po-requests/${request.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: items.map(i => ({
+            ...i,
+            quantity: parseInt(i.quantity) || 0,
+            cost_price: parseFloat(i.cost_price) || 0
+          })),
+          supplier_name: supplierName,
+          urgency,
+          notes
+        })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        onSuccess();
+      } else {
+        setError(data.detail || 'Failed to update request');
+      }
+    } catch (err) {
+      setError('Connection error: ' + err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const total = items.reduce((sum, i) => sum + (parseFloat(i.quantity) || 0) * (parseFloat(i.cost_price) || 0), 0);
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+        <div className="p-4 border-b bg-blue-600 text-white flex items-center justify-between">
+          <h3 className="text-lg font-bold">Edit PO Request</h3>
+          <button onClick={onClose} className="p-1 hover:bg-white/20 rounded">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+              {error}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Items</label>
+            <div className="grid grid-cols-12 gap-2 mb-1 px-1">
+              <span className="col-span-3 text-xs font-medium text-gray-500 uppercase">Model / SKU</span>
+              <span className="col-span-3 text-xs font-medium text-gray-500 uppercase">Product Name</span>
+              <span className="col-span-2 text-xs font-medium text-gray-500 uppercase">Quantity</span>
+              <span className="col-span-2 text-xs font-medium text-gray-500 uppercase">Unit Price</span>
+              <span className="col-span-1 text-xs font-medium text-gray-500 uppercase text-right">Total</span>
+              <span className="col-span-1"></span>
+            </div>
+            <div className="space-y-2">
+              {items.map((item, idx) => (
+                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                  <input
+                    className="col-span-3 px-2 py-1.5 border rounded text-sm"
+                    placeholder="Model / SKU"
+                    value={item.model_number}
+                    onChange={(e) => updateItem(idx, 'model_number', e.target.value)}
+                  />
+                  <input
+                    className="col-span-3 px-2 py-1.5 border rounded text-sm"
+                    placeholder="Product name"
+                    value={item.product_name}
+                    onChange={(e) => updateItem(idx, 'product_name', e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    className="col-span-2 px-2 py-1.5 border rounded text-sm"
+                    placeholder="Qty"
+                    value={item.quantity}
+                    onChange={(e) => updateItem(idx, 'quantity', e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    className="col-span-2 px-2 py-1.5 border rounded text-sm"
+                    placeholder="Unit price"
+                    value={item.cost_price}
+                    onChange={(e) => updateItem(idx, 'cost_price', e.target.value)}
+                  />
+                  <span className="col-span-1 text-xs text-gray-600 text-right">
+                    ₹{((parseFloat(item.quantity) || 0) * (parseFloat(item.cost_price) || 0)).toLocaleString()}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeItem(idx)}
+                    className="col-span-1 p-1 text-red-500 hover:bg-red-50 rounded"
+                    disabled={items.length === 1}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button type="button" onClick={addItem} className="mt-2 text-sm text-blue-600 hover:text-blue-700">
+              + Add Item
+            </button>
+            <p className="mt-2 text-sm font-medium text-gray-700">Estimated total: ₹{total.toLocaleString()}</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Supplier / Vendor</label>
+              <input
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+                value={supplierName}
+                onChange={(e) => setSupplierName(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Urgency</label>
+              <select
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+                value={urgency}
+                onChange={(e) => setUrgency(e.target.value)}
+              >
+                <option value="normal">Normal</option>
+                <option value="urgent">Urgent</option>
+                <option value="critical">Critical</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+            <textarea
+              className="w-full px-3 py-2 border rounded-lg text-sm"
+              rows={3}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="p-4 border-t bg-gray-50 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300" disabled={saving}>
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AdminCreatePORequestModal = ({ stores, onClose, onSuccess }) => {
+  const [storeId, setStoreId] = useState('');
+  const [items, setItems] = useState([{ model_number: '', product_name: '', product_id: '', quantity: 1, notes: '' }]);
+  const [urgency, setUrgency] = useState('normal');
+  const [notes, setNotes] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const [products, setProducts] = useState([]);
+  const [hsnCodes, setHsnCodes] = useState([]);
+  const [productSearch, setProductSearch] = useState({});
+  const [showAddProductModal, setShowAddProductModal] = useState(false);
+  const [addProductForIndex, setAddProductForIndex] = useState(null);
+  const [newProduct, setNewProduct] = useState({
+    name: '',
+    brand: '',
+    model_number: '',
+    price: 0,
+    hsn_code: '',
+    category: '',
+    description: '',
+    current_stock: 0
+  });
+  const [addProductLoading, setAddProductLoading] = useState(false);
+  const [newProductHsnSuggestions, setNewProductHsnSuggestions] = useState([]);
+  const [manualHsnMode, setManualHsnMode] = useState(false);
+  const [manualHsnGstRate, setManualHsnGstRate] = useState(18);
+
+  useEffect(() => {
+    fetchProducts();
+    fetchHSNCodes();
+  }, []);
+
+  const fetchProducts = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products?limit=1000`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        setProducts(data.products);
+      }
+    } catch (err) {
+      console.error('Failed to fetch products');
+    }
+  };
+
+  const fetchHSNCodes = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/hsn/?active_only=true`);
+      const data = await response.json();
+      setHsnCodes(data);
+    } catch (err) {
+      console.error('Failed to fetch HSN codes');
+    }
+  };
+
+  const getFilteredProducts = (searchTerm) => {
+    if (!searchTerm) return products;
+    const term = searchTerm.toLowerCase();
+    return products.filter(p =>
+      p.name.toLowerCase().includes(term) ||
+      p.brand?.toLowerCase().includes(term) ||
+      p.model_number?.toLowerCase().includes(term)
+    );
+  };
+
+  const handleProductSelect = (index, productId) => {
+    const product = products.find(p => p.id === productId);
+    if (product) {
+      const next = [...items];
+      next[index] = {
+        ...next[index],
+        product_id: product.id,
+        product_name: product.name,
+        model_number: product.model_number || product.sku || next[index].model_number
+      };
+      setItems(next);
+    }
+  };
+
+  const fetchNewProductHsnSuggestion = async (productName) => {
+    if (!productName || productName.length < 2) {
+      setNewProductHsnSuggestions([]);
+      return;
+    }
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/hsn/suggest?product_name=${encodeURIComponent(productName)}`);
+      const data = await response.json();
+      if (data.suggestions && data.suggestions.length > 0) {
+        setNewProductHsnSuggestions(data.suggestions);
+        if (!newProduct.hsn_code && data.suggestions[0].match_score >= 50) {
+          setNewProduct(prev => ({ ...prev, hsn_code: data.suggestions[0].code }));
+        }
+      } else {
+        setNewProductHsnSuggestions([]);
+      }
+    } catch (err) {
+      console.error('Error fetching HSN suggestions:', err);
+    }
+  };
+
+  const openAddProductModal = (index) => {
+    setAddProductForIndex(index);
+    setNewProduct({
+      name: '',
+      brand: '',
+      model_number: '',
+      price: 0,
+      hsn_code: '',
+      category: '',
+      description: '',
+      current_stock: 0
+    });
+    setManualHsnMode(false);
+    setManualHsnGstRate(18);
+    setNewProductHsnSuggestions([]);
+    setShowAddProductModal(true);
+  };
+
+  const handleCreateProduct = async () => {
+    if (!newProduct.name || !newProduct.price || !newProduct.hsn_code) {
+      setError('Please fill in product name, price, and HSN code');
+      return;
+    }
+
+    setAddProductLoading(true);
+    try {
+      let gstRate = 18.0;
+      const existingHsn = hsnCodes.find(h => h.code === newProduct.hsn_code);
+
+      if (manualHsnMode && !existingHsn) {
+        try {
+          const hsnResponse = await fetch(`${BACKEND_URL}/api/hsn/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              code: newProduct.hsn_code,
+              description: `HSN ${newProduct.hsn_code} - ${newProduct.category || newProduct.name}`,
+              gst_rate: manualHsnGstRate,
+              category: newProduct.category || 'Uncategorized',
+              is_active: true
+            })
+          });
+          if (hsnResponse.ok) {
+            await fetchHSNCodes();
+            gstRate = manualHsnGstRate;
+          }
+        } catch (hsnError) {
+          console.log('HSN code might already exist or failed to save:', hsnError);
+        }
+        gstRate = manualHsnGstRate;
+      } else if (existingHsn) {
+        gstRate = existingHsn.gst_rate || 18.0;
+      }
+
+      const response = await fetch(`${BACKEND_URL}/api/products`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...newProduct,
+          id: `PROD-${Date.now()}`,
+          price: parseFloat(newProduct.price),
+          current_stock: parseInt(newProduct.current_stock) || 0
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        await fetchProducts();
+
+        if (addProductForIndex !== null) {
+          const next = [...items];
+          next[addProductForIndex] = {
+            ...next[addProductForIndex],
+            product_id: data.product?.id || data.id,
+            product_name: newProduct.name,
+            model_number: newProduct.model_number || next[addProductForIndex].model_number
+          };
+          setItems(next);
+        }
+        setShowAddProductModal(false);
+        setAddProductForIndex(null);
+      } else {
+        setError(data.detail || 'Failed to add product');
+      }
+    } catch (err) {
+      setError('Connection error: ' + err.message);
+    } finally {
+      setAddProductLoading(false);
+    }
+  };
+
+  const addItem = () => setItems([...items, { model_number: '', product_name: '', product_id: '', quantity: 1, notes: '' }]);
+  const removeItem = (index) => { if (items.length > 1) setItems(items.filter((_, i) => i !== index)); };
+  const updateItem = (index, field, value) => {
+    const next = [...items];
+    next[index][field] = value;
+    setItems(next);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+
+    if (!storeId) {
+      setError('Please select a requesting store');
+      return;
+    }
+
+    const validItems = items.filter(item => item.model_number.trim() && item.quantity > 0);
+    if (validItems.length === 0) {
+      setError('Please add at least one item with model number and quantity');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/stock-transfer/po-request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_id: storeId,
+          items: validItems,
+          urgency,
+          notes
+        })
+      });
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        onSuccess();
+      } else {
+        setError(data.detail || 'Failed to create PO request');
+      }
+    } catch (err) {
+      setError('Connection error: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="p-6 border-b flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-gray-800">Create PO Request</h2>
+            <p className="text-sm text-gray-500">Raise a procurement request on behalf of a store</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4" />
+              {error}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Requesting Store *</label>
+            <select
+              value={storeId}
+              onChange={(e) => setStoreId(e.target.value)}
+              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+              required
+            >
+              <option value="">-- Select Store --</option>
+              {stores.map(store => (
+                <option key={store.code || store.id} value={store.id}>
+                  {store.name} ({store.code})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Items Required</label>
+            <div className="space-y-3">
+              {items.map((item, index) => (
+                <div key={index} className="border rounded-lg p-3 space-y-2">
+                  <div className="flex gap-2 items-start">
+                    <div className="flex-1 relative">
+                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="text"
+                        value={productSearch[index] || ''}
+                        onChange={(e) => setProductSearch({ ...productSearch, [index]: e.target.value })}
+                        placeholder="Type model no, brand or product name to search..."
+                        className="w-full pl-8 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+                      />
+                      {productSearch[index] && productSearch[index].length > 1 && (
+                        <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                          {getFilteredProducts(productSearch[index]).length === 0 ? (
+                            <div className="p-3 text-sm text-gray-500">No products found matching "{productSearch[index]}"</div>
+                          ) : (
+                            getFilteredProducts(productSearch[index]).slice(0, 10).map(product => (
+                              <div
+                                key={product.id}
+                                onClick={() => {
+                                  handleProductSelect(index, product.id);
+                                  setProductSearch({ ...productSearch, [index]: '' });
+                                }}
+                                className="p-3 hover:bg-blue-50 cursor-pointer border-b last:border-b-0"
+                              >
+                                <div className="font-medium text-gray-900 text-sm">{product.name}</div>
+                                <div className="text-xs text-gray-500 flex gap-2 mt-1">
+                                  <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{product.brand}</span>
+                                  {product.model_number && <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{product.model_number}</span>}
+                                  <span className={`px-1.5 py-0.5 rounded ${(product.stock_quantity ?? product.current_stock ?? 0) > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                    Stock: {product.stock_quantity ?? product.current_stock ?? 0}
+                                  </span>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <select
+                      value={item.product_id || ''}
+                      onChange={(e) => { if (e.target.value) handleProductSelect(index, e.target.value); }}
+                      className="w-40 px-2 py-2 border rounded-lg text-sm bg-white"
+                    >
+                      <option value="">All Products ▼</option>
+                      {products.map(product => (
+                        <option key={product.id} value={product.id}>
+                          {product.model_number || product.name?.substring(0, 30)}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => openAddProductModal(index)}
+                      className="px-2 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 flex items-center gap-1 whitespace-nowrap"
+                      title="Add new product to inventory"
+                    >
+                      <Package className="w-4 h-4" />
+                      + New
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeItem(index)}
+                      className="p-2 text-red-500 hover:bg-red-50 rounded-lg"
+                      disabled={items.length === 1}
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={item.model_number}
+                      onChange={(e) => updateItem(index, 'model_number', e.target.value)}
+                      placeholder="Model Number / SKU"
+                      className="flex-1 px-3 py-2 border rounded-lg text-sm"
+                      required
+                    />
+                    <input
+                      type="number"
+                      value={item.quantity}
+                      onChange={(e) => updateItem(index, 'quantity', parseInt(e.target.value) || 1)}
+                      placeholder="Qty"
+                      min="1"
+                      className="w-24 px-3 py-2 border rounded-lg text-sm"
+                      required
+                    />
+                    <input
+                      type="text"
+                      value={item.notes}
+                      onChange={(e) => updateItem(index, 'notes', e.target.value)}
+                      placeholder="Notes (optional)"
+                      className="flex-1 px-3 py-2 border rounded-lg text-sm"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button type="button" onClick={addItem} className="mt-2 text-sm text-blue-600 hover:text-blue-700 flex items-center gap-1">
+              <Plus className="w-4 h-4" /> Add Another Item
+            </button>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Urgency</label>
+            <div className="flex gap-2">
+              {['normal', 'urgent', 'critical'].map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  onClick={() => setUrgency(level)}
+                  className={`px-4 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                    urgency === level
+                      ? level === 'critical' ? 'bg-red-100 border-red-300 text-red-700'
+                        : level === 'urgent' ? 'bg-orange-100 border-orange-300 text-orange-700'
+                        : 'bg-blue-100 border-blue-300 text-blue-700'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  {level.charAt(0).toUpperCase() + level.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Additional Notes</label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={3}
+              className="w-full px-3 py-2 border rounded-lg text-sm"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            >
+              {loading ? 'Submitting...' : 'Submit Request'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    {showAddProductModal && (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] p-4">
+        <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-blue-600 text-white p-4 rounded-t-lg flex justify-between items-center">
+            <h3 className="text-lg font-semibold flex items-center gap-2">
+              <Package className="w-5 h-5" />
+              Add New Product
+            </h3>
+            <button
+              type="button"
+              onClick={() => setShowAddProductModal(false)}
+              className="text-white hover:bg-blue-700 p-1 rounded"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="p-6 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Product Name *</label>
+              <input
+                type="text"
+                value={newProduct.name}
+                onChange={(e) => {
+                  setNewProduct({ ...newProduct, name: e.target.value });
+                  fetchNewProductHsnSuggestion(e.target.value);
+                }}
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="e.g., Bosch Built-in Oven 60cm"
+                required
+              />
+              {newProductHsnSuggestions.length > 0 && (
+                <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
+                  <div className="text-xs font-medium text-blue-800 mb-1">
+                    Suggested HSN Codes based on product name:
+                  </div>
+                  <div className="space-y-1">
+                    {newProductHsnSuggestions.slice(0, 3).map((suggestion, sIdx) => (
+                      <button
+                        key={sIdx}
+                        type="button"
+                        onClick={() => {
+                          setNewProduct({ ...newProduct, hsn_code: suggestion.code });
+                          setNewProductHsnSuggestions([]);
+                        }}
+                        className={`w-full text-left px-2 py-1 rounded text-xs hover:bg-blue-100 transition-colors ${
+                          newProduct.hsn_code === suggestion.code ? 'bg-blue-200 border border-blue-400' : 'bg-white'
+                        }`}
+                      >
+                        <span className="font-semibold text-blue-700">{suggestion.code}</span>
+                        <span className="text-gray-600 ml-2">{suggestion.category || suggestion.description?.substring(0, 30)}</span>
+                        <span className="text-green-600 ml-2 font-medium">{suggestion.gst_rate}% GST</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Brand</label>
+                <input
+                  type="text"
+                  value={newProduct.brand}
+                  onChange={(e) => setNewProduct({ ...newProduct, brand: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g., Bosch, Siemens"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Model Number</label>
+                <input
+                  type="text"
+                  value={newProduct.model_number}
+                  onChange={(e) => setNewProduct({ ...newProduct, model_number: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g., HBA534BS0"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Selling Price (₹) *</label>
+                <input
+                  type="number"
+                  value={newProduct.price}
+                  onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="Price incl. GST"
+                  required
+                  step="0.01"
+                  min="0"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Opening Stock</label>
+                <input
+                  type="number"
+                  value={newProduct.current_stock}
+                  onChange={(e) => setNewProduct({ ...newProduct, current_stock: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="Initial stock quantity"
+                  min="0"
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">HSN Code *</label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setManualHsnMode(!manualHsnMode);
+                    if (!manualHsnMode) {
+                      setNewProduct({ ...newProduct, hsn_code: '' });
+                    }
+                  }}
+                  className="text-xs text-blue-600 hover:text-blue-800 underline"
+                >
+                  {manualHsnMode ? 'Select from list' : 'Enter manually'}
+                </button>
+              </div>
+
+              {manualHsnMode ? (
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={newProduct.hsn_code}
+                    onChange={(e) => setNewProduct({ ...newProduct, hsn_code: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                    placeholder="Enter HSN code (e.g., 85081100)"
+                    required
+                    maxLength={8}
+                  />
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-gray-600">GST Rate:</label>
+                    <select
+                      value={manualHsnGstRate}
+                      onChange={(e) => setManualHsnGstRate(parseFloat(e.target.value))}
+                      className="px-2 py-1 border rounded text-sm"
+                    >
+                      <option value={0}>0%</option>
+                      <option value={5}>5%</option>
+                      <option value={12}>12%</option>
+                      <option value={18}>18%</option>
+                      <option value={28}>28%</option>
+                    </select>
+                  </div>
+                  <p className="text-xs text-amber-600">
+                    Note: Manually entered HSN codes will be added to the system
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <select
+                    value={newProduct.hsn_code}
+                    onChange={(e) => setNewProduct({ ...newProduct, hsn_code: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                    required
+                  >
+                    <option value="">-- Select HSN Code --</option>
+                    {hsnCodes.map(hsn => (
+                      <option key={hsn.id || hsn.code} value={hsn.code}>
+                        {hsn.code} - {hsn.description?.substring(0, 40)}{hsn.description?.length > 40 ? '...' : ''} ({hsn.gst_rate}%)
+                      </option>
+                    ))}
+                  </select>
+                  {newProduct.hsn_code && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      GST Rate: {hsnCodes.find(h => h.code === newProduct.hsn_code)?.gst_rate || 18}%
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+              <input
+                type="text"
+                value={newProduct.category}
+                onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="e.g., Built-in Ovens, Refrigerators"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <textarea
+                value={newProduct.description}
+                onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                rows="2"
+                placeholder="Brief product description"
+              ></textarea>
+            </div>
+
+            <div className="flex gap-3 pt-4">
+              <button
+                type="button"
+                onClick={() => setShowAddProductModal(false)}
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleCreateProduct}
+                disabled={addProductLoading}
+                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center gap-2"
+              >
+                {addProductLoading ? 'Saving...' : 'Add Product'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
+  );
+};
+
+export default AdminPORequestsView;

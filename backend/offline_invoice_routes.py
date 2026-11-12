@@ -1,0 +1,3669 @@
+import os
+import jwt
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, EmailStr
+from typing import Optional, List, Dict, Any
+from document_numbering_routes import extract_sequence_number, find_sequence_match
+from datetime import datetime, timezone, timedelta
+from database import get_db
+from admin_data_management_routes import verify_admin, verify_super_admin
+from fastapi import Header
+from fastapi import UploadFile, File
+from file_storage import save_upload
+
+JWT_SECRET = os.environ.get("JWT_SECRET_KEY", "your-secret-key")
+
+async def verify_admin_or_store(authorization: str = Header(None), db = Depends(get_db)):
+    """
+    Accepts either:
+    - An admin/super_admin JWT (validated via verify_admin logic), or
+    - A store manager session token (UUID stored in db.store_sessions)
+    Returns a dict with at least a 'role' key so downstream code can branch.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+
+    token = authorization.replace("Bearer ", "")
+
+    # Try JWT first (admin / super_admin / accountant)
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload
+    except jwt.InvalidTokenError:
+        pass
+
+    # Fall back to store session token
+    session = await db.store_sessions.find_one({"token": token})
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    store_user = await db.store_users.find_one({"id": session.get("user_id")})
+    role = store_user.get("role") if store_user else "store_manager"
+
+    return {"role": role, "store_id": session.get("store_id"), "user_id": session.get("user_id")}
+from invoice_numbering import generate_invoice_number as legacy_generate_invoice_number
+from store_config import generate_invoice_number, get_store, get_all_stores
+from services.whitebooks_client import whitebooks_client, WhitebooksAuthError, WhitebooksAPIError
+from gst_state_codes import get_state_code
+import uuid
+from utils import normalize_phone
+import secrets
+import string
+import bcrypt
+
+router = APIRouter(prefix="/invoices/offline", tags=["Offline Invoices"])
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def generate_random_password(length: int = 12) -> str:
+    """Generate a secure random password"""
+    alphabet = string.ascii_letters + string.digits + "!@#$%"
+    password = ''.join(secrets.choice(alphabet) for _ in range(length))
+    return password
+
+async def auto_create_customer_account(db, customer_data: dict, invoice_number: str, store_name: str) -> dict:
+    """
+    Auto-create a customer user account if customer has email and no existing account.
+    Returns dict with 'created': bool and 'password' if newly created.
+    """
+    from email_notification_service import email_notification_service
+    
+    customer_email = customer_data.get("email")
+    customer_phone = customer_data.get("phone")
+    customer_name = customer_data.get("name", "Valued Customer")
+    
+    # Skip if no email provided
+    if not customer_email:
+        return {"created": False, "reason": "No email provided"}
+    
+    # Check if user already exists
+    existing_user = await db.users.find_one({"email": customer_email.lower()})
+    if existing_user:
+        return {"created": False, "reason": "Account already exists", "user_id": existing_user.get("id")}
+    
+    # Generate random password
+    plain_password = generate_random_password()
+    hashed_password = hash_password(plain_password)
+    
+    # Create user account
+    user_id = str(uuid.uuid4())
+    
+    # Split name into first and last
+    name_parts = customer_name.split() if customer_name else ["Customer"]
+    first_name = name_parts[0]
+    last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+    
+    user_doc = {
+        "id": user_id,
+        "email": customer_email.lower(),
+        "password": hashed_password,
+        "first_name": first_name,
+        "last_name": last_name,
+        "name": customer_name,
+        "phone": customer_phone or "",
+        "role": "customer",
+        "is_active": True,
+        "auto_created": True,  # Flag indicating account was auto-created
+        "auto_created_from_invoice": invoice_number,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.users.insert_one(user_doc)
+    
+    # Set-password link (72h, single use) instead of emailing a plain-text password
+    set_link = None
+    try:
+        from customer_password_routes import create_reset_token, STORE_URL as _STORE_URL
+        _raw = await create_reset_token(user_id, hours=72)
+        set_link = f"{_STORE_URL}/reset-password?token={_raw}"
+    except Exception as _tok_err:
+        print(f"Warning: could not create set-password link: {_tok_err}")
+
+    # Send welcome email with credentials
+    try:
+        await email_notification_service.send_customer_account_created(
+            customer_email=customer_email,
+            customer_name=customer_name,
+            temp_password=plain_password,
+            set_password_link=set_link,
+            invoice_number=invoice_number,
+            store_name=store_name
+        )
+    except Exception as email_error:
+        print(f"Warning: Failed to send welcome email to {customer_email}: {email_error}")
+    
+    return {
+        "created": True, 
+        "user_id": user_id, 
+        "email": customer_email,
+        "password_sent": True
+    }
+
+def determine_is_inter_state(gst_number: str = None, seller_state: str = None, customer_state: str = None) -> bool:
+    """
+    Determine if a transaction is inter-state (IGST) or intra-state (CGST+SGST).
+    Priority: if a GST number is provided, use its first 2 digits (state code) -
+    '29' is Karnataka -> intra-state; any other state code -> inter-state.
+    Falls back to comparing seller_state vs customer_state text when no GST number is present.
+    """
+    if gst_number and gst_number.strip():
+        state_code = gst_number.strip()[:2]
+        return state_code != "29"
+    if seller_state and customer_state:
+        return seller_state.lower().strip() != customer_state.lower().strip() and customer_state.strip() != ""
+    return False
+
+
+def formatCurrency(amount):
+    """Format amount as Indian Rupees"""
+    return f"₹{amount:,.2f}" if amount else "₹0.00"
+
+@router.get("/stores")
+async def get_stores_combined(db = Depends(get_db)):
+    """Get all store configurations - from both database and static config"""
+    try:
+        # Get stores from database
+        db_stores = await db.stores.find({"is_active": True}, {"_id": 0}).to_list(None)
+        
+        # Get stores from static config
+        static_stores = get_all_stores()
+        
+        # Merge them - database stores take priority
+        all_stores = {}
+        
+        # Add static stores first
+        for store in static_stores.values():
+            all_stores[store["code"]] = store
+        
+        # Add/override with database stores
+        for store in db_stores:
+            store_data = {
+                "code": store.get("code"),
+                "name": store.get("name"),
+                "type": store.get("type", "Store"),
+                "address": store.get("address", ""),
+                "city": store.get("city", ""),
+                "pincode": store.get("pincode", ""),
+                "state": store.get("state", ""),
+                "phone": store.get("phone", ""),
+                "email": store.get("email", ""),
+                "whatsapp": store.get("whatsapp", ""),
+                "invoice_prefix": store.get("invoice_prefix", store.get("code")),
+                "so_prefix": store.get("so_prefix", f"{store.get('code')}SO"),
+                "gst_number": store.get("gst_number", ""),
+                "id": store.get("id")  # Include ID for database stores
+            }
+            all_stores[store.get("code")] = store_data
+        
+        return {
+            "status": "success",
+            "stores": list(all_stores.values())
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stores: {str(e)}")
+
+class CustomerDetails(BaseModel):
+    name: str
+    phone: str
+    alternate_phones: Optional[List[str]] = []  # Additional phone numbers
+    email: Optional[EmailStr] = None
+    gst_number: Optional[str] = None
+    customer_type: Optional[str] = "B2C"  # B2B or B2C
+    msme_udyam_number: Optional[str] = None
+    # Legacy fields - now optional (use billing_* as primary)
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    location_link: Optional[str] = None
+    # Bill To Address
+    billing_name: Optional[str] = None
+    billing_address: Optional[str] = None
+    billing_city: Optional[str] = None
+    billing_state: Optional[str] = None
+    billing_pincode: Optional[str] = None
+    # Ship To Address
+    shipping_same_as_billing: Optional[bool] = True
+    shipping_name: Optional[str] = None
+    shipping_address: Optional[str] = None
+    shipping_city: Optional[str] = None
+    shipping_state: Optional[str] = None
+    shipping_pincode: Optional[str] = None
+
+class PaymentDetails(BaseModel):
+    """Payment transaction details for card/UPI/bank transfers"""
+    transaction_reference: Optional[str] = None  # Transaction ID/Reference number
+    bank_name: Optional[str] = None
+    payment_date: Optional[str] = None
+    amount_paid: Optional[float] = None
+    payment_screenshot_url: Optional[str] = None  # URL to uploaded screenshot
+    remarks: Optional[str] = None
+    is_advance: Optional[bool] = False  # Is this an advance/part payment?
+    advance_amount: Optional[float] = None  # Amount paid as advance
+
+class InvoiceItem(BaseModel):
+    product_id: Optional[str] = None
+    product_name: str
+    model_number: Optional[str] = None
+    hsn_code: str
+    quantity: int
+    rate: float
+    discount: float = 0
+    tax_rate: float = 18.0
+    has_serial_tracking: bool = False  # Whether this product requires serial tracking
+    serial_numbers: Optional[List[str]] = []  # Selected serial numbers for this item
+    
+class OfflineInvoiceRequest(BaseModel):
+    customer: CustomerDetails
+    items: List[InvoiceItem]
+    payment_mode: str  # cash, card, upi, neft, cheque, cod, pod
+    subtotal: float
+    discount: float = 0
+    delivery_charges: float = 0
+    round_off: float = 0
+    coupon_code: Optional[str] = None
+    notes: Optional[str] = None
+    created_by: str  # Store staff name/ID
+    document_type: str = "invoice"  # "sales_order" or "invoice"
+    store_code: str  # Store code: BNS, ARM, DAS
+    is_cod: bool = False  # Cash on Delivery
+    is_pod: bool = False  # Payment on Delivery (card/UPI at delivery)
+    payment_details: Optional[PaymentDetails] = None  # Transaction details for card/UPI/bank
+    order_source: Optional[str] = None  # organic, google_ads, facebook_ads, walk_in, referral, other
+    expected_delivery_date: Optional[str] = None  # Expected delivery date for SO
+    immediate_delivery: bool = True  # If true, goes to "SO to Invoice". If false, goes to "Pending SOs"
+    e_way_bill_number: Optional[str] = None  # E-Way Bill for invoices > ₹50,000
+
+@router.post("/create")
+async def create_offline_invoice(invoice: OfflineInvoiceRequest, db = Depends(get_db)):
+    """Create offline invoice/order"""
+    try:
+        # Validate serial numbers BEFORE creating invoice
+        serial_validation_errors = []
+        serials_to_create = []  # For manual entry serials not in inventory
+        
+        for item in invoice.items:
+            if item.has_serial_tracking and item.serial_numbers and len(item.serial_numbers) > 0:
+                # Quantity must match serial count
+                if len(item.serial_numbers) != item.quantity:
+                    serial_validation_errors.append(
+                        f"{item.product_name}: Quantity ({item.quantity}) must match serial count ({len(item.serial_numbers)})"
+                    )
+                
+                # Check each serial - allow manual entry (create if not exists)
+                for serial_number in item.serial_numbers:
+                    serial = await db.serial_inventory.find_one(
+                        {"serial_number": serial_number},
+                        {"_id": 0, "status": 1, "product_id": 1}
+                    )
+                    
+                    if not serial:
+                        # Serial doesn't exist - will be created (manual entry)
+                        serials_to_create.append({
+                            "serial_number": serial_number,
+                            "product_id": item.product_id,
+                            "product_name": item.product_name,
+                            "hsn_code": item.hsn_code,
+                            "rate": item.rate
+                        })
+                    elif serial.get("status") != "in_stock":
+                        serial_validation_errors.append(
+                            f"Serial {serial_number} is not available (status: {serial.get('status')})"
+                        )
+                    elif item.product_id and serial.get("product_id") and serial.get("product_id") != item.product_id:
+                        # Only validate product match if both have product_id
+                        serial_validation_errors.append(
+                            f"Serial {serial_number} does not belong to product {item.product_name}"
+                        )
+        
+        if serial_validation_errors:
+            raise HTTPException(
+                status_code=400, 
+                detail={"message": "Serial number validation failed", "errors": serial_validation_errors}
+            )
+        
+        # First try to get store from database
+        db_store = await db.stores.find_one({"code": invoice.store_code}, {"_id": 0})
+        
+        # Initialize document numbering variables
+        doc_numbering = None
+        doc_config = {}
+        
+        if db_store:
+            # Use database store - include ALL fields needed for documents
+            store = {
+                "code": db_store.get("code"),
+                "name": db_store.get("name"),
+                "type": db_store.get("type", "Store"),
+                "address": db_store.get("address", ""),
+                "city": db_store.get("city", ""),
+                "state": db_store.get("state", ""),  # Include state
+                "pincode": db_store.get("pincode", ""),
+                "phone": db_store.get("phone", ""),
+                "email": db_store.get("email", ""),
+                "invoice_prefix": db_store.get("invoice_prefix", db_store.get("code")),
+                "so_prefix": db_store.get("so_prefix", f"{db_store.get('code')}SO"),
+                "gst_number": db_store.get("gst_number", ""),
+                "pan_number": db_store.get("pan_number", ""),
+                "tagline": db_store.get("tagline", ""),
+                "is_warehouse": db_store.get("is_warehouse", False)
+            }
+            
+            # Get document numbering from database
+            doc_numbering = await db.document_numbering.find_one({"store_id": db_store.get("id")}, {"_id": 0})
+            
+            # Initialize document numbering if not exists
+            if not doc_numbering:
+                from document_numbering_routes import initialize_store_numbering
+                doc_numbering = await initialize_store_numbering(db, db_store.get("id"), db_store.get("code"))
+                doc_numbering.pop("_id", None) if doc_numbering else None
+            
+            if doc_numbering:
+                doc_type = "invoice" if invoice.document_type == "invoice" else "sales_order"
+                doc_config = doc_numbering.get("document_configs", {}).get(doc_type, {})
+                if doc_config:
+                    store["invoice_prefix"] = doc_config.get("prefix", store.get("invoice_prefix"))
+                    store["so_prefix"] = doc_config.get("prefix", store.get("so_prefix")) if doc_type == "sales_order" else store.get("so_prefix")
+                    # Sequence will be handled by get_next_document_number later
+                    sequence = doc_config.get("current_number", 1)
+                else:
+                    sequence = await db.offline_invoices.count_documents({
+                        "store_code": invoice.store_code,
+                        "document_type": invoice.document_type
+                    }) + 1
+            else:
+                sequence = await db.offline_invoices.count_documents({
+                    "store_code": invoice.store_code,
+                    "document_type": invoice.document_type
+                }) + 1
+        else:
+            # Fall back to static config
+            store = get_store(invoice.store_code)
+            if not store:
+                raise HTTPException(status_code=400, detail=f"Invalid store code: {invoice.store_code}")
+            
+            # Get next sequence number for this store from count
+            sequence = await db.offline_invoices.count_documents({
+                "store_code": invoice.store_code,
+                "document_type": invoice.document_type
+            }) + 1
+        
+        # Generate store-specific invoice number using store's prefix
+        prefix = store.get("so_prefix") if invoice.document_type == "sales_order" else store.get("invoice_prefix")
+        current_year = datetime.now().year
+        current_month = datetime.now().month
+        
+        # Financial year format (April to March)
+        if current_month >= 4:
+            fy = f"{str(current_year)[-2:]}-{str(current_year + 1)[-2:]}"
+        else:
+            fy = f"{str(current_year - 1)[-2:]}-{str(current_year)[-2:]}"
+        
+        # Check if using custom format from document numbering config
+        doc_type = "invoice" if invoice.document_type == "invoice" else "sales_order"
+        doc_config = None
+        if doc_numbering:
+            doc_config = doc_numbering.get("document_configs", {}).get(doc_type, {})
+        
+        # ALWAYS use get_next_document_number for proper sequence handling
+        if doc_numbering:
+            from document_numbering_routes import get_next_document_number
+            invoice_number = await get_next_document_number(
+                db, 
+                db_store.get("id"), 
+                store.get("code", invoice.store_code), 
+                doc_type
+            )
+        elif doc_config and doc_config.get("use_custom_format") and doc_config.get("custom_format"):
+            custom_format = doc_config.get("custom_format")
+            from document_numbering_routes import parse_custom_format
+            invoice_number = parse_custom_format(
+                custom_format,
+                store.get("code", invoice.store_code),
+                doc_config.get("prefix", prefix),
+                sequence,
+                doc_config.get("sequence_padding", 4)
+            )
+            # Increment sequence manually since we're not using get_next_document_number
+            await db.document_numbering.update_one(
+                {"store_id": db_store.get("id")},
+                {"$set": {
+                    f"document_configs.{doc_type}.current_number": sequence + 1,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+        else:
+            # Default format: PREFIX + FY/SEQUENCE
+            invoice_number = f"{prefix}{fy}/{sequence:04d}"
+        
+        # Calculate totals
+        # IMPORTANT: Rate entered is GST-INCLUSIVE, so we need to reverse calculate
+        items_total = 0
+        tax_total = 0
+        taxable_total = 0
+        items_with_tax = []
+        
+        for item in invoice.items:
+            # Rate is GST-inclusive, reverse calculate to get taxable amount
+            inclusive_price = item.rate * item.quantity
+            item_discount_amount = (inclusive_price * item.discount) / 100
+            final_inclusive_price = inclusive_price - item_discount_amount
+            
+            # Reverse calculate: Taxable Amount = Inclusive Price / (1 + GST Rate / 100)
+            tax_rate = item.tax_rate or 18.0
+            item_taxable_amount = final_inclusive_price / (1 + tax_rate / 100)
+            item_tax_amount = final_inclusive_price - item_taxable_amount
+            item_total = final_inclusive_price  # Total is the inclusive price after discount
+            
+            items_total += item_total
+            tax_total += item_tax_amount
+            taxable_total += item_taxable_amount
+            
+            # Determine if IGST or CGST+SGST - GST number's state code takes priority when present,
+            # otherwise fall back to comparing seller/customer state text
+            seller_state = store.get("state", "Karnataka").lower().strip()
+            
+            # Get customer billing state (with fallbacks)
+            billing_state = (invoice.customer.billing_state or invoice.customer.state or "").strip()
+            # Get shipping state - for place of supply determination
+            if invoice.customer.shipping_same_as_billing:
+                shipping_state = billing_state
+            else:
+                shipping_state = (invoice.customer.shipping_state or billing_state or "").strip()
+            
+            # Place of Supply is where goods are delivered (shipping state)
+            place_of_supply = shipping_state or billing_state or "Karnataka"
+            customer_state = shipping_state.lower() if shipping_state else billing_state.lower()
+            
+            is_inter_state = determine_is_inter_state(
+                gst_number=invoice.customer.gst_number,
+                seller_state=seller_state,
+                customer_state=customer_state
+            )
+            
+            item_data = {
+                **item.dict(),
+                "gross_amount": round(inclusive_price, 2),
+                "discount_amount": round(item_discount_amount, 2),
+                "taxable_amount": round(item_taxable_amount, 2),
+                "tax_amount": round(item_tax_amount, 2),
+                "total": round(item_total, 2)
+            }
+            
+            if is_inter_state:
+                item_data["igst"] = round(item_tax_amount, 2)
+                item_data["cgst"] = 0
+                item_data["sgst"] = 0
+            else:
+                item_data["igst"] = 0
+                item_data["cgst"] = round(item_tax_amount / 2, 2)
+                item_data["sgst"] = round(item_tax_amount / 2, 2)
+            
+            items_with_tax.append(item_data)
+        
+        # Apply invoice level discount
+        discount_amount = (items_total * invoice.discount) / 100 if invoice.discount > 0 else 0
+        
+        # Calculate GST on delivery charges (18% inclusive)
+        # Delivery charges entered are GST-inclusive, reverse calculate
+        delivery_charges = invoice.delivery_charges
+        delivery_gst_rate = 18.0  # Fixed 18% GST on delivery/service charges
+        if delivery_charges > 0:
+            delivery_taxable = delivery_charges / (1 + delivery_gst_rate / 100)
+            delivery_tax = delivery_charges - delivery_taxable
+        else:
+            delivery_taxable = 0
+            delivery_tax = 0
+        
+        # Add delivery tax to totals
+        tax_total += delivery_tax
+        taxable_total += delivery_taxable
+        
+        # Calculate final total
+        final_total = items_total - discount_amount + invoice.delivery_charges + invoice.round_off
+        
+        # Determine document status based on type
+        document_type = invoice.document_type
+        
+        # Determine payment status based on COD/POD
+        if invoice.is_cod or invoice.is_pod:
+            payment_status = "pending"  # Payment to be collected at delivery
+        elif invoice.payment_mode in ["cash", "card", "upi"]:
+            payment_status = "paid"
+        else:
+            payment_status = "pending"
+        
+        if document_type == "sales_order":
+            status = "pending_delivery"  # Sales order awaiting delivery
+        else:
+            status = "ready_for_delivery"  # Direct invoice needs delivery assignment
+        
+        # Determine IGST vs CGST+SGST for totals - GST number's state code takes priority
+        seller_state = store.get("state", "Karnataka").lower().strip()
+        
+        # Get customer billing state (with fallbacks)
+        billing_state = (invoice.customer.billing_state or invoice.customer.state or "").strip()
+        # Get shipping state - for place of supply determination
+        if invoice.customer.shipping_same_as_billing:
+            shipping_state = billing_state
+        else:
+            shipping_state = (invoice.customer.shipping_state or billing_state or "").strip()
+        
+        place_of_supply = shipping_state or billing_state or "Karnataka"
+        customer_state = (shipping_state.lower() if shipping_state else billing_state.lower())
+        is_inter_state = determine_is_inter_state(
+            gst_number=invoice.customer.gst_number,
+            seller_state=seller_state,
+            customer_state=customer_state
+        )
+        
+        # Prepare customer data with merged billing/shipping fields
+        customer_data = invoice.customer.dict()
+        # Ensure legacy fields are populated from billing if not provided
+        if not customer_data.get("address"):
+            customer_data["address"] = customer_data.get("billing_address", "")
+        if not customer_data.get("city"):
+            customer_data["city"] = customer_data.get("billing_city", "")
+        if not customer_data.get("state"):
+            customer_data["state"] = customer_data.get("billing_state", "")
+        if not customer_data.get("pincode"):
+            customer_data["pincode"] = customer_data.get("billing_pincode", "")
+        
+        # Save customer to customers collection if phone number exists
+        if customer_data.get("phone"):
+            normalized_phone = normalize_phone(customer_data.get("phone"))
+            existing_customer = await db.customers.find_one({"phone": normalized_phone}) if normalized_phone else None
+            if existing_customer:
+                # Update existing customer
+                await db.customers.update_one(
+                    {"phone": customer_data.get("phone")},
+                    {"$set": {
+                        "name": customer_data.get("name") or existing_customer.get("name"),
+                        "email": customer_data.get("email") or existing_customer.get("email"),
+                        "gst_number": customer_data.get("gst_number") or existing_customer.get("gst_number"),
+                        "billing_address": customer_data.get("billing_address") or customer_data.get("address"),
+                        "billing_city": customer_data.get("billing_city") or customer_data.get("city"),
+                        "billing_state": customer_data.get("billing_state") or customer_data.get("state"),
+                        "billing_pincode": customer_data.get("billing_pincode") or customer_data.get("pincode"),
+                        "shipping_address": customer_data.get("shipping_address"),
+                        "shipping_city": customer_data.get("shipping_city"),
+                        "shipping_state": customer_data.get("shipping_state"),
+                        "shipping_pincode": customer_data.get("shipping_pincode"),
+                        "shipping_phone": customer_data.get("shipping_phone"),
+                        "shipping_location_link": customer_data.get("shipping_location_link"),
+                        "store_code": invoice.store_code,
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }}
+                )
+                customer_data["customer_id"] = existing_customer.get("id")
+            else:
+                # Create new customer
+                customer_id = str(uuid.uuid4())
+                new_customer = {
+                    "id": customer_id,
+                    "name": customer_data.get("name"),
+                    "phone": normalized_phone,
+                    "email": customer_data.get("email"),
+                    "order_count": 0,
+                    "total_spent": 0,
+                    "gst_number": customer_data.get("gst_number"),
+                    "customer_type": customer_data.get("customer_type", "B2C"),
+                    "billing_address": customer_data.get("billing_address") or customer_data.get("address"),
+                    "billing_city": customer_data.get("billing_city") or customer_data.get("city"),
+                    "billing_state": customer_data.get("billing_state") or customer_data.get("state"),
+                    "billing_pincode": customer_data.get("billing_pincode") or customer_data.get("pincode"),
+                    "shipping_address": customer_data.get("shipping_address"),
+                    "shipping_city": customer_data.get("shipping_city"),
+                    "shipping_state": customer_data.get("shipping_state"),
+                    "shipping_pincode": customer_data.get("shipping_pincode"),
+                    "shipping_phone": customer_data.get("shipping_phone"),
+                    "shipping_location_link": customer_data.get("shipping_location_link"),
+                    "store_code": invoice.store_code,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+                await db.customers.insert_one(new_customer)
+                customer_data["customer_id"] = customer_id
+        
+        # Auto-create customer user account if email is provided
+        customer_account_result = None
+        if customer_data.get("email"):
+            store_name = store.get("name", "Aditya Retail")
+            customer_account_result = await auto_create_customer_account(
+                db=db,
+                customer_data=customer_data,
+                invoice_number=invoice_number,
+                store_name=store_name
+            )
+        
+        # Create invoice document
+        invoice_data = {
+            "id": str(uuid.uuid4()),
+            "invoice_number": invoice_number,
+            "invoice_type": "offline",
+            "document_type": document_type,  # sales_order or invoice
+            "store_code": invoice.store_code,
+            "store_details": store,  # Store configuration
+            "customer": customer_data,
+            "items": items_with_tax,
+            "payment_mode": invoice.payment_mode,
+            "is_cod": invoice.is_cod,
+            "is_pod": invoice.is_pod,
+            "payment_collected": False,  # Will be set to True when delivery person collects payment
+            "payment_details": invoice.payment_details.dict() if invoice.payment_details else None,  # Transaction details
+            "subtotal": round(taxable_total, 2),  # Taxable amount (before GST)
+            "discount_percentage": invoice.discount,
+            "discount_amount": round(discount_amount, 2),
+            "delivery_charges": round(invoice.delivery_charges, 2),
+            "delivery_charges_taxable": round(delivery_taxable, 2),  # Delivery charges taxable amount
+            "delivery_charges_tax": round(delivery_tax, 2),  # GST on delivery charges
+            "delivery_charges_gst_rate": delivery_gst_rate if delivery_charges > 0 else 0,
+            "round_off": round(invoice.round_off, 2),
+            "tax_total": round(tax_total, 2),
+            "is_inter_state": is_inter_state,
+            "place_of_supply": place_of_supply,
+            "igst_total": round(tax_total, 2) if is_inter_state else 0,
+            "cgst_total": 0 if is_inter_state else round(tax_total / 2, 2),
+            "sgst_total": 0 if is_inter_state else round(tax_total / 2, 2),
+            "total_amount": round(final_total, 2),
+            # Payment tracking for advance/split payments
+            "total_paid": invoice.payment_details.advance_amount if invoice.payment_details and invoice.payment_details.advance_amount else 0,
+            "balance_due": round(final_total - (invoice.payment_details.advance_amount if invoice.payment_details and invoice.payment_details.advance_amount else 0), 2),
+            "coupon_code": invoice.coupon_code,
+            "notes": invoice.notes,
+            "created_by": invoice.created_by,
+            "order_source": invoice.order_source,  # Order origin tracking
+            "expected_delivery_date": invoice.expected_delivery_date,  # Expected delivery date for SO
+            "immediate_delivery": invoice.immediate_delivery,  # For warehouse routing
+            "e_way_bill_number": invoice.e_way_bill_number,  # E-Way Bill for transport > ₹50,000
+            "assigned_delivery_person": None,  # Delivery person assigned to this invoice
+            "assigned_delivery_person_name": None,
+            "delivery_assigned_at": None,
+            "status": status,
+            "payment_status": "paid" if invoice.payment_details and invoice.payment_details.advance_amount and invoice.payment_details.advance_amount >= final_total else ("partially_paid" if invoice.payment_details and invoice.payment_details.advance_amount and invoice.payment_details.advance_amount > 0 else payment_status),
+            "is_locked": True,  # Invoices are locked by default
+            "converted_to_invoice_at": None,  # Will be set when sales order is converted
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Check for duplicate invoice number before inserting
+        duplicate_check = await db.offline_invoices.find_one({
+            "invoice_number": invoice_number,
+            "store_code": invoice.store_code
+        })
+        if duplicate_check:
+            # This should not happen with proper sequencing, but as a safety check
+            # Try to get the next available number
+            max_invoice = await db.offline_invoices.find(
+                {"store_code": invoice.store_code, "document_type": document_type}
+            ).sort("created_at", -1).limit(1).to_list(1)
+            
+            if max_invoice:
+                # Extract the sequence number and increment, using FY-aware
+                # matching so a "26-27" financial-year suffix is never
+                # mistaken for the real sequence digits.
+                try:
+                    existing_num = max_invoice[0].get("invoice_number", "")
+                    existing_seq = extract_sequence_number(existing_num)
+                    if existing_seq is not None:
+                        next_seq = existing_seq + 1
+                        seq_match = find_sequence_match(invoice_number)
+                        if seq_match:
+                            width = len(seq_match.group(0))
+                            invoice_number = (
+                                invoice_number[:seq_match.start()]
+                                + str(next_seq).zfill(width)
+                                + invoice_number[seq_match.end():]
+                            )
+                except Exception:
+                    pass
+            
+            # Re-check for duplicate
+            duplicate_check2 = await db.offline_invoices.find_one({
+                "invoice_number": invoice_number,
+                "store_code": invoice.store_code
+            })
+            if duplicate_check2:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Duplicate invoice number '{invoice_number}'. Please try again or contact admin."
+                )
+            
+            # Update invoice_data with new number
+            invoice_data["invoice_number"] = invoice_number
+        
+        await db.offline_invoices.insert_one(invoice_data)
+        
+        # Real-time accounting: fires immediately for BOTH a Sales Order
+        # and an Invoice (so both show up live, matching Tally's day
+        # book). Only the Invoice posts actual revenue - a Sales Order
+        # is shown live as a booking but does not post a journal entry
+        # (see sales_order_booking in shared_accounting_logic.py), so
+        # revenue is never double-counted when the SO later becomes an
+        # invoice.
+        try:
+            from realtime_accounting import post_transaction_event
+            rt_type = "sale_offline" if invoice_data["document_type"] == "invoice" else "sales_order_booking"
+            await post_transaction_event(db, rt_type, {
+                "id": invoice_data["invoice_number"],
+                "amount": invoice_data["total_amount"],
+                "tax": invoice_data["tax_total"],
+                "is_inter_state": invoice_data["is_inter_state"],
+                "igst": invoice_data["igst_total"],
+                "cgst": invoice_data["cgst_total"],
+                "sgst": invoice_data["sgst_total"],
+                "payment_method": invoice_data["payment_mode"],
+                "payment_status": invoice_data["payment_status"],
+                "date": invoice_data["created_at"],
+                "items": invoice_data["items"]
+            })
+        except Exception as e:
+            print(f"⚠️ Real-time accounting failed for {invoice_data['invoice_number']}: {e}")
+        
+        # Mark serial numbers as sold for direct invoices
+        serial_errors = []
+        if document_type == "invoice":
+            for item in invoice.items:
+                if item.has_serial_tracking and item.serial_numbers and len(item.serial_numbers) > 0:
+                    # Mark each serial as sold
+                    for serial_number in item.serial_numbers:
+                        # Check if serial exists in inventory
+                        existing_serial = await db.serial_inventory.find_one({"serial_number": serial_number})
+                        
+                        if existing_serial:
+                            # Update existing serial
+                            serial_result = await db.serial_inventory.update_one(
+                                {"serial_number": serial_number, "status": "in_stock"},
+                                {
+                                    "$set": {
+                                        "status": "sold",
+                                        "sold_invoice_id": invoice_data["id"],
+                                        "sold_invoice_number": invoice_number,
+                                        "sold_date": datetime.now(timezone.utc).isoformat(),
+                                        "customer_id": None,
+                                        "customer_name": invoice.customer.name,
+                                        "customer_phone": invoice.customer.phone,
+                                        "updated_at": datetime.now(timezone.utc).isoformat()
+                                    }
+                                }
+                            )
+                            
+                            if serial_result.modified_count == 0:
+                                serial_errors.append(f"Serial {serial_number} could not be marked as sold")
+                        else:
+                            # Create new serial entry (manual entry) - directly as sold
+                            new_serial = {
+                                "id": str(uuid.uuid4()),
+                                "serial_number": serial_number,
+                                "product_id": item.product_id,
+                                "product_name": item.product_name,
+                                "model_number": None,
+                                "grn_id": None,  # No GRN - manual entry at sale
+                                "grn_number": None,
+                                "vendor_name": None,
+                                "purchase_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                                "purchase_price": item.rate,
+                                "condition": "new",
+                                "warranty_start_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                                "warranty_end_date": None,
+                                "warranty_months": 12,  # Default 12 months
+                                "store_code": invoice.store_code,
+                                "warehouse_id": None,
+                                "status": "sold",  # Directly sold
+                                "sold_invoice_id": invoice_data["id"],
+                                "sold_invoice_number": invoice_number,
+                                "sold_date": datetime.now(timezone.utc).isoformat(),
+                                "customer_id": None,
+                                "customer_name": invoice.customer.name,
+                                "customer_phone": invoice.customer.phone,
+                                "notes": "Manual entry at point of sale",
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "updated_at": datetime.now(timezone.utc).isoformat()
+                            }
+                            await db.serial_inventory.insert_one(new_serial)
+                        
+                        # Create transaction record
+                        await db.serial_transactions.insert_one({
+                            "id": str(uuid.uuid4()),
+                            "serial_number": serial_number,
+                            "product_id": item.product_id,
+                            "transaction_type": "sold",
+                            "reference_type": "invoice",
+                            "reference_id": invoice_data["id"],
+                            "reference_number": invoice_number,
+                            "customer_name": invoice.customer.name,
+                            "created_by": invoice.created_by,
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        })
+        
+        # NOTE: Offline orders stay in offline_invoices collection only
+        # Online orders go to the 'orders' collection via checkout/AI chat
+        # This separation keeps Orders & Sales (admin) exclusive to online orders
+        
+        # Update stock for each item
+        from inventory_service import InventoryService
+        inventory_service = InventoryService(db)
+        stock_warnings = []
+        
+        for item in invoice.items:
+            if item.product_id:  # Only update if product_id is available
+                if document_type == "sales_order":
+                    # For Sales Orders - BLOCK/RESERVE stock (don't deduct yet)
+                    stock_result = await inventory_service.reserve_stock(
+                        product_id=item.product_id,
+                        quantity=item.quantity,
+                        reference_id=invoice_data["id"],
+                        reference_type="sales_order",
+                        reason=f"Reserved for SO: {invoice_number}",
+                        created_by=invoice.created_by
+                    )
+                else:
+                    # For Direct Invoices - DEDUCT stock immediately
+                    stock_result = await inventory_service.update_stock(
+                        product_id=item.product_id,
+                        quantity_change=-item.quantity,  # Negative for sales
+                        transaction_type="sale",
+                        reference_id=invoice_data["id"],
+                        reason=f"Sale via Invoice: {invoice_number}",
+                        created_by=invoice.created_by
+                    )
+                
+                # Collect warnings for low stock or out of stock
+                if stock_result.get("warning"):
+                    stock_warnings.append({
+                        "product_name": item.product_name,
+                        "warning": stock_result["warning"],
+                        "current_stock": stock_result.get("current_stock", 0)
+                    })
+        
+        document_label = "Sales Order" if document_type == "sales_order" else "Invoice"
+        
+        # Auto-create Payment Receipt if payment details are provided
+        receipt_info = None
+        if invoice.payment_details and invoice.payment_details.amount_paid and invoice.payment_details.amount_paid > 0:
+            today = datetime.now(timezone.utc)
+            receipt_prefix = f"RCP-{today.strftime('%Y%m%d')}"
+            
+            receipt_count = await db.vouchers.count_documents({
+                "voucher_type": "receipt",
+                "created_at": {
+                    "$gte": today.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                }
+            })
+            
+            receipt_number = f"{receipt_prefix}-{receipt_count + 1:04d}"
+            
+            receipt_data = {
+                "id": str(uuid.uuid4()),
+                "voucher_number": receipt_number,
+                "voucher_type": "receipt",
+                "party_name": invoice.customer.name,
+                "amount": invoice.payment_details.amount_paid,
+                "payment_mode": invoice.payment_mode,
+                "reference_number": invoice.payment_details.transaction_reference,
+                "description": f"Payment for {document_label}: {invoice_number}" + (
+                    " (Advance Payment)" if invoice.payment_details.is_advance else ""
+                ),
+                "voucher_date": today.isoformat(),
+                "created_by": invoice.created_by,
+                "linked_document": {
+                    "type": document_type,
+                    "number": invoice_number,
+                    "id": invoice_data["id"]
+                },
+                "is_advance": invoice.payment_details.is_advance or False,
+                "approval_status": "pending",  # Requires approval from accounts
+                "approved_by": None,
+                "approved_at": None,
+                "is_locked": True,
+                "created_at": today.isoformat(),
+                "updated_at": today.isoformat()
+            }
+            
+            await db.vouchers.insert_one(receipt_data)
+
+            try:
+                from realtime_accounting import post_transaction_event
+                await post_transaction_event(db, f"voucher_{receipt_data['voucher_type']}", {
+                    "id": receipt_data["voucher_number"],
+                    "amount": receipt_data["amount"],
+                    "tax": 0,
+                    "payment_method": receipt_data.get("payment_mode", "n/a"),
+                    "payment_status": "pending",
+                    "date": receipt_data["created_at"],
+                    "party": receipt_data.get("party_name", "Unknown"),
+                    "description": receipt_data.get("description", "")
+                })
+            except Exception as e:
+                print(f"⚠️ Real-time accounting failed for {receipt_data['voucher_number']}: {e}")
+            
+            receipt_info = {
+                "receipt_number": receipt_number,
+                "receipt_id": receipt_data["id"],
+                "amount": invoice.payment_details.amount_paid,
+                "approval_status": "pending"
+            }
+        
+        response = {
+            "status": "success",
+            "invoice_number": invoice_number,
+            "invoice_id": invoice_data["id"],
+            "document_type": document_type,
+            "total_amount": final_total,
+            "message": f"Offline {document_label} created successfully"
+        }
+        
+        # Add receipt info if created
+        if receipt_info:
+            response["receipt"] = receipt_info
+            response["message"] += f" with Payment Receipt {receipt_info['receipt_number']}"
+        
+        # Add customer account creation info
+        if customer_account_result and customer_account_result.get("created"):
+            response["customer_account_created"] = True
+            response["customer_account_email"] = customer_account_result.get("email")
+            response["message"] += f". Customer account created and credentials sent to {customer_account_result.get('email')}"
+        
+        # Add stock warnings if any
+        if stock_warnings:
+            response["stock_warnings"] = stock_warnings
+        
+        # Send email notification to customer (non-blocking)
+        email_sent = False
+        if invoice.customer.email:
+            print(f"📧 Attempting to send order confirmation email to {invoice.customer.email}")
+            try:
+                from email_notification_service import email_notification_service
+                email_result = await email_notification_service.send_order_confirmation(
+                    customer_email=invoice.customer.email,
+                    customer_name=invoice.customer.name,
+                    order_id=invoice_number,
+                    order_items=[{
+                        "name": item.product_name,
+                        "quantity": item.quantity,
+                        "price": item.rate
+                    } for item in invoice.items],
+                    total_amount=final_total,
+                    shipping_address=f"{invoice.customer.address}, {invoice.customer.city} - {invoice.customer.pincode}" if invoice.customer.address else None
+                )
+                if email_result.get("status") == "success":
+                    print(f"✅ Order confirmation email sent to {invoice.customer.email}")
+                    email_sent = True
+                else:
+                    print(f"⚠️ Email sending returned error: {email_result.get('message', 'Unknown error')}")
+            except Exception as email_error:
+                print(f"⚠️ Email notification failed (non-blocking): {email_error}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("📧 No customer email provided, skipping email notification")
+        
+        # Add email status to response
+        response["email_sent"] = email_sent
+        
+        # Create warehouse notification for Sales Orders with immediate_delivery
+        if invoice.document_type == "sales_order" and invoice.immediate_delivery:
+            try:
+                # Find warehouse(s) to notify
+                warehouses = await db.stores.find({"is_warehouse": True, "is_active": True}).to_list(None)
+                
+                for warehouse in warehouses:
+                    notification = {
+                        "id": str(uuid.uuid4()),
+                        "recipient_type": "store",
+                        "recipient_id": warehouse.get("id"),
+                        "recipient_role": "warehouse",
+                        "type": "new_sales_order",
+                        "title": "New Sales Order for Conversion",
+                        "message": f"New SO #{invoice_number} from {invoice.store_code} - {invoice.customer.name} - {formatCurrency(final_total)}",
+                        "store_id": warehouse.get("id"),
+                        "store_code": warehouse.get("code"),
+                        "reference_id": invoice_data["id"],
+                        "reference_type": "sales_order",
+                        "action_url": "/store/invoices",
+                        "action_label": "View & Convert",
+                        "priority": "high" if final_total > 50000 else "normal",
+                        "is_read": False,
+                        "is_archived": False,
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    }
+                    await db.notifications.insert_one(notification)
+                    print(f"📢 Notification sent to warehouse {warehouse.get('code')} for SO {invoice_number}")
+            except Exception as notif_error:
+                print(f"⚠️ Failed to create warehouse notification: {notif_error}")
+            except Exception as notif_error:
+                print(f"⚠️ Failed to create warehouse notification: {notif_error}")
+        
+        return response
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create offline invoice: {str(e)}")
+
+def _apply_date_range(query, from_date, to_date):
+    """Inclusive created_at range (YYYY-MM-DD), ANDed with FY/search filters."""
+    from datetime import datetime as _dt, timedelta as _td
+    if not (from_date or to_date):
+        return
+    rng = {}
+    try:
+        if from_date:
+            rng["$gte"] = from_date
+        if to_date:
+            if len(to_date) <= 10:
+                nxt = (_dt.strptime(to_date, "%Y-%m-%d") + _td(days=1)).strftime("%Y-%m-%d")
+                rng["$lt"] = nxt
+            else:
+                rng["$lte"] = to_date
+    except ValueError:
+        return
+    if rng:
+        query.setdefault("$and", []).append({"created_at": rng})
+
+
+@router.get("/")
+async def get_offline_invoices(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    fy: Optional[str] = None,  # NEW: financial year filter, e.g. "26-27" or "all"
+    payment_mode: Optional[str] = None,
+    created_by: Optional[str] = None,
+    document_type: Optional[str] = None,  # sales_order or invoice
+    store_code: Optional[str] = None,
+    converted_from_so: Optional[bool] = None,
+    include_converted: Optional[bool] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    limit: int = 200,
+    db = Depends(get_db)
+):
+    """Get all offline invoices with filters.
+
+    Use FY filter (`fy=26-27`) for fast year-scoped loads, search for indexed
+    text lookup, and page+limit for incremental "Load More" scrolling.
+    No hard limit cap — use /export endpoint for bulk CSV downloads.
+    """
+    try:
+        limit = min(max(int(limit or 200), 1), 50000)
+        query: Dict[str, Any] = {}
+
+        # FY filter takes precedence over from_date/to_date (Indian FY: Apr 1 → Mar 31)
+        if fy and fy.lower() != "all":
+            try:
+                parts = fy.replace("FY", "").replace("fy", "").strip().split("-")
+                start_year = int(parts[0])
+                if start_year < 100:
+                    start_year += 2000
+                fy_start = f"{start_year}-04-01T00:00:00"
+                fy_end = f"{start_year + 1}-04-01T00:00:00"
+                query["created_at"] = {"$gte": fy_start, "$lt": fy_end}
+            except Exception:
+                pass
+        elif False:  # superseded by _apply_date_range
+            pass
+        
+        if payment_mode:
+            query["payment_mode"] = payment_mode
+        
+        if created_by:
+            query["created_by"] = created_by
+        
+        if document_type:
+            query["document_type"] = document_type
+        
+        if store_code:
+            query["store_code"] = store_code
+        
+        # Filter for invoices converted from Sales Orders
+        if converted_from_so:
+            query["$or"] = [
+                {"converted_from_so": True},
+                {"original_so_number": {"$exists": True, "$ne": None}},
+                {"original_so_id": {"$exists": True, "$ne": None}}
+            ]
+        
+        if search:
+            search_query = [
+                {"invoice_number": {"$regex": search, "$options": "i"}},
+                {"customer.name": {"$regex": search, "$options": "i"}},
+                {"customer.phone": {"$regex": search, "$options": "i"}}
+            ]
+            # Merge with existing $or if present
+            if "$or" in query:
+                query["$and"] = [{"$or": query.pop("$or")}, {"$or": search_query}]
+            else:
+                query["$or"] = search_query
+        
+        skip = (page - 1) * limit
+        
+        if include_converted and document_type == "sales_order":
+            query.pop("document_type", None)
+            conv = {"$or": [
+                {"document_type": "sales_order"},
+                {"document_type": "invoice",
+                 "original_so_id": {"$in": [None, ""]},
+                 "converted_from_so": {"$ne": True},
+                 "$or": [
+                     {"original_so_number": {"$exists": True, "$nin": [None, ""]}},
+                     {"converted_to_invoice_at": {"$exists": True, "$nin": [None, ""]}},
+                 ]},
+            ]}
+            query["$and"] = query.get("$and", []) + [conv]
+            if search and isinstance(query.get("$or"), list):
+                query["$or"].append({"original_so_number": {"$regex": search, "$options": "i"}})
+
+        _apply_date_range(query, from_date, to_date)
+
+        # Sort by the invoice's effective date: use converted_to_invoice_at when
+        # present (so an SO converted to invoice sorts by conversion time, not
+        # the original SO's creation date), otherwise fall back to created_at.
+        if include_converted and document_type == "sales_order":
+            # Sales Orders page: sort by SO number (converted SOs keep their SO number
+            # in original_so_number), newest number first.
+            pipeline = [
+                {"$match": query},
+                {"$addFields": {"_so_key": {"$cond": [
+                    {"$gt": [{"$strLenCP": {"$ifNull": ["$original_so_number", ""]}}, 0]},
+                    "$original_so_number", "$invoice_number"]}}},
+                {"$addFields": {"_so_num": {"$let": {
+                    "vars": {"m": {"$regexFind": {"input": {"$ifNull": ["$_so_key", ""]},
+                                                  "regex": "([0-9]+)(?:/[0-9-]+)?$"}}},
+                    "in": {"$convert": {
+                        "input": {"$arrayElemAt": [{"$ifNull": ["$$m.captures", []]}, 0]},
+                        "to": "int", "onError": 0, "onNull": 0}}}}}},
+                {"$sort": {"_so_num": -1, "created_at": -1}},
+                {"$skip": skip},
+                {"$limit": limit},
+                {"$project": {"_id": 0, "_so_key": 0, "_so_num": 0}}
+            ]
+        else:
+            pipeline = [
+                {"$match": query},
+                {"$addFields": {
+                    "_sort_date": {
+                        "$ifNull": ["$converted_to_invoice_at", "$created_at"]
+                    }
+                }},
+                {"$sort": {"_sort_date": -1}},
+                {"$skip": skip},
+                {"$limit": limit},
+                {"$project": {"_id": 0, "_sort_date": 0}}
+            ]
+        invoices = await db.offline_invoices.aggregate(pipeline).to_list(None)
+        
+        total = await db.offline_invoices.count_documents(query)
+        
+        return {
+            "status": "success",
+            "invoices": invoices,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "pages": (total + limit - 1) // limit
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch invoices: {str(e)}")
+
+@router.get("/export/csv")
+async def export_invoices_csv(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    fy: Optional[str] = None,
+    document_type: Optional[str] = None,
+    store_code: Optional[str] = None,
+    converted_from_so: Optional[bool] = None,
+    search: Optional[str] = None,
+    db = Depends(get_db)
+):
+    """Stream a CSV export of invoices matching the given filters.
+    No record limit — uses MongoDB cursor + streaming response for memory safety.
+    """
+    from fastapi.responses import StreamingResponse
+    import csv
+    import io
+
+    query: Dict[str, Any] = {}
+    if fy and fy.lower() != "all":
+        try:
+            parts = fy.replace("FY", "").replace("fy", "").strip().split("-")
+            start_year = int(parts[0])
+            if start_year < 100:
+                start_year += 2000
+            query["created_at"] = {
+                "$gte": f"{start_year}-04-01T00:00:00",
+                "$lt": f"{start_year + 1}-04-01T00:00:00"
+            }
+        except Exception:
+            pass
+    elif False:  # superseded by _apply_date_range
+        pass
+
+    if document_type: query["document_type"] = document_type
+    if store_code: query["store_code"] = store_code
+    if converted_from_so:
+        query["$or"] = [
+            {"converted_from_so": True},
+            {"original_so_number": {"$exists": True, "$ne": None}},
+        ]
+    if search:
+        search_query = [
+            {"invoice_number": {"$regex": search, "$options": "i"}},
+            {"customer.name": {"$regex": search, "$options": "i"}},
+            {"customer.phone": {"$regex": search, "$options": "i"}}
+        ]
+        if "$or" in query:
+            query["$and"] = [{"$or": query.pop("$or")}, {"$or": search_query}]
+        else:
+            query["$or"] = search_query
+
+    _apply_date_range(query, from_date, to_date)
+
+    async def csv_iterator():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "Invoice/SO Number", "Date", "Document Type", "Store Code",
+            "Customer Name", "Customer Phone", "Customer Email",
+            "Subtotal", "Discount", "GST", "Total Amount",
+            "Payment Mode", "Status", "Created By"
+        ])
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+
+        cursor = db.offline_invoices.find(query, {"_id": 0}).sort("created_at", -1)
+        async for inv in cursor:
+            cust = inv.get("customer", {}) if isinstance(inv.get("customer"), dict) else {}
+            writer.writerow([
+                inv.get("invoice_number", ""),
+                (inv.get("created_at", "") or "")[:10],
+                inv.get("document_type", ""),
+                inv.get("store_code", ""),
+                cust.get("name", "") or inv.get("customer_name", ""),
+                cust.get("phone", "") or inv.get("customer_phone", ""),
+                cust.get("email", "") or inv.get("customer_email", ""),
+                inv.get("subtotal", 0),
+                inv.get("discount", 0),
+                inv.get("total_tax", inv.get("gst_amount", 0)),
+                inv.get("total_amount", 0),
+                inv.get("payment_mode", ""),
+                inv.get("status", ""),
+                inv.get("created_by", "")
+            ])
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    filename = f"invoices_export_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        csv_iterator(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@router.get("/stats/summary")
+async def get_invoice_stats(
+    fy: Optional[str] = None,
+    store_code: Optional[str] = None,
+    document_type: Optional[str] = None,
+    db = Depends(get_db)
+):
+    """Quick counts + totals for a given FY/store (used by Store dashboard header)."""
+    query: Dict[str, Any] = {}
+    if fy and fy.lower() != "all":
+        try:
+            parts = fy.replace("FY", "").replace("fy", "").strip().split("-")
+            start_year = int(parts[0])
+            if start_year < 100: start_year += 2000
+            query["created_at"] = {
+                "$gte": f"{start_year}-04-01T00:00:00",
+                "$lt": f"{start_year + 1}-04-01T00:00:00"
+            }
+        except Exception: pass
+    if store_code: query["store_code"] = store_code
+    if document_type: query["document_type"] = document_type
+
+    total = await db.offline_invoices.count_documents(query)
+    pipeline = [{"$match": query}, {"$group": {"_id": None, "total_value": {"$sum": "$total_amount"}}}]
+    agg = await db.offline_invoices.aggregate(pipeline).to_list(length=1)
+    total_value = agg[0]["total_value"] if agg else 0
+    return {"status": "success", "total_count": total, "total_value": round(total_value, 2)}
+
+
+@router.get("/{invoice_id}")
+async def get_offline_invoice(invoice_id: str, db = Depends(get_db)):
+    """Get specific offline invoice"""
+    try:
+        invoice = await db.offline_invoices.find_one({"id": invoice_id}, {"_id": 0})
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        
+        return {
+            "status": "success",
+            "invoice": invoice
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch invoice: {str(e)}")
+
+
+class EditInvoiceRequest(BaseModel):
+    """Request model for editing an invoice/SO - supports ALL fields"""
+    invoice_number: Optional[str] = None
+    invoice_date: Optional[str] = None
+    expected_delivery_date: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    customer_email: Optional[str] = None
+    customer_address: Optional[str] = None
+    customer: Optional[CustomerDetails] = None
+    items: Optional[List[InvoiceItem]] = None
+    payment_mode: Optional[str] = None
+    payment_status: Optional[str] = None
+    discount: Optional[float] = None
+    delivery_charges: Optional[float] = None
+    round_off: Optional[float] = None
+    notes: Optional[str] = None
+    order_source: Optional[str] = None
+    status: Optional[str] = None
+    payment_details: Optional[PaymentDetails] = None
+    immediate_delivery: Optional[bool] = None
+    edited_by: str
+    edit_reason: Optional[str] = None
+
+
+class AdminDocumentEditRequest(BaseModel):
+    """Request model for admin editing document number and date - FY transition support"""
+    invoice_number: Optional[str] = None  # New document number (e.g., old FY format)
+    invoice_date: Optional[str] = None  # Date in YYYY-MM-DD format
+    expected_delivery_date: Optional[str] = None  # For Sales Orders
+    edited_by: str
+    edit_reason: str  # Required reason for audit trail
+
+
+@router.put("/admin/edit-document/{document_id}")
+async def admin_edit_document_number_date(
+    document_id: str, 
+    edit_data: AdminDocumentEditRequest, 
+    db = Depends(get_db),
+    admin = Depends(verify_admin)
+):
+    """
+    Admin-only endpoint to edit document number and date.
+    Used for Financial Year transitions - allows backdating entries to previous FY.
+    
+    IMPORTANT: This creates an audit trail of all changes.
+    """
+    try:
+        # Find the document
+        existing = await db.offline_invoices.find_one({"id": document_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Check for duplicate document number if changing
+        if edit_data.invoice_number and edit_data.invoice_number != existing.get("invoice_number"):
+            duplicate = await db.offline_invoices.find_one({
+                "invoice_number": edit_data.invoice_number,
+                "id": {"$ne": document_id}
+            })
+            if duplicate:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Document number '{edit_data.invoice_number}' already exists"
+                )
+        
+        # Build update fields
+        update_fields = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "last_admin_edit": {
+                "edited_by": edit_data.edited_by,
+                "edit_reason": edit_data.edit_reason,
+                "edited_at": datetime.now(timezone.utc).isoformat(),
+                "previous_values": {
+                    "invoice_number": existing.get("invoice_number"),
+                    "invoice_date": existing.get("invoice_date"),
+                    "expected_delivery_date": existing.get("expected_delivery_date")
+                }
+            }
+        }
+        
+        # Update document number if provided
+        if edit_data.invoice_number:
+            update_fields["invoice_number"] = edit_data.invoice_number
+        
+        # Update invoice date if provided
+        if edit_data.invoice_date:
+            update_fields["invoice_date"] = edit_data.invoice_date
+        
+        # Update expected delivery date if provided
+        if edit_data.expected_delivery_date:
+            update_fields["expected_delivery_date"] = edit_data.expected_delivery_date
+        
+        # Perform update
+        result = await db.offline_invoices.update_one(
+            {"id": document_id},
+            {"$set": update_fields}
+        )
+        
+        if result.modified_count == 0:
+            return {"status": "info", "message": "No changes made"}
+        
+        # Log the edit in audit trail
+        audit_entry = {
+            "id": str(uuid.uuid4()),
+            "document_id": document_id,
+            "document_type": existing.get("document_type", "unknown"),
+            "action": "admin_edit_number_date",
+            "edited_by": edit_data.edited_by,
+            "edit_reason": edit_data.edit_reason,
+            "previous_values": {
+                "invoice_number": existing.get("invoice_number"),
+                "invoice_date": existing.get("invoice_date"),
+                "expected_delivery_date": existing.get("expected_delivery_date")
+            },
+            "new_values": {
+                "invoice_number": edit_data.invoice_number or existing.get("invoice_number"),
+                "invoice_date": edit_data.invoice_date or existing.get("invoice_date"),
+                "expected_delivery_date": edit_data.expected_delivery_date or existing.get("expected_delivery_date")
+            },
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.audit_trail.insert_one(audit_entry)
+        
+        # Get updated document
+        updated = await db.offline_invoices.find_one({"id": document_id}, {"_id": 0})
+        
+        return {
+            "status": "success",
+            "message": "Document updated successfully",
+            "document": updated,
+            "audit_id": audit_entry["id"]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update document: {str(e)}")
+
+
+class StoreDeleteRequest(BaseModel):
+    """Bulk delete all documents of a store (super admin)"""
+    store_code: str
+    document_type: str = "invoice"  # invoice | sales_order | all
+    confirm: str
+    dry_run: bool = False
+    deleted_by: str = "super_admin"
+
+
+@router.post("/admin/delete-by-store")
+async def delete_documents_by_store(req: StoreDeleteRequest, db = Depends(get_db), admin = Depends(verify_super_admin)):
+    """Delete ALL invoices/SOs of a store. Requires confirm='DELETE-{store_code}'."""
+    if req.confirm != f"DELETE-{req.store_code}":
+        raise HTTPException(status_code=400, detail=f"Confirmation mismatch. Type exactly: DELETE-{req.store_code}")
+    query = {"store_code": req.store_code}
+    if req.document_type != "all":
+        query["document_type"] = req.document_type
+    matched = await db.offline_invoices.count_documents(query)
+    if req.dry_run:
+        return {"status": "success", "dry_run": True, "matched": matched}
+    docs = await db.offline_invoices.find(query, {"_id": 0, "invoice_number": 1, "total_amount": 1}).to_list(None)
+    result = await db.offline_invoices.delete_many(query)
+    await db.audit_trail.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "bulk_delete_by_store",
+        "store_code": req.store_code,
+        "document_type": req.document_type,
+        "deleted_count": result.deleted_count,
+        "deleted_numbers": [d.get("invoice_number") for d in docs][:1000],
+        "deleted_by": req.deleted_by,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    # Roll back numbering counters for any document type(s) that now have
+    # zero remaining documents for this store, so future previews start
+    # fresh instead of staying ahead of what actually exists.
+    rollback_results = []
+    types_to_check = ["invoice", "sales_order"] if req.document_type == "all" else [req.document_type]
+    store = await db.stores.find_one({"code": req.store_code})
+    if store:
+        store_id = store.get("id")
+        numbering = await db.document_numbering.find_one({"store_id": store_id})
+        if numbering:
+            for doc_type in types_to_check:
+                remaining_count = await db.offline_invoices.count_documents({
+                    "store_code": req.store_code,
+                    "document_type": doc_type
+                })
+                if remaining_count == 0:
+                    doc_config = numbering.get("document_configs", {}).get(doc_type)
+                    if doc_config:
+                        prev = doc_config.get("current_number", 1)
+                        await db.document_numbering.update_one(
+                            {"store_id": store_id},
+                            {"$set": {
+                                f"document_configs.{doc_type}.current_number": 0,
+                                "updated_at": datetime.now(timezone.utc)
+                            }}
+                        )
+                        rollback_results.append({
+                            "document_type": doc_type,
+                            "previous_current_number": prev,
+                            "new_current_number": 0
+                        })
+
+    return {"status": "success", "deleted": result.deleted_count, "numbering_rollback": rollback_results}
+
+
+class DeleteByIdsRequest(BaseModel):
+    """Delete specific documents by their exact IDs (safer than delete-by-store)."""
+    ids: List[str]
+    confirm: str  # must equal "DELETE"
+    deleted_by: str = "super_admin"
+    delete_reason: str = ""
+
+
+@router.post("/admin/delete-by-ids")
+async def delete_documents_by_ids(req: DeleteByIdsRequest, db = Depends(get_db), admin = Depends(verify_super_admin)):
+    """Delete an exact list of documents by id. Requires confirm='DELETE'."""
+    if req.confirm != "DELETE":
+        raise HTTPException(status_code=400, detail="Confirmation mismatch. Type exactly: DELETE")
+
+    docs = await db.offline_invoices.find(
+        {"id": {"$in": req.ids}}, {"_id": 0}
+    ).to_list(None)
+
+    found_ids = [d.get("id") for d in docs]
+    missing_ids = [i for i in req.ids if i not in found_ids]
+
+    result = await db.offline_invoices.delete_many({"id": {"$in": req.ids}})
+
+    await db.audit_trail.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "bulk_delete_by_ids",
+        "requested_ids": req.ids,
+        "deleted_count": result.deleted_count,
+        "deleted_documents": [
+            {"id": d.get("id"), "invoice_number": d.get("invoice_number"), "total_amount": d.get("total_amount")}
+            for d in docs
+        ],
+        "missing_ids": missing_ids,
+        "deleted_by": req.deleted_by,
+        "delete_reason": req.delete_reason,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    # Roll back the numbering counter if the deleted document(s) were the
+    # most recently issued for their store/type — so the "Next #" preview
+    # correctly reflects the freed-up number instead of staying ahead.
+    import re as _re
+    rollback_results = []
+    seen_pairs = set()
+    for d in docs:
+        store_code = d.get("store_code")
+        doc_type = d.get("document_type")
+        if not store_code or not doc_type:
+            continue
+        pair = (store_code, doc_type)
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+
+        store = await db.stores.find_one({"code": store_code})
+        if not store:
+            continue
+        store_id = store.get("id")
+
+        numbering = await db.document_numbering.find_one({"store_id": store_id})
+        if not numbering:
+            continue
+        doc_config = numbering.get("document_configs", {}).get(doc_type)
+        if not doc_config:
+            continue
+        current_number = doc_config.get("current_number", 1)
+
+        # Find the highest sequence number still present in the DB for this
+        # store/type, by scanning remaining documents' invoice_number field
+        # for a trailing numeric sequence.
+        remaining = await db.offline_invoices.find(
+            {"store_code": store_code, "document_type": doc_type},
+            {"_id": 0, "invoice_number": 1}
+        ).to_list(None)
+
+        max_existing_seq = 0
+        for r in remaining:
+            num = r.get("invoice_number", "") or ""
+            seq = extract_sequence_number(num)
+            if seq is not None and seq > max_existing_seq:
+                max_existing_seq = seq
+
+        # current_number represents "last issued sequence" in this codebase's
+        # convention (get_next_document_number increments then uses -1).
+        # Only roll back if the counter is now ahead of the highest real doc.
+        if current_number > max_existing_seq:
+            await db.document_numbering.update_one(
+                {"store_id": store_id},
+                {"$set": {
+                    f"document_configs.{doc_type}.current_number": max_existing_seq,
+                    "updated_at": datetime.now(timezone.utc)
+                }}
+            )
+            rollback_results.append({
+                "store_code": store_code,
+                "document_type": doc_type,
+                "previous_current_number": current_number,
+                "new_current_number": max_existing_seq
+            })
+
+    return {
+        "status": "success",
+        "deleted": result.deleted_count,
+        "missing_ids": missing_ids,
+        "numbering_rollback": rollback_results
+    }
+
+
+@router.post("/admin/backdate-so")
+async def admin_create_backdated_sales_order(
+    invoice_data: OfflineInvoiceRequest,
+    custom_so_number: str = None,
+    custom_date: str = None,
+    db = Depends(get_db),
+    admin = Depends(verify_admin)
+):
+    """
+    Admin-only endpoint to create a Sales Order with a custom number and backdated date.
+    Used for Financial Year transitions - allows creating entries with previous FY numbering.
+    
+    Parameters:
+    - custom_so_number: The specific SO number to use (e.g., "HRBR-SO-2025-0045")
+    - custom_date: The date for the SO in YYYY-MM-DD format (e.g., "2025-03-28")
+    """
+    try:
+        # If custom number provided, check for duplicates
+        if custom_so_number:
+            duplicate = await db.offline_invoices.find_one({"invoice_number": custom_so_number})
+            if duplicate:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Document number '{custom_so_number}' already exists"
+                )
+        
+        # Use custom date or current date
+        so_date = custom_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
+        # Calculate items and totals (same logic as main create endpoint)
+        items_total = 0
+        tax_total = 0
+        taxable_total = 0
+        items_with_tax = []
+        
+        is_inter_state = determine_is_inter_state(
+            gst_number=(invoice_data.customer.gst_number if invoice_data.customer else None)
+        )
+        
+        for item in invoice_data.items:
+            inclusive_price = item.rate * item.quantity
+            item_discount_amount = (inclusive_price * item.discount) / 100
+            final_inclusive_price = inclusive_price - item_discount_amount
+            
+            tax_rate = item.tax_rate or 18.0
+            item_taxable_amount = final_inclusive_price / (1 + tax_rate / 100)
+            item_tax_amount = final_inclusive_price - item_taxable_amount
+            
+            items_total += final_inclusive_price
+            tax_total += item_tax_amount
+            taxable_total += item_taxable_amount
+            
+            items_with_tax.append({
+                **item.dict(),
+                "gross_amount": round(inclusive_price, 2),
+                "discount_amount": round(item_discount_amount, 2),
+                "taxable_amount": round(item_taxable_amount, 2),
+                "tax_amount": round(item_tax_amount, 2),
+                "igst": round(item_tax_amount, 2) if is_inter_state else 0,
+                "cgst": 0 if is_inter_state else round(item_tax_amount / 2, 2),
+                "sgst": 0 if is_inter_state else round(item_tax_amount / 2, 2),
+                "total": round(final_inclusive_price, 2)
+            })
+        
+        # Calculate final total
+        discount_percentage = invoice_data.discount_percentage or 0
+        discount_amount = (items_total * discount_percentage) / 100
+        delivery_charges = invoice_data.delivery_charges or 0
+        round_off = invoice_data.round_off or 0
+        final_total = items_total - discount_amount + delivery_charges + round_off
+        
+        # Generate SO number if not provided
+        so_number = custom_so_number
+        if not so_number:
+            # Use standard numbering - this will use current FY config
+            from document_numbering_routes import generate_number_preview
+            doc_numbering = await db.document_numbering.find_one(
+                {"store_code": invoice_data.store_code}, {"_id": 0}
+            )
+            if doc_numbering:
+                so_config = doc_numbering.get("document_configs", {}).get("sales_order", {})
+                so_number = generate_number_preview(invoice_data.store_code, so_config)
+        
+        # Create SO document
+        so_id = str(uuid.uuid4())
+        so_doc = {
+            "id": so_id,
+            "invoice_number": so_number,
+            "store_code": invoice_data.store_code,
+            "document_type": "sales_order",
+            "customer": invoice_data.customer.dict() if invoice_data.customer else {},
+            "items": items_with_tax,
+            "subtotal": round(taxable_total, 2),
+            "tax_total": round(tax_total, 2),
+            "igst_total": round(tax_total, 2) if is_inter_state else 0,
+            "cgst_total": 0 if is_inter_state else round(tax_total / 2, 2),
+            "sgst_total": 0 if is_inter_state else round(tax_total / 2, 2),
+            "discount_percentage": discount_percentage,
+            "discount_amount": round(discount_amount, 2),
+            "delivery_charges": delivery_charges,
+            "round_off": round_off,
+            "total_amount": round(final_total, 2),
+            "payment_mode": invoice_data.payment_mode or "Cash",
+            "payment_status": "pending",
+            "status": "pending_delivery",
+            "immediate_delivery": invoice_data.immediate_delivery if invoice_data.immediate_delivery is not None else True,
+            "expected_delivery_date": invoice_data.expected_delivery_date or so_date,
+            "notes": invoice_data.notes or "",
+            "order_source": invoice_data.order_source or "Store",
+            "invoice_date": so_date,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "created_via": "admin_backdate",
+            "backdate_reason": "Financial Year transition - old FY entry"
+        }
+        
+        await db.offline_invoices.insert_one(so_doc)
+        
+        return {
+            "status": "success",
+            "message": f"Backdated Sales Order created: {so_number}",
+            "invoice": {
+                "id": so_id,
+                "invoice_number": so_number,
+                "invoice_date": so_date,
+                "total_amount": round(final_total, 2),
+                "document_type": "sales_order"
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create backdated SO: {str(e)}")
+
+
+@router.put("/{invoice_id}")
+async def update_offline_invoice(invoice_id: str, update_data: EditInvoiceRequest, db = Depends(get_db), admin = Depends(verify_admin_or_store)):
+    """Update an existing offline invoice/sales order (admin only)"""
+    try:
+        # First check if invoice exists
+        existing = await db.offline_invoices.find_one({"id": invoice_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Invoice/SO not found")
+        
+        # "Mark Ready" (immediate_delivery flag) is a lightweight SO status
+        # change, not a real invoice edit — it should bypass the same-day
+        # edit-window restriction entirely.
+        is_mark_ready_only = (
+            update_data.immediate_delivery is not None
+            and update_data.invoice_number is None
+            and update_data.invoice_date is None
+            and update_data.expected_delivery_date is None
+            and update_data.status is None
+            and update_data.payment_status is None
+            and update_data.customer_name is None
+            and update_data.customer_phone is None
+            and update_data.customer_email is None
+            and update_data.customer_address is None
+            and update_data.customer is None
+            and not update_data.items
+        )
+        
+        # Edit lock for store managers: allowed only on the same calendar day
+        # the invoice was created (IST). Locked once the date rolls over.
+        user_role = admin.get("role")
+        if user_role not in ["admin", "super_admin"] and not is_mark_ready_only:
+            created_at_str = existing.get("created_at")
+            if created_at_str:
+                try:
+                    created_at = datetime.fromisoformat(created_at_str)
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    ist_offset = timedelta(hours=5, minutes=30)
+                    created_date_ist = (created_at + ist_offset).date()
+                    now_date_ist = (datetime.now(timezone.utc) + ist_offset).date()
+                    if now_date_ist > created_date_ist:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Edit window has closed. This invoice can only be edited on the day it was created."
+                        )
+                except HTTPException:
+                    raise
+                except ValueError:
+                    pass
+        
+        # Check if document is locked and user has permission
+        if existing.get("is_locked", False):
+            # Check edit permissions
+            doc_type = existing.get("document_type", "invoice")
+            permission = await db.edit_permissions.find_one({"document_type": doc_type})
+            if permission:
+                # For now, allow admin to edit - later add role check
+                pass
+        
+        # Build update fields
+        update_fields = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "edited_by": update_data.edited_by
+        }
+        
+        if update_data.edit_reason:
+            update_fields["last_edit_reason"] = update_data.edit_reason
+        
+        # Update document number and dates
+        if update_data.invoice_number:
+            update_fields["invoice_number"] = update_data.invoice_number
+        if update_data.invoice_date:
+            update_fields["invoice_date"] = update_data.invoice_date
+        if update_data.expected_delivery_date:
+            update_fields["expected_delivery_date"] = update_data.expected_delivery_date
+        if update_data.status:
+            update_fields["status"] = update_data.status
+        if update_data.payment_status:
+            update_fields["payment_status"] = update_data.payment_status
+        if update_data.immediate_delivery is not None:
+            update_fields["immediate_delivery"] = update_data.immediate_delivery
+        
+        # Update flat customer fields
+        if update_data.customer_name is not None:
+            update_fields["customer_name"] = update_data.customer_name
+            update_fields["customer.name"] = update_data.customer_name
+        if update_data.customer_phone is not None:
+            update_fields["customer_phone"] = update_data.customer_phone
+        if update_data.customer_email is not None:
+            update_fields["customer_email"] = update_data.customer_email
+        if update_data.customer_address is not None:
+            update_fields["customer_address"] = update_data.customer_address
+        
+        # Update customer object if provided
+        if update_data.customer:
+            update_fields["customer"] = update_data.customer.dict()
+        
+        # Update items and recalculate totals if provided
+        if update_data.items:
+            _edit_gst_number = None
+            if update_data.customer and update_data.customer.gst_number:
+                _edit_gst_number = update_data.customer.gst_number
+            else:
+                _edit_gst_number = (existing.get("customer") or {}).get("gst_number")
+            
+            if _edit_gst_number:
+                _edit_is_inter_state = determine_is_inter_state(gst_number=_edit_gst_number)
+            else:
+                _edit_is_inter_state = bool(existing.get("is_inter_state", False))
+            items_total = 0
+            tax_total = 0
+            taxable_total = 0
+            items_with_tax = []
+            
+            for item in update_data.items:
+                inclusive_price = item.rate * item.quantity
+                item_discount_amount = (inclusive_price * item.discount) / 100
+                final_inclusive_price = inclusive_price - item_discount_amount
+                
+                tax_rate = item.tax_rate or 18.0
+                item_taxable_amount = final_inclusive_price / (1 + tax_rate / 100)
+                item_tax_amount = final_inclusive_price - item_taxable_amount
+                item_total = final_inclusive_price
+                
+                items_total += item_total
+                tax_total += item_tax_amount
+                taxable_total += item_taxable_amount
+                
+                items_with_tax.append({
+                    **item.dict(),
+                    "gross_amount": round(inclusive_price, 2),
+                    "discount_amount": round(item_discount_amount, 2),
+                    "taxable_amount": round(item_taxable_amount, 2),
+                    "tax_amount": round(item_tax_amount, 2),
+                    "igst": round(item_tax_amount, 2) if _edit_is_inter_state else 0,
+                    "cgst": 0 if _edit_is_inter_state else round(item_tax_amount / 2, 2),
+                    "sgst": 0 if _edit_is_inter_state else round(item_tax_amount / 2, 2),
+                    "total": round(item_total, 2)
+                })
+            
+            update_fields["items"] = items_with_tax
+            update_fields["subtotal"] = round(taxable_total, 2)
+            update_fields["tax_total"] = round(tax_total, 2)
+            if _edit_is_inter_state:
+                update_fields["igst_total"] = round(tax_total, 2)
+                update_fields["cgst_total"] = 0
+                update_fields["sgst_total"] = 0
+            else:
+                update_fields["igst_total"] = 0
+                update_fields["cgst_total"] = round(tax_total / 2, 2)
+                update_fields["sgst_total"] = round(tax_total / 2, 2)
+            
+            # Recalculate total
+            discount = update_data.discount if update_data.discount is not None else existing.get("discount_percentage", 0)
+            delivery_charges = update_data.delivery_charges if update_data.delivery_charges is not None else existing.get("delivery_charges", 0)
+            round_off = update_data.round_off if update_data.round_off is not None else existing.get("round_off", 0)
+            
+            discount_amount = (items_total * discount) / 100 if discount > 0 else 0
+            final_total = items_total - discount_amount + delivery_charges + round_off
+            
+            update_fields["discount_percentage"] = discount
+            update_fields["discount_amount"] = round(discount_amount, 2)
+            update_fields["delivery_charges"] = round(delivery_charges, 2)
+            update_fields["round_off"] = round(round_off, 2)
+            update_fields["total_amount"] = round(final_total, 2)
+        
+        # Update other simple fields
+        if update_data.payment_mode:
+            update_fields["payment_mode"] = update_data.payment_mode
+        if update_data.notes is not None:
+            update_fields["notes"] = update_data.notes
+        if update_data.order_source:
+            update_fields["order_source"] = update_data.order_source
+        if update_data.payment_details:
+            update_fields["payment_details"] = update_data.payment_details.dict()
+        
+        # Perform update
+        result = await db.offline_invoices.update_one(
+            {"id": invoice_id},
+            {"$set": update_fields}
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=400, detail="No changes made")
+        
+        # Get updated document
+        updated = await db.offline_invoices.find_one({"id": invoice_id}, {"_id": 0})
+
+        # Keep Sales Order stock reservations in step with edited item quantities.
+        # Runs only after a successful save, and never fails the save itself.
+        stock_warnings = []
+        reservation_sync_error = None
+        try:
+            if (
+                update_data.items
+                and existing.get("document_type") == "sales_order"
+                and existing.get("status") in ("pending_delivery", "partially_delivered")
+                and (updated or {}).get("status") in ("pending_delivery", "partially_delivered")
+            ):
+                from inventory_service import InventoryService
+                _inv_service = InventoryService(db)
+                _sync = await _inv_service.sync_order_reservations(
+                    reference_id=invoice_id,
+                    new_items=[
+                        {
+                            "product_id": it.get("product_id"),
+                            "quantity": it.get("quantity"),
+                            "product_name": it.get("product_name", ""),
+                        }
+                        for it in update_fields.get("items", [])
+                    ],
+                    reference_type="sales_order",
+                    order_number=existing.get("invoice_number") or existing.get("so_number") or invoice_id,
+                    created_by=(
+                        admin.get("username")
+                        or admin.get("sub")
+                        or admin.get("user_id")
+                        or admin.get("id")
+                        or "system"
+                    ),
+                )
+                if _sync.get("success"):
+                    stock_warnings = _sync.get("warnings", [])
+                else:
+                    reservation_sync_error = _sync.get("message", "Reservation sync failed")
+        except Exception as _sync_err:
+            reservation_sync_error = f"Reservation sync failed: {str(_sync_err)}"
+            print(f"⚠️ {reservation_sync_error}")
+
+        # Auto-create voucher for any NEW payment added during edit
+        # (only the delta over what was already receipted, so re-saving
+        # the same payment doesn't create a duplicate voucher)
+        if update_data.payment_details:
+            old_paid = (existing.get("payment_details") or {}).get("amount_paid", 0) or 0
+            new_paid = update_data.payment_details.amount_paid or 0
+            delta = round(new_paid - old_paid, 2)
+
+            if delta > 0:
+                import uuid as _uuid
+                today = datetime.now(timezone.utc)
+                doc_type = existing.get("document_type", "invoice")
+                doc_label = "Sales Order" if doc_type == "sales_order" else "Invoice"
+                doc_number = existing.get("invoice_number") or existing.get("so_number") or invoice_id
+
+                receipt_count = await db.vouchers.count_documents({
+                    "voucher_type": "receipt",
+                    "created_at": {
+                        "$gte": today.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                    }
+                })
+                receipt_number = f"RCP-{today.strftime('%Y%m%d')}-{receipt_count + 1:04d}"
+
+                voucher_data = {
+                    "id": str(_uuid.uuid4()),
+                    "voucher_number": receipt_number,
+                    "voucher_type": "receipt",
+                    "party_name": existing.get("customer", {}).get("name", "Unknown"),
+                    "amount": delta,
+                    "payment_mode": update_data.payment_mode or existing.get("payment_mode"),
+                    "reference_number": update_data.payment_details.transaction_reference,
+                    "description": f"Additional payment for {doc_label}: {doc_number} (added via edit)",
+                    "voucher_date": today.isoformat(),
+                    "created_by": (
+                        admin.get("username")
+                        or admin.get("sub")
+                        or admin.get("user_id")
+                        or admin.get("id")
+                        or "system"
+                    ),
+                    "linked_document": {
+                        "type": doc_type,
+                        "number": doc_number,
+                        "id": invoice_id
+                    },
+                    "is_advance": update_data.payment_details.is_advance or False,
+                    "approval_status": "pending",
+                    "approved_by": None,
+                    "approved_at": None,
+                    "is_locked": True,
+                    "created_at": today.isoformat(),
+                    "updated_at": today.isoformat()
+                }
+                await db.vouchers.insert_one(voucher_data)
+
+                try:
+                    from realtime_accounting import post_transaction_event
+                    await post_transaction_event(db, f"voucher_{voucher_data['voucher_type']}", {
+                        "id": voucher_data["voucher_number"],
+                        "amount": voucher_data["amount"],
+                        "tax": 0,
+                        "payment_method": voucher_data.get("payment_mode", "n/a"),
+                        "payment_status": "pending",
+                        "date": voucher_data["created_at"],
+                        "party": voucher_data.get("party_name", "Unknown"),
+                        "description": voucher_data.get("description", "")
+                    })
+                except Exception as e:
+                    print(f"⚠️ Real-time accounting failed for {voucher_data['voucher_number']}: {e}")
+        
+        # Release document number if the document was just cancelled
+        number_release = None
+        if update_data.status == "cancelled" and existing.get("status") != "cancelled":
+            from document_numbering_routes import release_cancelled_document_number
+            try:
+                number_release = await release_cancelled_document_number(db, existing)
+            except Exception as _rel_err:
+                number_release = {"released": False, "reason": str(_rel_err)}
+        
+        response = {
+            "status": "success",
+            "message": "Invoice/SO updated successfully",
+            "invoice": updated,
+            "number_release": number_release
+        }
+        if stock_warnings:
+            response["stock_warnings"] = stock_warnings
+        if reservation_sync_error:
+            response["reservation_sync_error"] = reservation_sync_error
+        return response
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update invoice: {str(e)}")
+
+
+
+@router.get("/sales-orders/pending")
+async def get_pending_sales_orders(
+    page: int = 1,
+    limit: int = 500,
+    store_code: str = None,
+    db = Depends(get_db)
+):
+    """Get pending sales orders (NOT immediate delivery) - for Warehouse Pending SOs section"""
+    try:
+        limit = min(max(int(limit or 500), 1), 10000)
+        # Pending SOs are those explicitly marked as NOT immediate delivery
+        # OR those with a future delivery date
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        query = {
+            "document_type": "sales_order",
+            "status": {"$in": ["pending_delivery", "partially_delivered"]},
+            "$or": [
+                {"immediate_delivery": False},
+                {"immediate_delivery": {"$exists": False}, "expected_delivery_date": {"$gt": today}},
+                {"immediate_delivery": {"$exists": False}, "expected_delivery_date": {"$exists": True, "$ne": "", "$gt": today}}
+            ]
+        }
+        if store_code:
+            query["store_code"] = store_code
+        
+        skip = (page - 1) * limit
+        
+        sales_orders = await db.offline_invoices.find(
+            query,
+            {"_id": 0}
+        ).sort("created_at", -1).skip(skip).limit(limit).to_list(None)
+        
+        total = await db.offline_invoices.count_documents(query)
+        
+        return {
+            "status": "success",
+            "sales_orders": sales_orders,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "pages": (total + limit - 1) // limit
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch sales orders: {str(e)}")
+
+
+@router.get("/sales-orders/immediate")
+async def get_immediate_delivery_orders(
+    page: int = 1,
+    limit: int = 500,
+    store_code: str = None,
+    db = Depends(get_db)
+):
+    """Get immediate delivery sales orders - for Warehouse 'SO to Invoice' section"""
+    try:
+        limit = min(max(int(limit or 500), 1), 10000)
+        query = {
+            "document_type": "sales_order",
+            "status": {"$in": ["pending_delivery", "partially_delivered"]},
+            "$or": [
+                {"immediate_delivery": True},
+                {"immediate_delivery": {"$exists": False}, "expected_delivery_date": {"$lte": datetime.now(timezone.utc).strftime("%Y-%m-%d")}}
+            ]
+        }
+        if store_code:
+            query["store_code"] = store_code
+        
+        skip = (page - 1) * limit
+        
+        sales_orders = await db.offline_invoices.find(
+            query,
+            {"_id": 0}
+        ).sort("created_at", -1).skip(skip).limit(limit).to_list(None)
+        
+        total = await db.offline_invoices.count_documents(query)
+        
+        return {
+            "status": "success",
+            "sales_orders": sales_orders,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "pages": (total + limit - 1) // limit
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch immediate orders: {str(e)}")
+
+class ConvertToInvoiceRequest(BaseModel):
+    sales_order_ids: List[str]
+    converted_by: str  # Accountant or warehouse manager name/ID
+    force: bool = False  # If True, skip the duplicate-invoice warning check
+
+@router.post("/sales-orders/revert-conversion/{invoice_id}")
+async def revert_invoice_to_sales_order(invoice_id: str, reverted_by: str = "admin", db = Depends(get_db)):
+    """
+    Revert a wrongly-converted invoice back to a pending sales order.
+    Mirrors convert_sales_orders_to_invoice() in reverse:
+      - Restores stock/reservation to pre-conversion state
+      - Reverts serial numbers from 'sold' back to 'in_stock'
+      - Flips the document back to document_type='sales_order', status='pending_delivery'
+    Admin-only, intended as a one-off correction tool for wrongly-converted SOs.
+    """
+    try:
+        doc = await db.offline_invoices.find_one({"id": invoice_id})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Invoice/SO not found")
+
+        if doc.get("document_type") != "invoice":
+            raise HTTPException(status_code=400, detail="Document is not currently an invoice; nothing to revert")
+
+        from inventory_service import InventoryService
+        inventory_service = InventoryService(db)
+
+        for item in doc.get("items", []):
+            product_id = item.get("product_id")
+            if not product_id:
+                continue
+
+            # Find the reservation this conversion consumed
+            reservation = await db.stock_reservations.find_one({
+                "product_id": product_id,
+                "converted_to": invoice_id,
+                "status": "converted"
+            })
+
+            if reservation:
+                quantity = reservation.get("quantity", 0)
+                product = await db.products.find_one({"id": product_id}, {"_id": 0})
+                if product:
+                    current_stock = product.get("current_stock", 0)
+                    reserved_stock = product.get("reserved_stock", 0)
+
+                    restored_stock = current_stock + quantity
+                    restored_reserved = reserved_stock + quantity
+
+                    history_entry = {
+                        "id": str(uuid.uuid4()),
+                        "type": "reverted_sale_to_reservation",
+                        "quantity": quantity,
+                        "balance_before": current_stock,
+                        "balance_after": restored_stock,
+                        "reserved_before": reserved_stock,
+                        "reserved_after": restored_reserved,
+                        "reason": f"Reverted wrongly-converted invoice back to SO: {invoice_id}",
+                        "reference_id": invoice_id,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "created_by": reverted_by
+                    }
+
+                    await db.products.update_one(
+                        {"id": product_id},
+                        {
+                            "$set": {
+                                "current_stock": restored_stock,
+                                "reserved_stock": restored_reserved,
+                                "last_stock_update": datetime.now(timezone.utc).isoformat()
+                            },
+                            "$push": {"stock_history": history_entry}
+                        }
+                    )
+
+                await db.stock_reservations.update_one(
+                    {"_id": reservation["_id"]},
+                    {
+                        "$set": {
+                            "status": "active",
+                        },
+                        "$unset": {
+                            "converted_to": "",
+                            "converted_at": ""
+                        }
+                    }
+                )
+
+            # Revert serial numbers, if this item used serial tracking
+            if item.get("has_serial_tracking") and item.get("serial_numbers"):
+                for serial_number in item.get("serial_numbers", []):
+                    await db.serial_inventory.update_one(
+                        {"serial_number": serial_number, "sold_invoice_id": invoice_id},
+                        {
+                            "$set": {
+                                "status": "in_stock",
+                                "updated_at": datetime.now(timezone.utc).isoformat()
+                            },
+                            "$unset": {
+                                "sold_invoice_id": "",
+                                "sold_invoice_number": "",
+                                "sold_date": "",
+                                "customer_name": "",
+                                "customer_phone": ""
+                            }
+                        }
+                    )
+                    await db.serial_transactions.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "serial_number": serial_number,
+                        "product_id": product_id,
+                        "transaction_type": "reverted_to_stock",
+                        "reference_type": "sales_order",
+                        "reference_id": invoice_id,
+                        "reference_number": doc.get("invoice_number"),
+                        "created_by": reverted_by,
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    })
+
+        # Flip the document back to a pending sales order
+        # Restore the original SO number as the display number, if we have it
+        restore_fields = {
+            "document_type": "sales_order",
+            "status": "pending_delivery",
+            "reverted_from_invoice_at": datetime.now(timezone.utc).isoformat(),
+            "reverted_by": reverted_by,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        original_so_number = doc.get("original_so_number")
+        if original_so_number:
+            restore_fields["invoice_number"] = original_so_number
+
+        await db.offline_invoices.update_one(
+            {"id": invoice_id},
+            {
+                "$set": restore_fields,
+                "$unset": {
+                    "converted_to_invoice_at": "",
+                    "converted_by": ""
+                }
+            }
+        )
+
+        updated = await db.offline_invoices.find_one({"id": invoice_id}, {"_id": 0})
+        return {
+            "status": "success",
+            "message": "Invoice reverted back to pending sales order",
+            "document": updated
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reverting conversion: {str(e)}")
+
+
+def _inclusive_line(so_item, qty):
+    """Rate is GST-inclusive. Reverse-calculate taxable + tax for qty units."""
+    rate = float(so_item.get("rate", 0) or 0)
+    gst = float(so_item.get("gst_rate") or so_item.get("tax_rate") or 18)
+    disc_pct = float(so_item.get("discount") or 0)
+    gross = rate * qty
+    disc = gross * disc_pct / 100
+    total = gross - disc
+    taxable = total / (1 + gst / 100)
+    tax = total - taxable
+    return {
+        "gross_amount": round(gross, 2),
+        "discount_amount": round(disc, 2),
+        "taxable_amount": round(taxable, 2),
+        "tax_amount": round(tax, 2),
+        "amount": round(total, 2),
+        "total": round(total, 2),
+        "line_total": round(total, 2),
+    }
+
+
+@router.post("/sales-orders/convert-to-invoice")
+async def convert_sales_orders_to_invoice(request: ConvertToInvoiceRequest, db = Depends(get_db)):
+    """Convert sales orders to invoices (when ready for delivery)"""
+    try:
+        converted_count = 0
+        failed_conversions = []
+        converted_orders = []
+        
+        for sales_order_id in request.sales_order_ids:
+            try:
+                # Find the sales order
+                sales_order = await db.offline_invoices.find_one({"id": sales_order_id})
+                
+                if not sales_order:
+                    failed_conversions.append({
+                        "id": sales_order_id,
+                        "reason": "Sales order not found"
+                    })
+                    continue
+                
+                if sales_order.get("document_type") != "sales_order":
+                    failed_conversions.append({
+                        "id": sales_order_id,
+                        "reason": "Document is not a sales order"
+                    })
+                    continue
+                
+                if sales_order.get("status") not in ["pending_delivery", "partially_delivered"]:
+                    failed_conversions.append({
+                        "id": sales_order_id,
+                        "reason": f"Sales order status is {sales_order.get('status')}, not pending_delivery"
+                    })
+                    continue
+                
+                # Duplicate-invoice safety check: if a store already created an
+                # invoice directly for this same customer with a similar total
+                # amount recently, warn instead of silently converting the SO
+                # into a second, duplicate invoice. Skipped if force=True.
+                if not request.force and sales_order.get("status") != "partially_delivered":
+                    customer_phone = (sales_order.get("customer") or {}).get("phone")
+                    so_total = sales_order.get("total_amount", 0)
+                    so_created_at = sales_order.get("created_at", "")
+                    
+                    if customer_phone:
+                        # Look back a generous window (14 days before SO creation
+                        # through now) for any invoice for the same customer with
+                        # a closely matching total amount.
+                        potential_duplicate = await db.offline_invoices.find_one({
+                            "id": {"$ne": sales_order_id},
+                            "document_type": "invoice",
+                            "customer.phone": customer_phone,
+                            "total_amount": {
+                                "$gte": so_total - 1,
+                                "$lte": so_total + 1
+                            }
+                        })
+                        
+                        if potential_duplicate:
+                            failed_conversions.append({
+                                "id": sales_order_id,
+                                "reason": "duplicate_warning",
+                                "message": (
+                                    f"An invoice ({potential_duplicate.get('invoice_number')}) "
+                                    f"already exists for this customer with a matching amount "
+                                    f"(₹{so_total:,.2f}). This SO may already be fulfilled. "
+                                    f"Confirm to convert anyway."
+                                ),
+                                "existing_invoice_number": potential_duplicate.get("invoice_number"),
+                                "existing_invoice_id": potential_duplicate.get("id")
+                            })
+                            continue
+                
+                # Convert using the same logic as the store screen
+                # (new invoice number, SO kept as its own record, GST-inclusive totals)
+                _items = [
+                    {"product_id": it.get("product_id"),
+                     "product_name": it.get("product_name") or it.get("name") or "",
+                     "quantity": it.get("quantity", 0),
+                     "rate": it.get("rate", 0),
+                     "serial_numbers": it.get("serial_numbers") or []}
+                    for it in sales_order.get("items", [])
+                ]
+                if not _items or any(not i["product_id"] for i in _items):
+                    failed_conversions.append({"id": sales_order_id,
+                                               "reason": "One or more items have no product_id"})
+                    continue
+                _res = await partial_convert_so_to_invoice(
+                    PartialConvertRequest(
+                        sales_order_id=sales_order_id,
+                        selected_items=_items,
+                        converted_by=request.converted_by,
+                        force=True,  # duplicate check already done above
+                    ),
+                    db,
+                )
+                if _res.get("status") == "success":
+                    converted_count += 1
+                    converted_orders.append({
+                        "id": sales_order_id,
+                        "invoice_number": (_res.get("new_invoice") or {}).get("invoice_number"),
+                    })
+                else:
+                    failed_conversions.append({"id": sales_order_id,
+                                               "reason": str(_res.get("message") or _res)})
+                continue
+
+                # Update the sales order to invoice
+                result = await db.offline_invoices.update_one(
+                    {"id": sales_order_id},
+                    {
+                        "$set": {
+                            "document_type": "invoice",
+                            "status": "ready_for_delivery",  # Changed from completed - needs delivery assignment
+                            "converted_to_invoice_at": datetime.now(timezone.utc).isoformat(),
+                            "converted_by": request.converted_by,
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        }
+                    }
+                )
+                
+                if result.modified_count > 0:
+                    # Convert reserved stock to actual sale (deduct stock)
+                    from inventory_service import InventoryService
+                    inventory_service = InventoryService(db)
+                    
+                    for item in sales_order.get("items", []):
+                        product_id = item.get("product_id")
+                        if product_id:
+                            stock_result = await inventory_service.convert_reservation_to_sale(
+                                product_id=product_id,
+                                reference_id=sales_order_id,
+                                new_reference_id=sales_order_id,  # Same ID since we're updating in place
+                                created_by=request.converted_by
+                            )
+                            if not stock_result.get("success"):
+                                print(f"⚠️ Stock conversion warning for {item.get('product_name')}: {stock_result.get('message')}")
+                        
+                        # Mark serial numbers as sold if serial tracking is enabled
+                        if item.get("has_serial_tracking") and item.get("serial_numbers"):
+                            customer = sales_order.get("customer", {})
+                            for serial_number in item.get("serial_numbers", []):
+                                await db.serial_inventory.update_one(
+                                    {"serial_number": serial_number, "status": "in_stock"},
+                                    {
+                                        "$set": {
+                                            "status": "sold",
+                                            "sold_invoice_id": sales_order_id,
+                                            "sold_invoice_number": sales_order.get("invoice_number"),
+                                            "sold_date": datetime.now(timezone.utc).isoformat(),
+                                            "customer_name": customer.get("name"),
+                                            "customer_phone": customer.get("phone"),
+                                            "updated_at": datetime.now(timezone.utc).isoformat()
+                                        }
+                                    }
+                                )
+                                # Create transaction record
+                                await db.serial_transactions.insert_one({
+                                    "id": str(uuid.uuid4()),
+                                    "serial_number": serial_number,
+                                    "product_id": product_id,
+                                    "transaction_type": "sold",
+                                    "reference_type": "invoice",
+                                    "reference_id": sales_order_id,
+                                    "reference_number": sales_order.get("invoice_number"),
+                                    "customer_name": customer.get("name"),
+                                    "created_by": request.converted_by,
+                                    "created_at": datetime.now(timezone.utc).isoformat()
+                                })
+                    
+                    converted_count += 1
+                    converted_orders.append({
+                        "id": sales_order_id,
+                        "invoice_number": sales_order.get("invoice_number")
+                    })
+                    
+                    # Send invoice email to customer with PDF attachment
+                    try:
+                        from email_notification_service import email_notification_service
+                        from invoice_pdf_generator import generate_invoice_pdf
+                        
+                        customer = sales_order.get("customer", {})
+                        customer_email = customer.get("email")
+                        if customer_email:
+                            store_details = sales_order.get("store_details", {})
+                            
+                            # Generate PDF for attachment
+                            pdf_bytes = None
+                            try:
+                                invoice_data = {
+                                    "invoice_number": sales_order.get('invoice_number', sales_order.get('id')),
+                                    "invoice_date": datetime.now(timezone.utc).isoformat(),
+                                    "customer_name": customer.get('name', 'Customer'),
+                                    "customer_phone": customer.get('phone', ''),
+                                    "customer_email": customer.get('email', ''),
+                                    "customer_gstin": customer.get('gst_number', ''),
+                                    "shipping_address": {
+                                        "address_line1": customer.get('address', ''),
+                                        "city": customer.get('city', ''),
+                                        "state": customer.get('state', 'Karnataka'),
+                                        "pincode": customer.get('pincode', '')
+                                    },
+                                    "place_of_supply": customer.get('state', 'Karnataka'),
+                                    "items": sales_order.get('items', []),
+                                    "subtotal": sales_order.get('subtotal', 0),
+                                    "tax_amount": sales_order.get('total_tax', 0),
+                                    "discount_amount": sales_order.get('discount_amount', 0),
+                                    "delivery_charges": sales_order.get('delivery_charges', 0),
+                                    "round_off": sales_order.get('round_off', 0),
+                                    "total_amount": sales_order.get('total_amount', 0),
+                                    "payment_method": sales_order.get('payment_mode', 'Cash'),
+                                    "payment_status": sales_order.get('payment_status', 'pending'),
+                                }
+                                pdf_bytes = generate_invoice_pdf(invoice_data, "offline")
+                                print(f"📄 Generated PDF for invoice {sales_order.get('invoice_number')}")
+                            except Exception as pdf_error:
+                                print(f"⚠️ Failed to generate PDF: {pdf_error}")
+                            
+                            await email_notification_service.send_invoice_email(
+                                customer_email=customer_email,
+                                customer_name=customer.get("name", "Customer"),
+                                invoice_number=sales_order.get("invoice_number"),
+                                invoice_items=sales_order.get("items", []),
+                                total_amount=sales_order.get("total_amount", 0),
+                                store_name=store_details.get("name", "Aditya Retail"),
+                                store_address=store_details.get("address", ""),
+                                store_gst=store_details.get("gst_number", ""),
+                                invoice_date=datetime.now(timezone.utc).strftime("%d-%m-%Y"),
+                                so_number=sales_order.get("so_number"),
+                                pdf_bytes=pdf_bytes
+                            )
+                            print(f"📧 Invoice email sent to {customer_email}" + (" with PDF" if pdf_bytes else ""))
+                    except Exception as email_error:
+                        print(f"⚠️ Failed to send invoice email: {email_error}")
+                else:
+                    failed_conversions.append({
+                        "id": sales_order_id,
+                        "reason": "Update failed"
+                    })
+            
+            except Exception as e:
+                failed_conversions.append({
+                    "id": sales_order_id,
+                    "reason": str(e)
+                })
+        
+        return {
+            "status": "success",
+            "converted_count": converted_count,
+            "converted_orders": converted_orders,
+            "failed_conversions": failed_conversions,
+            "message": f"Successfully converted {converted_count} sales order(s) to invoice(s)"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to convert sales orders: {str(e)}")
+
+
+class PartialConversionItem(BaseModel):
+    """Item to be converted from SO to Invoice"""
+    product_id: str
+    line_index: Optional[int] = None
+    product_name: str
+    quantity: int  # Quantity to convert (may be less than SO quantity)
+    rate: float
+    hsn_code: Optional[str] = None
+    gst_rate: Optional[float] = 18
+    serial_numbers: Optional[List[str]] = None
+
+
+class PartialConvertRequest(BaseModel):
+    """Request for partial SO to Invoice conversion"""
+    sales_order_id: str
+    selected_items: List[PartialConversionItem]  # Items to convert
+    converted_by: Optional[str] = None
+    notes: Optional[str] = None
+    force: bool = False  # If True, skip the duplicate-invoice warning check
+
+
+@router.post("/sales-orders/partial-convert")
+async def partial_convert_so_to_invoice(request: PartialConvertRequest, db = Depends(get_db)):
+    """
+    Convert selected items from a Sales Order to Invoice.
+    Remaining items stay in the SO for future delivery.
+    """
+    try:
+        # Find the sales order
+        sales_order = await db.offline_invoices.find_one({"id": request.sales_order_id})
+        
+        if not sales_order:
+            raise HTTPException(status_code=404, detail="Sales order not found")
+        
+        if sales_order.get("document_type") != "sales_order":
+            raise HTTPException(status_code=400, detail="Document is not a sales order")
+        
+        if sales_order.get("status") not in ["pending_delivery", "partially_delivered"]:
+            raise HTTPException(status_code=400, detail=f"Sales order status is {sales_order.get('status')}, cannot convert")
+        
+        # Duplicate-invoice safety check: if a store already created an invoice
+        # directly for this same customer with a similar total amount recently,
+        # warn instead of silently converting the SO into a duplicate invoice.
+        # Skipped if force=True (manager confirmed it's not a duplicate).
+        if not request.force and sales_order.get("status") != "partially_delivered":
+            customer_phone = (sales_order.get("customer") or {}).get("phone")
+            so_total = sales_order.get("total_amount", 0)
+            
+            if customer_phone:
+                potential_duplicate = await db.offline_invoices.find_one({
+                    "id": {"$ne": request.sales_order_id},
+                    "document_type": "invoice",
+                    "customer.phone": customer_phone,
+                    "total_amount": {
+                        "$gte": so_total - 1,
+                        "$lte": so_total + 1
+                    }
+                })
+                
+                if potential_duplicate:
+                    return {
+                        "status": "duplicate_warning",
+                        "message": (
+                            f"An invoice ({potential_duplicate.get('invoice_number')}) already "
+                            f"exists for this customer with a matching amount (₹{so_total:,.2f}). "
+                            f"This sales order may already be fulfilled. "
+                            f"Confirm to convert anyway."
+                        ),
+                        "existing_invoice_number": potential_duplicate.get("invoice_number"),
+                        "existing_invoice_id": potential_duplicate.get("id")
+                    }
+        
+        # Get selected product IDs and quantities
+        selected_by_index = {item.line_index: item for item in request.selected_items if getattr(item, 'line_index', None) is not None}
+        selected_item_map = {item.product_id: item for item in request.selected_items if getattr(item, 'line_index', None) is None}
+        
+        # Get SO items
+        so_items = sales_order.get("items", [])
+        
+        converted_items = []
+        remaining_items = []
+        
+        for so_idx, so_item in enumerate(so_items):
+            product_id = so_item.get("product_id")
+            so_qty = so_item.get("quantity", 0)
+            
+            selected = selected_by_index.get(so_idx) or selected_item_map.get(product_id)
+            if selected is not None:
+                convert_qty = selected.quantity
+                
+                if convert_qty > so_qty:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Cannot convert {convert_qty} of {so_item.get('product_name')} - only {so_qty} in SO"
+                    )
+                
+                # Add to converted items (for new invoice)
+                converted_item = {
+                    **so_item,
+                    "quantity": convert_qty,
+                    **_inclusive_line(so_item, convert_qty),
+                    "serial_numbers": selected.serial_numbers or []
+                }
+                converted_items.append(converted_item)
+                
+                # If partial quantity, add remaining to SO
+                remaining_qty = so_qty - convert_qty
+                if remaining_qty > 0:
+                    remaining_item = {
+                        **so_item,
+                        "quantity": remaining_qty,
+                        **_inclusive_line(so_item, remaining_qty)
+                    }
+                    remaining_items.append(remaining_item)
+            else:
+                # Item not selected - keep in SO
+                remaining_items.append(so_item)
+        
+        if not converted_items:
+            raise HTTPException(status_code=400, detail="No items selected for conversion")
+        
+        # Calculate totals for the new invoice
+        subtotal = round(sum(item.get("taxable_amount", 0) for item in converted_items), 2)
+        converted_inclusive = round(sum(item.get("total", 0) for item in converted_items), 2)
+        total_tax = round(sum(item.get("tax_amount", 0) for item in converted_items), 2)
+        
+        # Include delivery charges proportionally if exists
+        original_subtotal = sum(float(i.get("rate", 0) or 0) * float(i.get("quantity", 0) or 0) for i in so_items)
+        delivery_charges = sales_order.get("delivery_charges", 0)
+        if original_subtotal > 0 and delivery_charges > 0:
+            delivery_proportion = converted_inclusive / original_subtotal
+            invoice_delivery_charges = round(delivery_charges * delivery_proportion, 2)
+        else:
+            invoice_delivery_charges = 0
+        
+        total_amount = round(converted_inclusive + invoice_delivery_charges, 2)
+        
+        _partial_gst_number = sales_order.get("customer_gstin") or (sales_order.get("customer") or {}).get("gst_number")
+        _partial_is_inter_state = determine_is_inter_state(gst_number=_partial_gst_number)
+        
+        # Generate new invoice number using the proper document numbering system
+        from document_numbering_routes import get_next_document_number
+        
+        store_code = sales_order.get("store_code", "STORE")
+        store = await db.stores.find_one({"code": store_code})
+        store_id = store.get("id") if store else None
+        
+        if store_id:
+            new_invoice_number = await get_next_document_number(db, store_id, store_code, "invoice")
+        else:
+            # Fallback if store not found
+            today = datetime.now()
+            year_suffix = f"{today.year % 100}-{(today.year + 1) % 100}"
+            
+            latest_invoice = await db.offline_invoices.find_one(
+                {"invoice_number": {"$regex": f"^{store_code}"}},
+                sort=[("created_at", -1)]
+            )
+            
+            if latest_invoice and latest_invoice.get("invoice_number"):
+                try:
+                    last_num = extract_sequence_number(latest_invoice["invoice_number"])
+                    new_num = (last_num + 1) if last_num is not None else 1
+                except Exception:
+                    new_num = 1
+            else:
+                new_num = 1
+            
+            new_invoice_number = f"{store_code}{new_num:04d}/{year_suffix}"
+        
+        # Create the new invoice
+        new_invoice = {
+            "id": str(uuid.uuid4()),
+            "invoice_number": new_invoice_number,
+            "document_type": "invoice",
+            "status": "ready_for_delivery",
+            "original_so_id": request.sales_order_id,
+            "original_so_number": sales_order.get("invoice_number"),
+            "converted_from_so": True,
+            "partial_conversion": True,
+            "store_code": sales_order.get("store_code"),
+            "store_name": sales_order.get("store_name"),
+            "store_details": await _refresh_store_details(db, sales_order),
+            "customer": sales_order.get("customer", {}),
+            "customer_name": sales_order.get("customer_name"),
+            "customer_phone": sales_order.get("customer_phone"),
+            "customer_email": sales_order.get("customer_email"),
+            "customer_gstin": sales_order.get("customer_gstin"),
+            "billing_address": sales_order.get("billing_address", {}),
+            "shipping_address": sales_order.get("shipping_address", {}),
+            "items": converted_items,
+            "subtotal": subtotal,
+            "total_tax": total_tax,
+            "igst": round(total_tax, 2) if _partial_is_inter_state else 0,
+            "cgst": 0 if _partial_is_inter_state else round(total_tax / 2, 2),
+            "sgst": 0 if _partial_is_inter_state else round(total_tax / 2, 2),
+            "delivery_charges": invoice_delivery_charges,
+            "total_amount": total_amount,
+            "payment_mode": sales_order.get("payment_mode", "cash"),
+            "payment_status": sales_order.get("payment_status", "pending"),
+            "total_paid": 0,
+            "balance_due": total_amount,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "invoice_date": _today_ist(),
+            "so_date": sales_order.get("invoice_date") or (sales_order.get("created_at") or "")[:10],
+            "converted_at": datetime.now(timezone.utc).isoformat(),
+            "converted_by": request.converted_by,
+            "conversion_notes": request.notes,
+            "created_by": sales_order.get("created_by")
+        }
+        
+        # Check for duplicate invoice number before inserting
+        duplicate_check = await db.offline_invoices.find_one({
+            "invoice_number": new_invoice_number,
+            "store_code": store_code
+        })
+        if duplicate_check:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate invoice number '{new_invoice_number}'. Please try again."
+            )
+        
+        # Insert the new invoice
+        await db.offline_invoices.insert_one(new_invoice)
+
+        # Real-time accounting for partial SO->invoice conversion
+        try:
+            from realtime_accounting import post_transaction_event
+            await post_transaction_event(db, "sale_offline", {
+                "id": new_invoice["invoice_number"],
+                "amount": new_invoice["total_amount"],
+                "tax": new_invoice["total_tax"],
+                "is_inter_state": _partial_is_inter_state,
+                "igst": new_invoice["igst"],
+                "cgst": new_invoice["cgst"],
+                "sgst": new_invoice["sgst"],
+                "payment_method": new_invoice["payment_mode"],
+                "payment_status": new_invoice["payment_status"],
+                "date": new_invoice["created_at"],
+                "items": new_invoice["items"]
+            })
+        except Exception as e:
+            print(f"⚠️ Real-time accounting failed for {new_invoice['invoice_number']}: {e}")
+
+        # Update the original SO
+        if remaining_items:
+            # Partial delivery - update SO with remaining items
+            remaining_delivery = delivery_charges - invoice_delivery_charges
+            # Always try both field naming schemes per item so a partial
+            # conversion never silently drops to 0 regardless of which
+            # schema a given item happens to carry.
+            remaining_subtotal = round(sum(
+                float(_it.get("taxable_amount") or _it.get("amount") or 0)
+                for _it in remaining_items
+            ), 2)
+            remaining_tax = round(sum(
+                float(_it.get("tax_amount")) if _it.get("tax_amount") not in (None, 0)
+                else (float(_it.get("amount") or 0) * (_it.get("gst_rate", 18) / 100))
+                for _it in remaining_items
+            ), 2)
+            remaining_total = round(sum(
+                float(_it.get("total") or _it.get("amount") or 0)
+                for _it in remaining_items
+            ) + remaining_delivery, 2)
+            
+            await db.offline_invoices.update_one(
+                {"id": request.sales_order_id},
+                {
+                    "$set": {
+                        "items": remaining_items,
+                        "subtotal": remaining_subtotal,
+                        "total_tax": remaining_tax,
+                        "igst": round(remaining_tax, 2) if _partial_is_inter_state else 0,
+                        "cgst": 0 if _partial_is_inter_state else round(remaining_tax / 2, 2),
+                        "sgst": 0 if _partial_is_inter_state else round(remaining_tax / 2, 2),
+                        "delivery_charges": remaining_delivery,
+                        "total_amount": remaining_total,
+                        "tax_total": round(remaining_tax, 2),
+                        "igst_total": round(remaining_tax, 2) if _partial_is_inter_state else 0,
+                        "cgst_total": 0 if _partial_is_inter_state else round(remaining_tax / 2, 2),
+                        "sgst_total": 0 if _partial_is_inter_state else round(remaining_tax / 2, 2),
+                        "status": "partially_delivered",
+                        "partial_invoices": sales_order.get("partial_invoices", []) + [new_invoice_number],
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }
+                }
+            )
+        else:
+            # All items converted - mark SO as fully converted
+            await db.offline_invoices.update_one(
+                {"id": request.sales_order_id},
+                {
+                    "$set": {
+                        "document_type": "sales_order",  # Keep as SO for reference
+                        "status": "completed",
+                        "converted_to_invoice_at": datetime.now(timezone.utc).isoformat(),
+                        "converted_invoice_number": new_invoice_number,
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }
+                }
+            )
+        
+        # Convert reserved stock to actual sale for converted items
+        from inventory_service import InventoryService
+        inventory_service = InventoryService(db)
+        
+        for item in converted_items:
+            product_id = item.get("product_id")
+            if product_id:
+                await inventory_service.convert_reservation_to_sale(
+                    product_id=product_id,
+                    reference_id=request.sales_order_id,
+                    new_reference_id=new_invoice["id"],
+                    quantity=item.get("quantity"),
+                    created_by=request.converted_by
+                )
+            
+            # Mark serial numbers as sold
+            if item.get("serial_numbers"):
+                for serial in item.get("serial_numbers", []):
+                    await db.serial_inventory.update_one(
+                        {"serial_number": serial, "status": "in_stock"},
+                        {
+                            "$set": {
+                                "status": "sold",
+                                "sold_invoice_id": new_invoice["id"],
+                                "sold_at": datetime.now(timezone.utc).isoformat()
+                            }
+                        }
+                    )
+        
+        # Remove _id before returning
+        new_invoice.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "new_invoice": new_invoice,
+            "remaining_items_count": len(remaining_items),
+            "so_status": "partially_delivered" if remaining_items else "completed",
+            "message": f"Created invoice {new_invoice_number} with {len(converted_items)} item(s)"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to convert: {str(e)}")
+
+
+
+@router.get("/invoices/ready-for-delivery")
+async def get_invoices_ready_for_delivery(
+    page: int = 1,
+    limit: int = 500,
+    store_code: str = None,
+    db = Depends(get_db)
+):
+    """Get invoices that are ready for delivery (converted from SOs or direct invoices needing delivery)"""
+    try:
+        limit = min(max(int(limit or 500), 1), 10000)
+        query = {
+            "document_type": "invoice",
+            "status": "ready_for_delivery",
+            "assigned_delivery_person": {"$in": [None, ""]}  # Not yet assigned to delivery person
+        }
+        if store_code:
+            query["store_code"] = store_code
+        
+        skip = (page - 1) * limit
+        
+        invoices = await db.offline_invoices.find(
+            query,
+            {"_id": 0}
+        ).sort("converted_to_invoice_at", -1).skip(skip).limit(limit).to_list(None)
+        
+        total = await db.offline_invoices.count_documents(query)
+        
+        return {
+            "status": "success",
+            "invoices": invoices,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "pages": (total + limit - 1) // limit
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch invoices: {str(e)}")
+
+
+class AssignDeliveryPersonRequest(BaseModel):
+    invoice_id: str
+    delivery_person_id: str
+    delivery_person_name: str
+    assigned_by: str
+    expected_delivery_date: Optional[str] = None
+    delivery_notes: Optional[str] = None
+
+@router.post("/invoices/assign-delivery")
+async def assign_delivery_person_to_invoice(request: AssignDeliveryPersonRequest, db = Depends(get_db)):
+    """
+    Assign a delivery person directly to an invoice.
+    The invoice acts as the delivery document with 'Goods Received' confirmation.
+    """
+    try:
+        # Find the invoice
+        invoice = await db.offline_invoices.find_one({"id": request.invoice_id})
+        
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        
+        if invoice.get("document_type") != "invoice":
+            raise HTTPException(status_code=400, detail="Document is not an invoice")
+        
+        # Update invoice with delivery person assignment
+        result = await db.offline_invoices.update_one(
+            {"id": request.invoice_id},
+            {
+                "$set": {
+                    "assigned_delivery_person": request.delivery_person_id,
+                    "assigned_delivery_person_name": request.delivery_person_name,
+                    "delivery_assigned_at": datetime.now(timezone.utc).isoformat(),
+                    "delivery_assigned_by": request.assigned_by,
+                    "expected_delivery_date": request.expected_delivery_date or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                    "delivery_notes": request.delivery_notes,
+                    "status": "out_for_delivery",
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=500, detail="Failed to assign delivery person")
+        
+        # Send notification to delivery person
+        try:
+            notification = {
+                "id": str(uuid.uuid4()),
+                "type": "delivery_assignment",
+                "title": "New Delivery Assigned",
+                "message": f"Invoice #{invoice.get('invoice_number')} assigned for delivery to {invoice.get('customer', {}).get('name', 'Customer')}",
+                "recipient_type": "delivery_person",
+                "recipient_id": request.delivery_person_id,
+                "data": {
+                    "invoice_id": request.invoice_id,
+                    "invoice_number": invoice.get("invoice_number"),
+                    "customer_name": invoice.get("customer", {}).get("name"),
+                    "customer_phone": invoice.get("customer", {}).get("phone"),
+                    "delivery_address": invoice.get("customer", {}).get("shipping_address") or invoice.get("customer", {}).get("address"),
+                    "total_amount": invoice.get("total_amount"),
+                    "payment_mode": invoice.get("payment_mode"),
+                    "is_cod": invoice.get("is_cod", False)
+                },
+                "is_read": False,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            await db.notifications.insert_one(notification)
+        except Exception as notif_error:
+            print(f"⚠️ Failed to send notification: {notif_error}")
+        
+        # Send email notification to customer with PDF attachment
+        try:
+            from email_notification_service import email_notification_service
+            from invoice_pdf_generator import generate_invoice_pdf
+            
+            customer = invoice.get("customer", {})
+            customer_email = customer.get("email")
+            if customer_email:
+                # Generate invoice PDF
+                pdf_bytes = None
+                try:
+                    pdf_bytes = generate_invoice_pdf(invoice, "offline")
+                    print(f"✅ Generated PDF for invoice {invoice.get('invoice_number')} ({len(pdf_bytes)} bytes)")
+                except Exception as pdf_error:
+                    print(f"⚠️ Failed to generate PDF: {pdf_error}")
+                
+                # Send delivery dispatch email with PDF attachment
+                await email_notification_service.send_delivery_dispatched_with_invoice(
+                    customer_email=customer_email,
+                    customer_name=customer.get("name", "Customer"),
+                    invoice_number=invoice.get("invoice_number"),
+                    delivery_person_name=request.delivery_person_name,
+                    delivery_person_phone=None,  # Will be fetched from delivery person record
+                    estimated_delivery=request.expected_delivery_date or "Today",
+                    store_name=invoice.get("store_details", {}).get("name", "Aditya Retail"),
+                    delivery_address=customer.get("shipping_address") or customer.get("billing_address") or customer.get("address", ""),
+                    total_amount=invoice.get("total_amount", 0),
+                    payment_mode=invoice.get("payment_mode", ""),
+                    is_cod=invoice.get("is_cod", False),
+                    pdf_bytes=pdf_bytes
+                )
+        except Exception as email_error:
+            print(f"⚠️ Failed to send delivery email: {email_error}")
+            import traceback
+            traceback.print_exc()
+        
+        return {
+            "status": "success",
+            "message": f"Delivery person assigned to invoice {invoice.get('invoice_number')}",
+            "invoice_id": request.invoice_id,
+            "delivery_person": request.delivery_person_name
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to assign delivery person: {str(e)}")
+
+
+@router.get("/invoices/out-for-delivery")
+async def get_invoices_out_for_delivery(
+    delivery_person_id: Optional[str] = None,
+    store_code: Optional[str] = None,
+    page: int = 1,
+    limit: int = 500,
+    db = Depends(get_db)
+):
+    """Get invoices that are out for delivery (assigned to delivery persons)"""
+    try:
+        limit = min(max(int(limit or 500), 1), 10000)
+        query = {
+            "document_type": "invoice",
+            "status": "out_for_delivery"
+        }
+        
+        if delivery_person_id:
+            query["assigned_delivery_person"] = delivery_person_id
+        
+        if store_code:
+            query["store_code"] = store_code
+        
+        skip = (page - 1) * limit
+        
+        invoices = await db.offline_invoices.find(
+            query,
+            {"_id": 0}
+        ).sort("delivery_assigned_at", -1).skip(skip).limit(limit).to_list(None)
+        
+        total = await db.offline_invoices.count_documents(query)
+        
+        return {
+            "status": "success",
+            "invoices": invoices,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "pages": (total + limit - 1) // limit
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch invoices: {str(e)}")
+
+
+@router.post("/invoices/{invoice_id}/upload-photo")
+async def upload_invoice_delivery_photo(invoice_id: str, file: UploadFile = File(...), db = Depends(get_db)):
+    """Upload a delivery proof photo for an invoice that is out for delivery"""
+    try:
+        invoice = await db.offline_invoices.find_one({"id": invoice_id})
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+
+        allowed_extensions = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+        file_extension = os.path.splitext(file.filename or "")[1].lower()
+        if file_extension not in allowed_extensions:
+            raise HTTPException(status_code=400, detail="Invalid file type. Only images allowed.")
+
+        unique_filename = f"{invoice_id}_{uuid.uuid4()}{file_extension}"
+        content = await file.read()
+        await save_upload(unique_filename, content, file.content_type or "image/jpeg")
+
+        # Same photo-serving route the challan flow already uses
+        photo_url = f"/api/delivery-challans/photos/{unique_filename}"
+        await db.offline_invoices.update_one(
+            {"id": invoice_id},
+            {
+                "$push": {"delivery_photos": {
+                    "url": photo_url,
+                    "filename": unique_filename,
+                    "uploaded_at": datetime.now(timezone.utc).isoformat()
+                }},
+                "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}
+            }
+        )
+        return {"status": "success", "photo_url": photo_url, "message": "Photo uploaded successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload photo: {str(e)}")
+
+
+@router.get("/invoices/delivered")
+async def get_delivered_invoices(delivery_person_id: str, limit: int = 200, db = Depends(get_db)):
+    """Invoices delivered by a delivery person (for the Completed list)"""
+    try:
+        limit = min(max(int(limit or 200), 1), 1000)
+        query = {
+            "document_type": "invoice",
+            "status": "delivered",
+            "$or": [
+                {"delivered_by": delivery_person_id},
+                {"assigned_delivery_person": delivery_person_id}
+            ]
+        }
+        invoices = await db.offline_invoices.find(query, {"_id": 0}).sort("delivered_at", -1).limit(limit).to_list(None)
+        return {"status": "success", "invoices": invoices, "total": len(invoices)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch delivered invoices: {str(e)}")
+
+
+class MarkDeliveredRequest(BaseModel):
+    invoice_id: str
+    delivered_by: str  # Delivery person ID
+    delivery_notes: Optional[str] = None
+    customer_signature: Optional[str] = None  # Base64 image of signature
+    goods_received_remarks: Optional[str] = None
+    payment_collected: bool = False
+    payment_amount: Optional[float] = None
+    payment_method: Optional[str] = None  # cash, upi, card
+    payment_reference: Optional[str] = None  # UPI ref or card transaction ID
+
+@router.post("/invoices/mark-delivered")
+async def mark_invoice_delivered(request: MarkDeliveredRequest, db = Depends(get_db)):
+    """
+    Mark an invoice as delivered with 'Goods Received in Good Condition' confirmation.
+    This is the final step - no separate DC needed.
+    """
+    try:
+        # Find the invoice
+        invoice = await db.offline_invoices.find_one({"id": request.invoice_id})
+        
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        
+        if invoice.get("status") != "out_for_delivery":
+            raise HTTPException(status_code=400, detail=f"Invoice status is {invoice.get('status')}, not out_for_delivery")
+        
+        # Determine payment status
+        payment_status = invoice.get("payment_status", "pending")
+        if request.payment_collected:
+            payment_status = "paid"
+        
+        # Update invoice as delivered
+        update_data = {
+            "status": "delivered",
+            "delivery_status": "delivered",
+            "delivered_at": datetime.now(timezone.utc).isoformat(),
+            "delivered_by": request.delivered_by,
+            "delivery_completion_notes": request.delivery_notes,
+            "goods_received_confirmation": {
+                "confirmed": True,
+                "customer_name": invoice.get("customer", {}).get("name"),
+                "signature": request.customer_signature,
+                "remarks": request.goods_received_remarks or "Goods received in good condition",
+                "confirmed_at": datetime.now(timezone.utc).isoformat()
+            },
+            "payment_status": payment_status,
+            "payment_collected": request.payment_collected,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Add payment details if collected
+        if request.payment_collected:
+            update_data["delivery_payment"] = {
+                "amount": request.payment_amount or invoice.get("total_amount"),
+                "method": request.payment_method,
+                "reference": request.payment_reference,
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "collected_by": request.delivered_by
+            }
+        
+        result = await db.offline_invoices.update_one(
+            {"id": request.invoice_id},
+            {"$set": update_data}
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=500, detail="Failed to mark invoice as delivered")
+        
+        # Send delivery confirmation email to customer
+        try:
+            from email_notification_service import email_notification_service
+            
+            customer = invoice.get("customer", {})
+            customer_email = customer.get("email")
+            if customer_email:
+                # You can create a delivery confirmation email template
+                pass
+        except Exception as email_error:
+            print(f"⚠️ Failed to send delivery confirmation email: {email_error}")
+        
+        return {
+            "status": "success",
+            "message": f"Invoice {invoice.get('invoice_number')} marked as delivered",
+            "invoice_id": request.invoice_id,
+            "delivered_at": update_data["delivered_at"],
+            "payment_collected": request.payment_collected
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to mark invoice as delivered: {str(e)}")
+
+
+
+@router.get("/admin/find-duplicates")
+async def find_duplicate_invoice_numbers(db = Depends(get_db)):
+    """
+    Find all duplicate invoice numbers across stores.
+    Returns grouped list of invoices with same numbers.
+    """
+    try:
+        # Aggregation to find duplicates
+        pipeline = [
+            {
+                "$group": {
+                    "_id": "$invoice_number",
+                    "count": {"$sum": 1},
+                    "documents": {
+                        "$push": {
+                            "id": "$id",
+                            "invoice_number": "$invoice_number",
+                            "document_type": "$document_type",
+                            "store_code": "$store_code",
+                            "customer_name": "$customer_name",
+                            "total_amount": "$total_amount",
+                            "created_at": "$created_at",
+                            "status": "$status"
+                        }
+                    }
+                }
+            },
+            {
+                "$match": {
+                    "count": {"$gt": 1}
+                }
+            },
+            {
+                "$sort": {"count": -1}
+            }
+        ]
+        
+        duplicates = await db.offline_invoices.aggregate(pipeline).to_list(None)
+        
+        # Format response
+        result = []
+        for dup in duplicates:
+            result.append({
+                "invoice_number": dup["_id"],
+                "duplicate_count": dup["count"],
+                "documents": dup["documents"]
+            })
+        
+        return {
+            "status": "success",
+            "total_duplicate_groups": len(result),
+            "total_duplicate_documents": sum(d["duplicate_count"] for d in result),
+            "duplicates": result
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to find duplicates: {str(e)}")
+
+def _compute_items_and_totals(items, customer, store: dict):
+    """
+    Replicates the tax math used in create_offline_invoice, so E-Way Bill /
+    E-Invoice payloads (generated before the invoice is saved) match what the
+    invoice will actually show.
+    """
+    taxable_total = 0.0
+    tax_total = 0.0
+    computed_items = []
+
+    seller_state = store.get("state", "Karnataka").lower().strip()
+    billing_state = (customer.billing_state or customer.state or "").strip()
+    if customer.shipping_same_as_billing:
+        shipping_state = billing_state
+    else:
+        shipping_state = (customer.shipping_state or billing_state or "").strip()
+    place_of_supply = shipping_state or billing_state or "Karnataka"
+    customer_state = shipping_state.lower() if shipping_state else billing_state.lower()
+
+    is_inter_state = determine_is_inter_state(
+        gst_number=customer.gst_number,
+        seller_state=seller_state,
+        customer_state=customer_state
+    )
+
+    for item in items:
+        inclusive_price = item.rate * item.quantity
+        item_discount_amount = (inclusive_price * item.discount) / 100
+        final_inclusive_price = inclusive_price - item_discount_amount
+
+        tax_rate = item.tax_rate or 18.0
+        item_taxable_amount = final_inclusive_price / (1 + tax_rate / 100)
+        item_tax_amount = final_inclusive_price - item_taxable_amount
+
+        taxable_total += item_taxable_amount
+        tax_total += item_tax_amount
+
+        computed_items.append({
+            "product_name": item.product_name,
+            "hsn_code": item.hsn_code,
+            "quantity": item.quantity,
+            "unit": "NOS",
+            "rate": item.rate,
+            "taxable_amount": round(item_taxable_amount, 2),
+            "tax_rate": tax_rate,
+            "sgst_rate": 0 if is_inter_state else round(tax_rate / 2, 2),
+            "cgst_rate": 0 if is_inter_state else round(tax_rate / 2, 2),
+            "igst_rate": tax_rate if is_inter_state else 0,
+            "cgst_amount": 0 if is_inter_state else round(item_tax_amount / 2, 2),
+            "sgst_amount": 0 if is_inter_state else round(item_tax_amount / 2, 2),
+            "igst_amount": round(item_tax_amount, 2) if is_inter_state else 0,
+            "line_total": round(final_inclusive_price, 2),
+        })
+
+    return {
+        "computed_items": computed_items,
+        "taxable_total": round(taxable_total, 2),
+        "tax_total": round(tax_total, 2),
+        "cgst_total": 0 if is_inter_state else round(tax_total / 2, 2),
+        "sgst_total": 0 if is_inter_state else round(tax_total / 2, 2),
+        "igst_total": round(tax_total, 2) if is_inter_state else 0,
+        "is_inter_state": is_inter_state,
+        "place_of_supply": place_of_supply,
+        "billing_state": billing_state,
+        "shipping_state": shipping_state,
+    }
+
+
+class GenerateEwayBillRequest(BaseModel):
+    store_code: str
+    customer: CustomerDetails
+    items: List[InvoiceItem]
+    invoice_number: str
+    invoice_date: str  # DD/MM/YYYY
+    delivery_charges: float = 0
+    round_off: float = 0
+    transporter_name: Optional[str] = None
+    transporter_gstin: Optional[str] = None
+    vehicle_number: Optional[str] = None
+    transport_mode: Optional[str] = "1"
+    transport_distance: Optional[int] = None
+
+
+class GenerateEinvoiceRequest(BaseModel):
+    store_code: str
+    customer: CustomerDetails
+    items: List[InvoiceItem]
+    invoice_number: str
+    invoice_date: str
+    delivery_charges: float = 0
+    round_off: float = 0
+
+
+@router.post("/generate-ewaybill")
+async def generate_ewaybill_for_invoice(req: GenerateEwayBillRequest, db = Depends(get_db)):
+    """Generate an E-Way Bill via Whitebooks for the current (not-yet-saved) invoice form data."""
+    try:
+        db_store = await db.stores.find_one({"code": req.store_code}, {"_id": 0})
+        if not db_store:
+            raise HTTPException(status_code=404, detail="Store not found")
+
+        totals = _compute_items_and_totals(req.items, req.customer, db_store)
+
+        store_state_code = get_state_code(db_store.get("state", "Karnataka"))
+        customer_shipping_state_code = get_state_code(totals["shipping_state"]) or store_state_code
+
+        billing_addr = req.customer.billing_address or req.customer.address or ""
+        billing_city = req.customer.billing_city or req.customer.city or ""
+        billing_pincode = req.customer.billing_pincode or req.customer.pincode or ""
+
+        if req.customer.shipping_same_as_billing:
+            shipping_addr, shipping_city, shipping_pincode = billing_addr, billing_city, billing_pincode
+        else:
+            shipping_addr = req.customer.shipping_address or billing_addr
+            shipping_city = req.customer.shipping_city or billing_city
+            shipping_pincode = req.customer.shipping_pincode or billing_pincode
+
+        invoice_dict = {
+            "invoice_number": req.invoice_number,
+            "invoice_date": req.invoice_date,
+            "store_name": db_store.get("name"),
+            "store_address_line1": db_store.get("address", ""),
+            "store_address_line2": "",
+            "store_city": db_store.get("city", ""),
+            "store_pincode": db_store.get("pincode", ""),
+            "store_state_code": store_state_code,
+            "customer_gstin": req.customer.gst_number or "URP",
+            "customer_name": req.customer.billing_name or req.customer.name,
+            "shipping_address_line1": shipping_addr,
+            "shipping_address_line2": "",
+            "shipping_city": shipping_city,
+            "shipping_pincode": shipping_pincode,
+            "shipping_state_code": customer_shipping_state_code,
+            "taxable_amount": totals["taxable_total"],
+            "cgst_total": totals["cgst_total"],
+            "sgst_total": totals["sgst_total"],
+            "igst_total": totals["igst_total"],
+            "total_amount": round(totals["taxable_total"] + totals["tax_total"] + req.delivery_charges + req.round_off, 2),
+            "items": totals["computed_items"],
+        }
+
+        transporter = {
+            "name": req.transporter_name,
+            "gstin_or_id": req.transporter_gstin,
+            "vehicle_number": req.vehicle_number,
+            "mode": req.transport_mode or "1",
+            "distance": req.transport_distance,
+        }
+
+        payload = whitebooks_client.build_ewaybill_payload(invoice_dict, transporter)
+        result = whitebooks_client.generate_ewaybill(payload)
+
+        return {
+            "success": True,
+            "ewb_no": result.get("ewb_no"),
+            "ewb_date": result.get("ewb_date"),
+            "valid_upto": result.get("valid_upto"),
+        }
+
+    except WhitebooksAuthError as e:
+        raise HTTPException(status_code=502, detail=f"Whitebooks authentication failed: {e}")
+    except WhitebooksAPIError as e:
+        raise HTTPException(status_code=422, detail=f"E-Way Bill generation failed: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+
+
+@router.post("/generate-einvoice")
+async def generate_einvoice_for_invoice(req: GenerateEinvoiceRequest, db = Depends(get_db)):
+    """Generate an E-Invoice (IRN) via Whitebooks. B2B only."""
+    try:
+        if (req.customer.customer_type or "B2C").upper() != "B2B":
+            raise HTTPException(status_code=400, detail="E-Invoice generation is only applicable for B2B customers")
+        if not req.customer.gst_number:
+            raise HTTPException(status_code=400, detail="Customer GSTIN is required for E-Invoice generation")
+
+        db_store = await db.stores.find_one({"code": req.store_code}, {"_id": 0})
+        if not db_store:
+            raise HTTPException(status_code=404, detail="Store not found")
+
+        totals = _compute_items_and_totals(req.items, req.customer, db_store)
+
+        store_state_code = get_state_code(db_store.get("state", "Karnataka"))
+        customer_shipping_state_code = get_state_code(totals["shipping_state"]) or store_state_code
+
+        billing_addr = req.customer.billing_address or req.customer.address or ""
+        billing_city = req.customer.billing_city or req.customer.city or ""
+        billing_pincode = req.customer.billing_pincode or req.customer.pincode or ""
+
+        invoice_dict = {
+            "invoice_number": req.invoice_number,
+            "invoice_date": req.invoice_date,
+            "store_name": db_store.get("name"),
+            "store_address_line1": db_store.get("address", ""),
+            "store_city": db_store.get("city", ""),
+            "store_pincode": db_store.get("pincode", ""),
+            "store_state_code": store_state_code,
+            "customer_gstin": req.customer.gst_number,
+            "customer_name": req.customer.billing_name or req.customer.name,
+            "shipping_address_line1": billing_addr,
+            "shipping_city": billing_city,
+            "shipping_pincode": billing_pincode,
+            "shipping_state_code": customer_shipping_state_code,
+            "taxable_amount": totals["taxable_total"],
+            "cgst_total": totals["cgst_total"],
+            "sgst_total": totals["sgst_total"],
+            "igst_total": totals["igst_total"],
+            "total_amount": round(totals["taxable_total"] + totals["tax_total"] + req.delivery_charges + req.round_off, 2),
+            "items": totals["computed_items"],
+        }
+
+        payload = whitebooks_client.build_einvoice_payload(invoice_dict)
+        result = whitebooks_client.generate_einvoice(payload)
+
+        return {
+            "success": True,
+            "irn": result.get("irn"),
+            "ack_no": result.get("ack_no"),
+            "ack_date": result.get("ack_date"),
+            "signed_qr_code": result.get("signed_qr_code"),
+        }
+
+    except WhitebooksAuthError as e:
+        raise HTTPException(status_code=502, detail=f"Whitebooks authentication failed: {e}")
+    except WhitebooksAPIError as e:
+        raise HTTPException(status_code=422, detail=f"E-Invoice generation failed: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+
+
+async def _refresh_store_details(db, sales_order: dict) -> dict:
+    """On SO -> invoice conversion, use the store's CURRENT address/phone
+    instead of the snapshot saved when the SO was created."""
+    details = dict(sales_order.get("store_details") or {})
+    try:
+        cur = await db.stores.find_one(
+            {"code": sales_order.get("store_code")},
+            {"_id": 0, "address": 1, "city": 1, "state": 1, "pincode": 1, "phone": 1},
+        )
+        if cur:
+            details.update({k: v for k, v in cur.items() if v})
+    except Exception:
+        pass
+    return details
+
+
+def _today_ist() -> str:
+    from datetime import timedelta as _td
+    return datetime.now(timezone(_td(hours=5, minutes=30))).strftime("%Y-%m-%d")

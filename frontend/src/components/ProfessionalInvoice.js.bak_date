@@ -1,0 +1,553 @@
+import { HEADER_TITLE, getStoreHeaderSubtitle } from '../utils/storeBranding';
+import React from 'react';
+import { X, Printer, Download, Send } from 'lucide-react';
+import { BACKEND_URL } from '../config/api';
+
+// Helper function to format currency
+const formatCurrency = (amount) => {
+  if (amount === null || amount === undefined) return '₹0.00';
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    minimumFractionDigits: 2
+  }).format(amount);
+};
+
+// Convert number to words for Indian currency
+const numberToWords = (num) => {
+  if (num === 0) return 'Zero Rupees Only';
+  
+  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
+    'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+  
+  const numToWords = (n) => {
+    if (n < 20) return ones[n];
+    if (n < 100) return tens[Math.floor(n / 10)] + (n % 10 ? ' ' + ones[n % 10] : '');
+    if (n < 1000) return ones[Math.floor(n / 100)] + ' Hundred' + (n % 100 ? ' ' + numToWords(n % 100) : '');
+    if (n < 100000) return numToWords(Math.floor(n / 1000)) + ' Thousand' + (n % 1000 ? ' ' + numToWords(n % 1000) : '');
+    if (n < 10000000) return numToWords(Math.floor(n / 100000)) + ' Lakh' + (n % 100000 ? ' ' + numToWords(n % 100000) : '');
+    return numToWords(Math.floor(n / 10000000)) + ' Crore' + (n % 10000000 ? ' ' + numToWords(n % 10000000) : '');
+  };
+  
+  const rupees = Math.floor(num);
+  const paise = Math.round((num - rupees) * 100);
+  
+  let result = numToWords(rupees) + ' Rupees';
+  if (paise > 0) result += ' and ' + numToWords(paise) + ' Paise';
+  return result + ' Only';
+};
+
+// Format date
+const formatDate = (dateStr) => {
+  if (!dateStr) return '-';
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+// Default Company Info - ONLY used when store data is completely missing
+// In production, store_details should ALWAYS be provided from the actual store record
+const DEFAULT_COMPANY_INFO = {
+  name: 'Store Name Not Set',
+  tagline: '',
+  gst: 'GST Not Set',
+  pan: '',
+  address: 'Address Not Set',
+  city: '',
+  state: '',
+  pincode: '',
+  phone: '',
+  email: '',
+  website: '',
+  bankName: 'DBS Bank',
+  accountName: 'Aditya Retail',
+  accountNo: '827200176347',
+  ifsc: 'DBSS0IN0827',
+  branch: 'Ulsoor Road, Bangalore',
+  accountType: 'Current Account',
+  gst: '29ABAFA6295J1Z2'
+};
+
+const TERMS_CONDITIONS = [
+  'Goods once sold will not be taken back.',
+  'Subject to Bangalore Jurisdiction only.',
+  'Interest @ 18% p.a. will be charged on delayed payments.',
+  'E&OE - Errors and Omissions Excepted.',
+  'Warranty as per manufacturer terms and conditions.',
+  'Installation charges extra unless specified.'
+];
+
+const ProfessionalInvoice = ({ invoice, onClose, onPrint, onDownload, onWhatsApp }) => {
+  if (!invoice) return null;
+
+  const customer = invoice.customer || invoice.customer_details || {};
+  const storeDetails = invoice.store_details || {};
+  const items = invoice.items || [];
+  
+  // Determine if this is a Sales Order or Tax Invoice
+  const isSalesOrder = invoice.document_type === 'sales_order';
+  const documentTitle = isSalesOrder ? 'SALES ORDER' : 'TAX INVOICE';
+  const documentNumber = invoice.invoice_number || invoice.order_number || 'N/A';
+  const headerSubtitle = getStoreHeaderSubtitle(invoice.store_code || storeDetails.code || storeDetails.store_code, documentNumber);
+  
+  // Build company info from store_details with fallbacks to default
+  const COMPANY_INFO = {
+    name: storeDetails.name || DEFAULT_COMPANY_INFO.name,
+    tagline: DEFAULT_COMPANY_INFO.tagline,
+    gst: storeDetails.gst_number || storeDetails.gst || DEFAULT_COMPANY_INFO.gst,
+    pan: storeDetails.pan || DEFAULT_COMPANY_INFO.pan,
+    address: storeDetails.address || DEFAULT_COMPANY_INFO.address,
+    city: storeDetails.city || DEFAULT_COMPANY_INFO.city,
+    state: storeDetails.state || DEFAULT_COMPANY_INFO.state,
+    pincode: storeDetails.pincode || DEFAULT_COMPANY_INFO.pincode,
+    phone: storeDetails.phone || DEFAULT_COMPANY_INFO.phone,
+    email: storeDetails.email || DEFAULT_COMPANY_INFO.email,
+    website: DEFAULT_COMPANY_INFO.website,
+    bankName: DEFAULT_COMPANY_INFO.bankName,
+    accountName: DEFAULT_COMPANY_INFO.accountName,
+    accountNo: DEFAULT_COMPANY_INFO.accountNo,
+    ifsc: DEFAULT_COMPANY_INFO.ifsc,
+    branch: DEFAULT_COMPANY_INFO.branch,
+    accountType: DEFAULT_COMPANY_INFO.accountType,
+    gst: DEFAULT_COMPANY_INFO.gst
+  };
+  
+  // Determine if inter-state
+  const sellerState = storeDetails.state || 'Karnataka';
+  const customerState = customer.shipping_state || customer.state || '';
+  const isInterState = invoice.is_inter_state || 
+    (customerState && sellerState.toLowerCase() !== customerState.toLowerCase());
+  const placeOfSupply = invoice.place_of_supply || customerState || sellerState;
+
+  // Calculate totals - Ensure proper calculation for multi-line items
+  const calculatedTaxableAmount = items.reduce((sum, item) => sum + (parseFloat(item.taxable_amount) || 0), 0);
+  const calculatedTaxTotal = items.reduce((sum, item) => sum + (parseFloat(item.tax_amount) || 0), 0);
+  const calculatedItemsTotal = items.reduce((sum, item) => sum + (parseFloat(item.total) || 0), 0);
+  
+  const taxableAmount = invoice.subtotal || calculatedTaxableAmount;
+  const taxTotal = invoice.tax_total || calculatedTaxTotal;
+  const igstTotal = isInterState ? taxTotal : (invoice.igst_total || 0);
+  const cgstTotal = isInterState ? 0 : (invoice.cgst_total || taxTotal / 2);
+  const sgstTotal = isInterState ? 0 : (invoice.sgst_total || taxTotal / 2);
+  
+  // Grand Total calculation - use invoice.total_amount if available, otherwise calculate
+  const grandTotal = invoice.total_amount || 
+    (calculatedItemsTotal + (parseFloat(invoice.delivery_charges) || 0) - (parseFloat(invoice.discount_amount) || 0) + (parseFloat(invoice.round_off) || 0));
+
+  // Build billing address
+  const billingAddress = {
+    name: customer.billing_name || customer.name,
+    address: customer.billing_address || customer.address,
+    city: customer.billing_city || customer.city,
+    state: customer.billing_state || customer.state,
+    pincode: customer.billing_pincode || customer.pincode
+  };
+
+  // Build shipping address
+  const shippingSameAsBilling = customer.shipping_same_as_billing !== false;
+  const shippingAddress = shippingSameAsBilling ? billingAddress : {
+    name: customer.shipping_name || customer.name,
+    address: customer.shipping_address || customer.address,
+    city: customer.shipping_city || customer.city,
+    state: customer.shipping_state || customer.state,
+    pincode: customer.shipping_pincode || customer.pincode
+  };
+
+  const handlePrint = async () => {
+    // Open the PDF in a new window for printing
+    const invoiceId = invoice.id || invoice.invoice_number;
+    const pdfUrl = `${BACKEND_URL}/api/invoices/${invoiceId}/pdf`;
+    
+    try {
+      // Fetch the PDF
+      const response = await fetch(pdfUrl);
+      if (response.ok) {
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        
+        // Open PDF in new window and print
+        const printWindow = window.open(blobUrl, '_blank');
+        if (printWindow) {
+          printWindow.onload = () => {
+            setTimeout(() => {
+              printWindow.print();
+            }, 500);
+          };
+        }
+      } else {
+        // Fallback: Try direct PDF URL
+        const printWindow = window.open(pdfUrl, '_blank');
+        if (printWindow) {
+          printWindow.onload = () => {
+            setTimeout(() => {
+              printWindow.print();
+            }, 1000);
+          };
+        }
+      }
+    } catch (error) {
+      console.error('Print error:', error);
+      // Fallback: Open PDF URL directly
+      window.open(pdfUrl, '_blank');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[95vh] overflow-hidden">
+        {/* Modal Header */}
+        <div className={`p-4 border-b flex items-center justify-between ${isSalesOrder ? 'bg-gradient-to-r from-amber-600 to-amber-700' : 'bg-gradient-to-r from-slate-800 to-slate-900'} text-white`}>
+          <h2 className="text-lg font-bold">
+            {documentTitle} - {documentNumber}
+          </h2>
+          <button onClick={onClose} className="p-2 hover:bg-white/20 rounded-full transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Invoice Content */}
+        <div className="overflow-y-auto max-h-[75vh]">
+          <div id="professional-invoice-print" className="p-6 bg-white">
+            {/* Header */}
+            <div className="flex justify-between items-start border-b-4 border-slate-800 pb-4 mb-4">
+              <div>
+                <h1 className="text-2xl font-extrabold text-slate-800 tracking-wide">{HEADER_TITLE}</h1>
+                {headerSubtitle && (<p className="text-sm font-semibold text-slate-700 mt-0.5">{headerSubtitle}</p>)}
+                <p className="text-xs text-gray-500 mt-1">{COMPANY_INFO.tagline}</p>
+                <div className="text-xs text-gray-600 mt-2 leading-relaxed">
+                  <p>{COMPANY_INFO.address}, {COMPANY_INFO.city}</p>
+                  <p>{COMPANY_INFO.state} - {COMPANY_INFO.pincode}</p>
+                  <p>Phone: {COMPANY_INFO.phone} | Email: {COMPANY_INFO.email}</p>
+                </div>
+                <span className="inline-block bg-slate-800 text-white text-xs px-3 py-1 rounded mt-2">
+                  GSTIN: {COMPANY_INFO.gst}
+                </span>
+              </div>
+              <div className="text-right">
+                <h2 className={`text-3xl font-bold ${isSalesOrder ? 'text-amber-700' : 'text-slate-800'}`}>{documentTitle}</h2>
+                <p className="text-sm font-semibold mt-2">No: {documentNumber}</p>
+                <p className="text-xs text-gray-600 mt-1">Date: {formatDate(invoice.created_at)}</p>
+                {isSalesOrder && invoice.expected_delivery_date && (
+                  <p className="text-xs text-amber-600 mt-1">Expected Delivery: {formatDate(invoice.expected_delivery_date)}</p>
+                )}
+                {invoice.original_so_number && (
+                  <p className="text-xs text-gray-500 mt-1">Ref SO: {invoice.original_so_number}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Sold By / Ship From + Bill To / Ship To - 4 Address Grid */}
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              {/* Bill From (Seller) */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider border-b border-slate-200 pb-2 mb-2">
+                  Bill From
+                </h3>
+                <p className="font-semibold text-sm">{COMPANY_INFO.name}</p>
+                <p className="text-xs text-blue-600 font-medium">GSTIN: {COMPANY_INFO.gst}</p>
+                <p className="text-xs text-gray-600 mt-1">{COMPANY_INFO.address}</p>
+                <p className="text-xs text-gray-600">
+                  {COMPANY_INFO.city}, {COMPANY_INFO.state} - {COMPANY_INFO.pincode}
+                </p>
+                <p className="text-xs text-gray-600 mt-1">PAN: {COMPANY_INFO.pan}</p>
+              </div>
+
+              {/* Bill To (Customer) */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider border-b border-slate-200 pb-2 mb-2">
+                  Bill To
+                </h3>
+                <p className="font-semibold text-sm">{billingAddress.name}</p>
+                {customer.gst_number && (
+                  <p className="text-xs text-blue-600 font-medium">GSTIN: {customer.gst_number}</p>
+                )}
+                <p className="text-xs text-gray-600 mt-1">{billingAddress.address}</p>
+                <p className="text-xs text-gray-600">
+                  {billingAddress.city}, {billingAddress.state} - {billingAddress.pincode}
+                </p>
+                {customer.phone && (
+                  <p className="text-xs text-gray-600 mt-1">Phone: {customer.phone}</p>
+                )}
+                {customer.email && (
+                  <p className="text-xs text-gray-600">Email: {customer.email}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Ship From + Ship To - Only show for Invoices, NOT for Sales Orders */}
+            {!isSalesOrder && (
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                {/* Ship From (Store/Warehouse) */}
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                  <h3 className="text-xs font-bold text-emerald-700 uppercase tracking-wider border-b border-emerald-200 pb-2 mb-2">
+                    Ship From
+                  </h3>
+                  {invoice.ship_from_address ? (
+                    <p className="text-xs text-gray-600 whitespace-pre-line">{invoice.ship_from_address}</p>
+                  ) : (
+                    <>
+                      <p className="font-semibold text-sm">{storeDetails.name || COMPANY_INFO.name}</p>
+                      {(storeDetails.gst_number || COMPANY_INFO.gst) && (
+                        <p className="text-xs text-blue-600 font-medium">GSTIN: {storeDetails.gst_number || COMPANY_INFO.gst}</p>
+                      )}
+                      <p className="text-xs text-gray-600 mt-1">
+                        {storeDetails.address || COMPANY_INFO.address}
+                      </p>
+                      <p className="text-xs text-gray-600">
+                        {storeDetails.city || COMPANY_INFO.city}, {storeDetails.state || COMPANY_INFO.state} - {storeDetails.pincode || COMPANY_INFO.pincode}
+                      </p>
+                      {storeDetails.phone && (
+                        <p className="text-xs text-gray-600 mt-1">Phone: {storeDetails.phone}</p>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Ship To (Customer Delivery Address) */}
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider border-b border-blue-200 pb-2 mb-2">
+                    Ship To
+                  </h3>
+                  <p className="font-semibold text-sm">{shippingAddress.name}</p>
+                  <p className="text-xs text-gray-600 mt-1">{shippingAddress.address}</p>
+                  <p className="text-xs text-gray-600">
+                    {shippingAddress.city}, {shippingAddress.state} - {shippingAddress.pincode}
+                  </p>
+                  {customer.phone && (
+                    <p className="text-xs text-gray-600 mt-1">Phone: {customer.phone}</p>
+                  )}
+                </div>
+              </div>
+            )}
+            
+            {/* E-Way Bill Info - Only for Invoices with E-Way Bill */}
+            {!isSalesOrder && invoice.e_way_bill_number && (
+              <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 mb-4">
+                <p className="text-xs font-bold text-purple-700 uppercase tracking-wider">
+                  E-Way Bill: <span className="font-mono">{invoice.e_way_bill_number}</span>
+                </p>
+              </div>
+            )}
+
+            {/* Supply Details Row */}
+            <div className={`${isSalesOrder ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'} border rounded-lg p-3 mb-4`}>
+              <div className={`grid ${isSalesOrder ? 'grid-cols-4' : 'grid-cols-5'} gap-4 text-xs`}>
+                <div className="text-center">
+                  <span className="text-gray-500 block">Place of Supply</span>
+                  <p className={`font-semibold ${isSalesOrder ? 'text-amber-800' : 'text-slate-800'}`}>{placeOfSupply}</p>
+                </div>
+                <div className="text-center">
+                  <span className="text-gray-500 block">State Code</span>
+                  <p className="font-semibold">{placeOfSupply === 'Maharashtra' ? '27' : placeOfSupply === 'Karnataka' ? '29' : placeOfSupply === 'Tamil Nadu' ? '33' : placeOfSupply === 'Kerala' ? '32' : placeOfSupply === 'Andhra Pradesh' ? '37' : placeOfSupply === 'Telangana' ? '36' : '-'}</p>
+                </div>
+                <div className="text-center">
+                  <span className="text-gray-500 block">Supply Type</span>
+                  <p className="font-semibold">{isInterState ? 'Inter-State' : 'Intra-State'}</p>
+                </div>
+                <div className="text-center">
+                  <span className="text-gray-500 block">Payment Mode</span>
+                  <p className="font-semibold capitalize">{invoice.payment_mode || 'N/A'}</p>
+                </div>
+                {!isSalesOrder && (
+                  <div className="text-center">
+                    <span className="text-gray-500 block">Document Type</span>
+                    <p className="font-semibold capitalize">{invoice.document_type?.replace('_', ' ') || 'Invoice'}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Items Table */}
+            <div className="mb-4 overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="bg-slate-800 text-white">
+                    <th className="px-2 py-2 text-left">#</th>
+                    <th className="px-2 py-2 text-left">Product Description</th>
+                    <th className="px-2 py-2 text-center">HSN</th>
+                    <th className="px-2 py-2 text-center">Qty</th>
+                    <th className="px-2 py-2 text-right">Rate</th>
+                    <th className="px-2 py-2 text-right">Taxable</th>
+                    <th className="px-2 py-2 text-center">GST%</th>
+                    {isInterState ? (
+                      <th className="px-2 py-2 text-right">IGST</th>
+                    ) : (
+                      <>
+                        <th className="px-2 py-2 text-right">CGST</th>
+                        <th className="px-2 py-2 text-right">SGST</th>
+                      </>
+                    )}
+                    <th className="px-2 py-2 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item, idx) => (
+                    <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
+                      <td className="px-2 py-2 border-b">{idx + 1}</td>
+                      <td className="px-2 py-2 border-b">
+                        <p className="font-medium">{item.product_name || item.name}</p>
+                        {item.sku && <p className="text-gray-500 text-[10px]">SKU: {item.sku}</p>}
+                      </td>
+                      <td className="px-2 py-2 border-b text-center text-gray-600">{item.hsn_code || item.hsn || '-'}</td>
+                      <td className="px-2 py-2 border-b text-center">{item.quantity}</td>
+                      <td className="px-2 py-2 border-b text-right">{formatCurrency(item.rate || item.price || item.unit_price)}</td>
+                      <td className="px-2 py-2 border-b text-right">{formatCurrency(item.taxable_amount)}</td>
+                      <td className="px-2 py-2 border-b text-center">{item.tax_rate || item.gst_rate || 18}%</td>
+                      {isInterState ? (
+                        <td className="px-2 py-2 border-b text-right">{formatCurrency(item.igst || item.tax_amount)}</td>
+                      ) : (
+                        <>
+                          <td className="px-2 py-2 border-b text-right">{formatCurrency(item.cgst)}</td>
+                          <td className="px-2 py-2 border-b text-right">{formatCurrency(item.sgst)}</td>
+                        </>
+                      )}
+                      <td className="px-2 py-2 border-b text-right font-medium">{formatCurrency(item.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Totals & Amount in Words */}
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              {/* Amount in Words */}
+              <div className={`${isSalesOrder ? 'bg-amber-100 border-amber-400' : 'bg-amber-50 border-amber-300'} border rounded-lg p-3`}>
+                <h4 className={`text-xs font-bold ${isSalesOrder ? 'text-amber-900' : 'text-amber-800'} uppercase tracking-wider mb-2`}>Amount in Words</h4>
+                <p className={`text-sm ${isSalesOrder ? 'text-amber-900' : 'text-amber-900'} font-medium`}>{numberToWords(grandTotal || 0)}</p>
+              </div>
+
+              {/* Totals */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                <div className="space-y-1 text-xs">
+                  <div className="flex justify-between py-1 border-b border-dashed border-slate-300">
+                    <span className="text-gray-600">Taxable Amount:</span>
+                    <span className="font-medium">{formatCurrency(taxableAmount)}</span>
+                  </div>
+                  {isInterState ? (
+                    <div className="flex justify-between py-1 text-gray-600">
+                      <span>IGST:</span>
+                      <span>{formatCurrency(igstTotal)}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex justify-between py-1 text-gray-600">
+                        <span>CGST:</span>
+                        <span>{formatCurrency(cgstTotal)}</span>
+                      </div>
+                      <div className="flex justify-between py-1 text-gray-600">
+                        <span>SGST:</span>
+                        <span>{formatCurrency(sgstTotal)}</span>
+                      </div>
+                    </>
+                  )}
+                  {invoice.delivery_charges > 0 && (
+                    <div className="flex justify-between py-1 text-gray-600">
+                      <span>Delivery Charges:</span>
+                      <span>{formatCurrency(invoice.delivery_charges)}</span>
+                    </div>
+                  )}
+                  {invoice.round_off !== 0 && (
+                    <div className="flex justify-between py-1 text-gray-600">
+                      <span>Round Off:</span>
+                      <span>{formatCurrency(invoice.round_off)}</span>
+                    </div>
+                  )}
+                  <div className={`flex justify-between py-2 mt-2 border-t-2 ${isSalesOrder ? 'border-amber-600' : 'border-slate-800'} font-bold text-base`}>
+                    <span>Grand Total:</span>
+                    <span className={isSalesOrder ? 'text-amber-700' : 'text-slate-800'}>{formatCurrency(grandTotal)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Bank Details & Terms */}
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              {/* Bank Details */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Bank Details for Payment</h4>
+                <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                  <span className="text-gray-500">Bank Name:</span>
+                  <span className="font-medium">{COMPANY_INFO.bankName}</span>
+                  <span className="text-gray-500">Account Name:</span>
+                  <span className="font-medium">{COMPANY_INFO.accountName}</span>
+                  <span className="text-gray-500">A/C No:</span>
+                  <span className="font-medium">{COMPANY_INFO.accountNo}</span>
+                  <span className="text-gray-500">IFSC Code:</span>
+                  <span className="font-medium">{COMPANY_INFO.ifsc}</span>
+                  <span className="text-gray-500">Branch:</span>
+                  <span className="font-medium">{COMPANY_INFO.branch}</span>
+                  <span className="text-gray-500">Account Type:</span>
+                  <span className="font-medium">{COMPANY_INFO.accountType}</span>
+                  <span className="text-gray-500">GST:</span>
+                  <span className="font-medium">{COMPANY_INFO.gst}</span>
+                </div>
+              </div>
+
+              {/* Terms & Conditions */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Terms & Conditions</h4>
+                <ul className="text-[10px] text-gray-600 space-y-1 list-disc pl-4">
+                  {TERMS_CONDITIONS.map((term, idx) => (
+                    <li key={idx}>{term}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            {/* Signature */}
+            <div className="text-right mt-6">
+              <p className="text-xs text-gray-600 mb-1">For {COMPANY_INFO.name}</p>
+              <div className="border-t border-gray-400 w-40 ml-auto mt-10"></div>
+              <p className="text-xs text-gray-500 mt-1">Authorized Signatory</p>
+            </div>
+
+            {/* Footer */}
+            <div className="mt-6 pt-4 border-t border-gray-200 text-center">
+              <p className="text-xs text-gray-500">This is a computer generated invoice</p>
+              <p className="text-xs text-gray-400 mt-1">Thank you for your business!</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Modal Footer */}
+        <div className="p-4 border-t bg-gray-50 flex justify-between">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+          >
+            Close
+          </button>
+          <div className="flex gap-3">
+            {onWhatsApp && (
+              <button
+                onClick={() => onWhatsApp(invoice)}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2"
+              >
+                <Send className="w-4 h-4" />
+                WhatsApp
+              </button>
+            )}
+            <button
+              onClick={handlePrint}
+              className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2"
+            >
+              <Printer className="w-4 h-4" />
+              Print
+            </button>
+            {onDownload && (
+              <button
+                onClick={() => onDownload(invoice)}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                Download PDF
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ProfessionalInvoice;

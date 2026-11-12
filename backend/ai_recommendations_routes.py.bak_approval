@@ -1,0 +1,215 @@
+"""
+AI-Powered Recommendations Routes
+Smart product recommendations based on browsing history and seasonal trends
+"""
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+from database import get_db
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/ai-recommendations", tags=["AI Recommendations"])
+
+class RecommendationRequest(BaseModel):
+    viewed_products: Optional[List[str]] = []
+    search_history: Optional[List[str]] = []
+    category_views: Optional[Dict[str, int]] = {}
+    user_session: Optional[str] = None
+
+class SeasonalRequest(BaseModel):
+    season: Optional[str] = None
+    month: int
+    festival: Optional[str] = None
+
+@router.post("")
+async def get_ai_recommendations(request: RecommendationRequest, db = Depends(get_db)):
+    """
+    Get AI-powered personalized product recommendations
+    Based on browsing history, searches, and category preferences
+    """
+    try:
+        recommendations = []
+        reason = "Based on your browsing history"
+        
+        # Get all products
+        all_products = await db.products.find({}, {"_id": 0}).to_list(1000)
+        
+        if not all_products:
+            return {
+                "status": "success",
+                "recommendations": [],
+                "reason": "No products available"
+            }
+        
+        # Strategy 1: Recommend similar products to viewed ones
+        if request.viewed_products:
+            viewed_product_ids = request.viewed_products[-5:]  # Last 5 viewed
+            viewed_products_data = await db.products.find(
+                {"id": {"$in": viewed_product_ids}},
+                {"_id": 0}
+            ).to_list(10)
+            
+            if viewed_products_data:
+                # Get categories and brands of viewed products
+                viewed_categories = set()
+                viewed_brands = set()
+                
+                for p in viewed_products_data:
+                    if p.get('category'):
+                        viewed_categories.add(p['category'].lower())
+                    if p.get('brand'):
+                        viewed_brands.add(p['brand'].lower())
+                
+                # Find similar products (same category or brand, but not viewed)
+                similar_products = [
+                    p for p in all_products
+                    if (p.get('category', '').lower() in viewed_categories or 
+                        p.get('brand', '').lower() in viewed_brands) and
+                    p.get('id') not in viewed_product_ids
+                ]
+                
+                recommendations.extend(similar_products[:8])
+                reason = f"Based on products you viewed ({', '.join(list(viewed_brands)[:2])})"
+        
+        # Strategy 2: Recommend based on search history
+        if not recommendations and request.search_history:
+            search_keywords = ' '.join(request.search_history[-3:]).lower()
+            
+            matching_products = [
+                p for p in all_products
+                if any(keyword in (p.get('name', '') + ' ' + p.get('description', '')).lower()
+                       for keyword in search_keywords.split())
+            ]
+            
+            recommendations.extend(matching_products[:8])
+            reason = f"Based on your searches"
+        
+        # Strategy 3: Recommend based on category views
+        if not recommendations and request.category_views:
+            # Get most viewed categories
+            sorted_categories = sorted(
+                request.category_views.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+            
+            if sorted_categories:
+                top_category = sorted_categories[0][0]
+                category_products = [
+                    p for p in all_products
+                    if p.get('category', '').lower() == top_category.lower()
+                ]
+                
+                recommendations.extend(category_products[:8])
+                reason = f"Based on your interest in {top_category}"
+        
+        # Fallback: Popular/Featured products
+        if not recommendations:
+            recommendations = [
+                p for p in all_products
+                if p.get('featured') or p.get('is_best_seller') or (p.get('rating', 0) >= 4)
+            ][:8]
+            reason = "Popular products you might like"
+        
+        # Ensure we have at least some recommendations
+        if not recommendations:
+            recommendations = all_products[:8]
+            reason = "Featured products for you"
+        
+        return {
+            "status": "success",
+            "recommendations": recommendations[:8],
+            "reason": reason,
+            "count": len(recommendations[:8])
+        }
+        
+    except Exception as e:
+        logger.error(f"AI recommendations error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/seasonal-recommendations")
+async def get_seasonal_recommendations(request: SeasonalRequest, db = Depends(get_db)):
+    """
+    Get seasonal/festival appropriate product recommendations
+    Based on current season, month, and festivals
+    """
+    try:
+        # Define seasonal category mappings
+        seasonal_categories = {
+            "Summer": ["air conditioner", "cooler", "fan", "refrigerator", "water dispenser"],
+            "Monsoon": ["dryer", "hair dryer", "room heater", "dehumidifier", "washing machine"],
+            "Autumn": ["kitchen", "mixer", "oven", "microwave", "dishwasher"],
+            "Winter": ["room heater", "geyser", "water heater", "induction", "coffee maker"],
+            "Christmas": ["oven", "microwave", "coffee maker", "mixer", "kitchen"],
+            "Diwali": ["kitchen", "vacuum cleaner", "air purifier", "chimney"],
+            "Holi": ["washing machine", "dryer", "vacuum cleaner"],
+            "Valentine's Day": ["coffee maker", "microwave", "kitchen"],
+            "New Year": ["kitchen", "vacuum cleaner", "air purifier"]
+        }
+        
+        # Determine season/festival
+        season_key = request.festival if request.festival else request.season
+        if not season_key:
+            # Auto-detect season from month
+            if request.month in [3, 4, 5]:
+                season_key = "Summer"
+            elif request.month in [6, 7, 8, 9]:
+                season_key = "Monsoon"
+            elif request.month in [10, 11]:
+                season_key = "Autumn"
+            else:
+                season_key = "Winter"
+        
+        relevant_categories = seasonal_categories.get(season_key, [])
+        
+        # Get all products
+        all_products = await db.products.find({}, {"_id": 0}).to_list(1000)
+        
+        # Filter products by seasonal categories
+        seasonal_products = []
+        for product in all_products:
+            category = (product.get('category', '') or '').lower()
+            name = (product.get('name', '') or '').lower()
+            
+            for search_cat in relevant_categories:
+                if search_cat in category or search_cat in name:
+                    seasonal_products.append(product)
+                    break
+        
+        # Sort by rating/featured
+        seasonal_products.sort(
+            key=lambda x: (x.get('featured', False), x.get('rating', 0)),
+            reverse=True
+        )
+        
+        return {
+            "status": "success",
+            "recommendations": seasonal_products[:8],
+            "season": season_key,
+            "count": len(seasonal_products[:8])
+        }
+        
+    except Exception as e:
+        logger.error(f"Seasonal recommendations error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/seasonal-recommendations")
+async def get_seasonal_recommendations_auto(db = Depends(get_db)):
+    """
+    Get seasonal recommendations automatically based on current date
+    """
+    now = datetime.now()
+    month = now.month
+    
+    # Auto-detect festival
+    festival = None
+    if month == 12 and now.day >= 20:
+        festival = "Christmas"
+    elif month in [10, 11]:
+        festival = "Diwali"
+    
+    request = SeasonalRequest(month=month, festival=festival)
+    return await get_seasonal_recommendations(request, db)

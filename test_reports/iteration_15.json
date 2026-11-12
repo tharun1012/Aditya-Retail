@@ -1,0 +1,44 @@
+{
+  "summary": "Verified the manifest fix (frontend-only) as requested. All 5 test criteria PASS in preview: (1) /manifest.json returns 200 and now references /aditya-logo.png for both 192x192 and 512x512 icons (both maskable). (2) /logo192.png and /logo512.png fallback copies return 200 with content-type image/png (8580 bytes each, valid PNG). (3) /aditya-logo.png regression: still 200, 8580 bytes, valid PNG (unchanged). (4) Home page https://acct-workflow-1.preview.emergentagent.com/ loads normally — header renders, hero + product carousel + services strip visible, zero manifest-related console errors ('manifest', 'logo192', 'logo512', 'aditya-logo', 'Download error or resource isn\\'t a valid image' — all 0 hits). Only remaining console errors are: 3 generic 404s (banners/ai_banner_633d2db6.png missing, /api/promotions/active-theme/ aborted, /cdn-cgi/rum aborted) and google-analytics.com blocked by headless browser — all pre-existing, unrelated to this fix, and the GA block is the same client-side ad-blocker issue the user reported (not a code fix). (5) Bosch KGN56LB42I PDP (/refrigerator/KGN56LB42I) regression PASS — exactly 1 offer card (offer-card-*), exactly 1 WhatsApp CTA (data-testid=offer-whatsapp-<uuid>) with text 'Contact Us on WhatsApp to Redeem', target=_blank, href starts with https://wa.me/919844577440?text=Hi%20Aditya%20Retail. Backend /api/offers/product/{id} still returns 1 offer (no_cost_emi, online) with whatsapp_message populated. No console errors on PDP. Manifest fix is production-ready; user will need to redeploy to reach adityaretail.com.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "manifest.json", "issues": ["Both icons declare sizes '192x192' and '512x512' but the referenced /aditya-logo.png is actually 250x85 (non-square). Chrome may still emit a low-severity size-mismatch WARNING in future audits (not the 'resource isn\\'t a valid image' error which was caused by the 404 and is now resolved). Not blocking, but for a fully clean Lighthouse PWA audit, consider generating true 192x192 and 512x512 square PNGs and pointing each icon entry to its correctly-sized file."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/test_reports/iter15_home.png",
+    "/app/test_reports/iter15_pdp_bosch3.png"
+  ],
+  "action_items": [
+    "Optional (non-blocking): Generate true 192x192 and 512x512 square PNG icons and update manifest.json to point each icon slot at its correctly-sized file for a fully clean PWA audit. Current fix (both pointing to /aditya-logo.png 250x85) resolves the reported 'Download error or resource isn\\'t a valid image' console warning but leaves a latent size-mismatch note.",
+    "Redeploy frontend to production so adityaretail.com picks up the fix (user-facing action)."
+  ],
+  "critical_code_review_comments": [
+    "manifest.json shortcuts entries (lines 33, 40, 47) still reference /logo192.png. That path now exists as a fallback copy, so it works, but if you later remove the /logo192.png fallback these shortcut icons would 404 again. Keep the fallback or update shortcut src to /aditya-logo.png for consistency with the top-level icons array.",
+    "Verified icon files are byte-identical copies of aditya-logo.png (all 8580 bytes, PNG 250x85 RGBA). Safe fallback."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100% (5/5 test criteria pass)"},
+  "test_credentials": "None required for this iteration",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Manifest fix verified on preview. Icon files present at /app/frontend/public/{aditya-logo.png, logo192.png, logo512.png} — all 8580-byte PNGs. manifest.json top-level icons both point to /aditya-logo.png; shortcuts array still references /logo192.png (safe because fallback exists). Bosch KGN56LB42I PDP route pattern is /refrigerator/{model_number} (not hash-based). Home page has 3 non-critical pre-existing 404s (ai_banner_*.png, promotions/active-theme, cdn-cgi/rum) unrelated to this fix. Google Analytics is blocked in headless Chromium (same as user's ad blocker) — expected, not a code issue.",
+  "verified_metrics": {
+    "manifest_status": 200,
+    "aditya_logo_status": 200,
+    "logo192_status": 200,
+    "logo512_status": 200,
+    "manifest_related_console_errors_home": 0,
+    "manifest_related_console_errors_pdp": 0,
+    "pdp_offer_card_count": 1,
+    "pdp_whatsapp_cta_count": 1,
+    "wa_href_prefix_valid": true,
+    "wa_target_blank": true,
+    "backend_offers_kgn56lb42i": 1,
+    "whatsapp_message_populated": true
+  }
+}

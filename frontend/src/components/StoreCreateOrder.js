@@ -1,0 +1,824 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ArrowLeft, Plus, X, Receipt, Search, ShoppingCart, Building2, User, Edit2, Check, RefreshCw } from 'lucide-react';
+
+
+const StoreCreateOrder = ({ editMode = false }) => {
+  const navigate = useNavigate();
+  const { orderId } = useParams();
+  const [storeUser, setStoreUser] = useState(null);
+  const [storeData, setStoreData] = useState(null);
+  const [products, setProducts] = useState([]);
+  const [filteredProducts, setFilteredProducts] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [loadingOrder, setLoadingOrder] = useState(false);
+  const [sameAsDelivery, setSameAsDelivery] = useState(true);
+  const [isEditMode, setIsEditMode] = useState(editMode);
+  const [originalOrder, setOriginalOrder] = useState(null);
+  
+  const [orderForm, setOrderForm] = useState({
+    // Customer Type
+    customer_type: 'B2C', // B2B or B2C
+    
+    // Basic Customer Info
+    customer_name: '',
+    customer_phone: '',
+    customer_email: '',
+    gst_number: '', // For B2B customers
+    
+    // Billing Address
+    billing_name: '',
+    billing_address: '',
+    billing_city: '',
+    billing_state: '',
+    billing_pincode: '',
+    
+    // Delivery Address
+    delivery_name: '',
+    delivery_address: '',
+    delivery_city: '',
+    delivery_state: '',
+    delivery_pincode: '',
+    
+    items: [],
+    notes: '',
+    payment_mode: 'cash'
+  });
+
+  // Fetch order data for edit mode
+  useEffect(() => {
+    console.log('=== StoreCreateOrder Mount ===');
+    console.log('editMode prop:', editMode);
+    console.log('orderId from params:', orderId);
+    console.log('Current isEditMode state:', isEditMode);
+    
+    if (orderId) {
+      console.log('Will fetch order for ID:', orderId);
+      setIsEditMode(true);
+      fetchOrderForEdit(orderId);
+    } else if (editMode) {
+      console.log('editMode is true but no orderId - this should not happen');
+    }
+  }, [orderId, editMode]);
+
+  const fetchOrderForEdit = async (id) => {
+    if (!id) {
+      console.error('No order ID provided for edit');
+      return;
+    }
+    setLoadingOrder(true);
+    try {
+      console.log('Fetching order from:', `${BACKEND_URL}/api/invoices/offline/${id}`);
+      const response = await fetch(`${BACKEND_URL}/api/invoices/offline/${id}`);
+      console.log('Response status:', response.status);
+      if (response.ok) {
+        const data = await response.json();
+        console.log('Order data received:', data);
+        const order = data.invoice || data.order || data;
+        setOriginalOrder(order);
+        
+        // Populate form with order data
+        // Note: Data can come in two formats:
+        // 1. Flat: customer_name, customer_phone, customer_email, customer_address
+        // 2. Nested: customer.name, customer.phone, customer.email, customer.address
+        // We check flat fields FIRST since that's the actual database format
+        setOrderForm(prev => ({
+          ...prev,
+          customer_type: order.customer_gst || order.customer?.gstin || order.customer?.gst_number ? 'B2B' : 'B2C',
+          customer_name: order.customer_name || order.customer?.name || '',
+          customer_phone: order.customer_phone || order.customer?.phone || '',
+          customer_email: order.customer_email || order.customer?.email || '',
+          gst_number: order.customer_gst || order.customer?.gstin || order.customer?.gst_number || '',
+          // Billing address - check flat fields first
+          billing_name: order.customer_name || order.customer?.billing_name || order.customer?.name || '',
+          billing_address: order.customer_address || order.customer?.billing_address || order.customer?.address || '',
+          billing_city: order.customer_city || order.customer?.billing_city || order.customer?.city || '',
+          billing_state: order.customer_state || order.customer?.billing_state || order.customer?.state || 'Karnataka',
+          billing_pincode: order.customer_pincode || order.customer?.billing_pincode || order.customer?.pincode || '',
+          // Delivery/shipping address - check flat fields first
+          delivery_name: order.shipping_name || order.customer_name || order.customer?.shipping_name || order.customer?.name || '',
+          delivery_address: order.shipping_address || order.customer_address || order.customer?.shipping_address || order.customer?.address || '',
+          delivery_city: order.shipping_city || order.customer_city || order.customer?.shipping_city || order.customer?.city || '',
+          delivery_state: order.shipping_state || order.customer_state || order.customer?.shipping_state || order.customer?.state || 'Karnataka',
+          delivery_pincode: order.shipping_pincode || order.customer_pincode || order.customer?.shipping_pincode || order.customer?.pincode || '',
+          items: (order.items || []).map(item => ({
+            product_id: item.product_id || '',
+            product_name: item.product_name || item.name || '',
+            model_number: item.model_number || '',
+            hsn_code: item.hsn_code || '',
+            quantity: item.quantity || 1,
+            rate: item.rate || item.price || 0,
+            price: item.rate || item.price || 0,
+            discount: item.discount || 0,
+            tax_rate: item.tax_rate || 18,
+            brand: item.brand || ''
+          })),
+          notes: order.notes || '',
+          payment_mode: order.payment_mode || 'cash'
+        }));
+        setIsEditMode(true);
+        console.log('Form populated successfully');
+      } else {
+        console.error('Failed to fetch order:', response.status);
+        alert('Failed to load order for editing');
+      }
+    } catch (error) {
+      console.error('Error fetching order for edit:', error);
+      alert('Error loading order: ' + error.message);
+    } finally {
+      setLoadingOrder(false);
+    }
+  };
+
+  useEffect(() => {
+    const userData = localStorage.getItem('storeUser');
+    if (userData) {
+      const user = JSON.parse(userData);
+      setStoreUser(user);
+      fetchStoreData(user.store_id);
+      fetchProducts();
+    } else {
+      navigate('/store/login');
+    }
+  }, [navigate]);
+
+  const fetchStoreData = async (storeId) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/stores/${storeId}`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        setStoreData(data.store);
+      }
+    } catch (error) {
+      console.error('Error fetching store:', error);
+    }
+  };
+
+  const fetchProducts = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products?limit=500&include_unlisted=true`);
+      const data = await response.json();
+      if (data.products) {
+        setProducts(data.products);
+        setFilteredProducts(data.products);
+      }
+    } catch (error) {
+      console.error('Error fetching products:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (searchTerm) {
+      const filtered = products.filter(p => 
+        p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        p.brand?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        p.model_number?.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+      setFilteredProducts(filtered);
+    } else {
+      setFilteredProducts(products);
+    }
+  }, [searchTerm, products]);
+
+  const addItemToOrder = (product) => {
+    const existingIndex = orderForm.items.findIndex(item => item.product_id === product.id);
+    
+    if (existingIndex >= 0) {
+      const updatedItems = [...orderForm.items];
+      updatedItems[existingIndex].quantity += 1;
+      setOrderForm({ ...orderForm, items: updatedItems });
+    } else {
+      setOrderForm({
+        ...orderForm,
+        items: [...orderForm.items, {
+          product_id: product.id,
+          product_name: product.name,
+          brand: product.brand,
+          model_number: product.model_number,
+          original_price: product.price, // Keep track of original price
+          price: product.price, // Editable price
+          quantity: 1,
+          editing_price: false // Flag for price editing mode
+        }]
+      });
+    }
+  };
+
+  const updateItemPrice = (index, newPrice) => {
+    const updatedItems = [...orderForm.items];
+    updatedItems[index].price = parseFloat(newPrice) || 0;
+    setOrderForm({ ...orderForm, items: updatedItems });
+  };
+
+  const togglePriceEdit = (index) => {
+    const updatedItems = [...orderForm.items];
+    updatedItems[index].editing_price = !updatedItems[index].editing_price;
+    setOrderForm({ ...orderForm, items: updatedItems });
+  };
+
+  const updateItemQuantity = (index, newQty) => {
+    if (newQty < 1) return;
+    const updatedItems = [...orderForm.items];
+    updatedItems[index].quantity = newQty;
+    setOrderForm({ ...orderForm, items: updatedItems });
+  };
+
+  const removeItem = (index) => {
+    const updatedItems = orderForm.items.filter((_, i) => i !== index);
+    setOrderForm({ ...orderForm, items: updatedItems });
+  };
+
+  const calculateTotal = () => {
+    return orderForm.items.reduce((total, item) => total + (item.price * item.quantity), 0);
+  };
+
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      maximumFractionDigits: 0
+    }).format(amount || 0);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (orderForm.items.length === 0) {
+      alert('Please add at least one product to the order');
+      return;
+    }
+    
+    if (!orderForm.customer_name || !orderForm.customer_phone) {
+      alert('Please enter customer name and phone number');
+      return;
+    }
+    
+    // Validate GST for B2B
+    if (orderForm.customer_type === 'B2B' && !orderForm.gst_number) {
+      alert('GST Number is required for B2B customers');
+      return;
+    }
+
+    try {
+      const orderData = {
+        store_id: storeData.id,
+        store_code: storeData.code,
+        store_name: storeData.name,
+        customer_type: orderForm.customer_type,
+        customer: {
+          name: orderForm.customer_name,
+          phone: orderForm.customer_phone,
+          email: orderForm.customer_email,
+          gst_number: orderForm.customer_type === 'B2B' ? orderForm.gst_number : null
+        },
+        billing_address: {
+          name: orderForm.billing_name || orderForm.customer_name,
+          address: orderForm.billing_address,
+          city: orderForm.billing_city,
+          state: orderForm.billing_state,
+          pincode: orderForm.billing_pincode
+        },
+        delivery_address: sameAsDelivery ? {
+          name: orderForm.billing_name || orderForm.customer_name,
+          address: orderForm.billing_address,
+          city: orderForm.billing_city,
+          state: orderForm.billing_state,
+          pincode: orderForm.billing_pincode
+        } : {
+          name: orderForm.delivery_name,
+          address: orderForm.delivery_address,
+          city: orderForm.delivery_city,
+          state: orderForm.delivery_state,
+          pincode: orderForm.delivery_pincode
+        },
+        items: orderForm.items.map(item => ({
+          product_id: item.product_id,
+          name: item.product_name,
+          brand: item.brand,
+          model_number: item.model_number,
+          original_price: item.original_price,
+          price: item.price || item.rate,
+          quantity: item.quantity,
+          subtotal: (item.price || item.rate) * item.quantity
+        })),
+        total_amount: calculateTotal(),
+        payment_mode: orderForm.payment_mode,
+        notes: orderForm.notes,
+        created_by: {
+          user_id: storeUser.id,
+          email: storeUser.email,
+          name: `${storeUser.first_name} ${storeUser.last_name}`
+        },
+        source: 'store_dashboard',
+        status: 'pending'
+      };
+
+      let response;
+      if (isEditMode && originalOrder?.id) {
+        // Update existing order
+        response = await fetch(`${BACKEND_URL}/api/invoices/offline/${originalOrder.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            customer: orderData.customer,
+            items: orderForm.items.map(item => ({
+              product_id: item.product_id,
+              product_name: item.product_name || item.name,
+              model_number: item.model_number,
+              hsn_code: item.hsn_code || '',
+              quantity: item.quantity,
+              rate: item.rate || item.price,
+              discount: item.discount || 0,
+              tax_rate: item.tax_rate || 18
+            })),
+            notes: orderForm.notes,
+            payment_mode: orderForm.payment_mode,
+            edited_by: storeUser.email
+          })
+        });
+      } else {
+        // Create new order
+        response = await fetch(`${BACKEND_URL}/api/orders/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(orderData)
+        });
+      }
+
+      const data = await response.json();
+      
+      if (response.ok) {
+        alert(`✅ Order ${isEditMode ? 'updated' : 'created'} successfully!\nOrder #: ${data.order_number || data.invoice_number || data.id}`);
+        navigate('/store/orders');
+      } else {
+        alert(`Failed to create order: ${data.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error creating order:', error);
+      alert('Error creating order. Please try again.');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin w-12 h-12 border-4 border-teal-500 border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+
+  // Show loading when fetching order for edit
+  if (loadingOrder) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center">
+        <RefreshCw className="w-12 h-12 text-amber-500 animate-spin mb-4" />
+        <p className="text-gray-600">Loading order for editing...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <header className="bg-white shadow-sm border-b">
+        <div className="max-w-7xl mx-auto px-4 py-4">
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => navigate('/store/dashboard')}
+              className="p-2 hover:bg-gray-100 rounded-lg"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div>
+              <h1 className="text-xl font-bold text-gray-800">
+                {isEditMode ? `Edit Sales Order ${originalOrder?.invoice_number || ''}` : 'Create Sales Order'}
+              </h1>
+              <p className="text-sm text-gray-500">{storeData?.name} ({storeData?.code})</p>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-4 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Left - Product Selection */}
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="text-lg font-semibold mb-4">Select Products</h2>
+            
+            {/* Search */}
+            <div className="relative mb-4">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
+              <input
+                type="text"
+                placeholder="Search products by name, brand, or model..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+              />
+            </div>
+
+            {/* Products Grid */}
+            <div className="max-h-[500px] overflow-y-auto space-y-2">
+              {filteredProducts.slice(0, 50).map(product => (
+                <div
+                  key={product.id}
+                  className="flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50"
+                >
+                  <div className="flex items-center gap-3">
+                    <img
+                      src={product.images?.[0] || product.image_url || 'https://via.placeholder.com/50'}
+                      alt={product.name}
+                      className="w-12 h-12 object-contain rounded"
+                    />
+                    <div>
+                      <p className="font-medium text-sm line-clamp-1">{product.name}</p>
+                      <p className="text-xs text-gray-500">{product.brand} | {product.model_number}</p>
+                      <p className="text-sm font-semibold text-teal-600">{formatCurrency(product.price)}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => addItemToOrder(product)}
+                    className="p-2 bg-teal-50 text-teal-600 rounded-lg hover:bg-teal-100"
+                  >
+                    <Plus className="w-5 h-5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Right - Order Form */}
+          <div className="space-y-6">
+            {/* Customer Type & Basic Info */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <h2 className="text-lg font-semibold mb-4">Customer Details</h2>
+              
+              {/* B2B / B2C Toggle */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Customer Type *</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOrderForm({...orderForm, customer_type: 'B2C'})}
+                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 transition-all ${
+                      orderForm.customer_type === 'B2C' 
+                        ? 'border-teal-500 bg-teal-50 text-teal-700' 
+                        : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                  >
+                    <User className="w-5 h-5" />
+                    <span className="font-medium">B2C</span>
+                    <span className="text-xs text-gray-500">(Individual)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrderForm({...orderForm, customer_type: 'B2B'})}
+                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 transition-all ${
+                      orderForm.customer_type === 'B2B' 
+                        ? 'border-blue-500 bg-blue-50 text-blue-700' 
+                        : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                  >
+                    <Building2 className="w-5 h-5" />
+                    <span className="font-medium">B2B</span>
+                    <span className="text-xs text-gray-500">(Business)</span>
+                  </button>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    {orderForm.customer_type === 'B2B' ? 'Company Name *' : 'Customer Name *'}
+                  </label>
+                  <input
+                    type="text"
+                    value={orderForm.customer_name}
+                    onChange={(e) => setOrderForm({...orderForm, customer_name: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    placeholder={orderForm.customer_type === 'B2B' ? 'Company name' : 'Customer name'}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Phone *</label>
+                  <input
+                    type="tel"
+                    value={orderForm.customer_phone}
+                    onChange={(e) => setOrderForm({...orderForm, customer_phone: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={orderForm.customer_email}
+                    onChange={(e) => setOrderForm({...orderForm, customer_email: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Payment Mode</label>
+                  <select
+                    value={orderForm.payment_mode}
+                    onChange={(e) => setOrderForm({...orderForm, payment_mode: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                  >
+                    <option value="cash">Cash</option>
+                    <option value="card">Card</option>
+                    <option value="upi">UPI</option>
+                    <option value="credit">Credit (Pay Later)</option>
+                    <option value="bank_transfer">Bank Transfer</option>
+                  </select>
+                </div>
+                
+                {/* GST Field - Only for B2B */}
+                {orderForm.customer_type === 'B2B' && (
+                  <div className="col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      GST Number * <span className="text-xs text-gray-400">(15 characters)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={orderForm.gst_number}
+                      onChange={(e) => setOrderForm({...orderForm, gst_number: e.target.value.toUpperCase()})}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 uppercase font-mono"
+                      placeholder="e.g., 29ABCDE1234F1Z5"
+                      maxLength={15}
+                      required
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            {/* Billing Address */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <h2 className="text-lg font-semibold mb-4">Billing Address</h2>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                  <input
+                    type="text"
+                    value={orderForm.billing_name}
+                    onChange={(e) => setOrderForm({...orderForm, billing_name: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    placeholder="Billing contact name"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                  <input
+                    type="text"
+                    value={orderForm.billing_address}
+                    onChange={(e) => setOrderForm({...orderForm, billing_address: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    placeholder="Street address"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">City</label>
+                  <input
+                    type="text"
+                    value={orderForm.billing_city}
+                    onChange={(e) => setOrderForm({...orderForm, billing_city: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">State</label>
+                  <input
+                    type="text"
+                    value={orderForm.billing_state}
+                    onChange={(e) => setOrderForm({...orderForm, billing_state: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Pincode</label>
+                  <input
+                    type="text"
+                    value={orderForm.billing_pincode}
+                    onChange={(e) => setOrderForm({...orderForm, billing_pincode: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    maxLength={6}
+                  />
+                </div>
+              </div>
+            </div>
+            
+            {/* Delivery Address */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold">Delivery Address</h2>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sameAsDelivery}
+                    onChange={(e) => setSameAsDelivery(e.target.checked)}
+                    className="rounded text-teal-600"
+                  />
+                  <span className="text-sm text-gray-600">Same as billing</span>
+                </label>
+              </div>
+              
+              {!sameAsDelivery && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Delivery Contact Name</label>
+                    <input
+                      type="text"
+                      value={orderForm.delivery_name}
+                      onChange={(e) => setOrderForm({...orderForm, delivery_name: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Delivery Address</label>
+                    <input
+                      type="text"
+                      value={orderForm.delivery_address}
+                      onChange={(e) => setOrderForm({...orderForm, delivery_address: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">City</label>
+                    <input
+                      type="text"
+                      value={orderForm.delivery_city}
+                      onChange={(e) => setOrderForm({...orderForm, delivery_city: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">State</label>
+                    <input
+                      type="text"
+                      value={orderForm.delivery_state}
+                      onChange={(e) => setOrderForm({...orderForm, delivery_state: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Pincode</label>
+                    <input
+                      type="text"
+                      value={orderForm.delivery_pincode}
+                      onChange={(e) => setOrderForm({...orderForm, delivery_pincode: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                      maxLength={6}
+                    />
+                  </div>
+                </div>
+              )}
+              
+              {sameAsDelivery && (
+                <p className="text-sm text-gray-500 italic">Delivery address will be same as billing address</p>
+              )}
+            </div>
+
+            {/* Order Items */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold">Order Items</h2>
+                <span className="text-sm text-gray-500">{orderForm.items.length} items</span>
+              </div>
+
+              {orderForm.items.length === 0 ? (
+                <div className="text-center py-8 text-gray-400">
+                  <ShoppingCart className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                  <p>No items added yet</p>
+                  <p className="text-sm">Select products from the left panel</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {orderForm.items.map((item, index) => (
+                    <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex-1">
+                        <p className="font-medium text-sm">{item.product_name}</p>
+                        <p className="text-xs text-gray-500">{item.brand}</p>
+                        {/* Editable Price */}
+                        <div className="flex items-center gap-2 mt-1">
+                          {item.editing_price ? (
+                            <div className="flex items-center gap-1">
+                              <span className="text-sm">₹</span>
+                              <input
+                                type="number"
+                                value={item.price}
+                                onChange={(e) => updateItemPrice(index, e.target.value)}
+                                className="w-24 px-2 py-1 text-sm border rounded focus:ring-1 focus:ring-teal-500"
+                                autoFocus
+                              />
+                              <button
+                                type="button"
+                                onClick={() => togglePriceEdit(index)}
+                                className="p-1 text-green-600 hover:bg-green-50 rounded"
+                              >
+                                <Check className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-semibold text-teal-600">{formatCurrency(item.price)}</span>
+                              {item.price !== item.original_price && (
+                                <span className="text-xs text-gray-400 line-through">{formatCurrency(item.original_price)}</span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => togglePriceEdit(index)}
+                                className="p-1 text-gray-400 hover:text-teal-600 hover:bg-teal-50 rounded"
+                                title="Edit Price"
+                              >
+                                <Edit2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center border rounded-lg">
+                          <button
+                            type="button"
+                            onClick={() => updateItemQuantity(index, item.quantity - 1)}
+                            className="px-3 py-1 hover:bg-gray-100"
+                          >
+                            -
+                          </button>
+                          <span className="px-3 py-1 border-x">{item.quantity}</span>
+                          <button
+                            type="button"
+                            onClick={() => updateItemQuantity(index, item.quantity + 1)}
+                            className="px-3 py-1 hover:bg-gray-100"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <p className="font-semibold w-24 text-right">
+                          {formatCurrency(item.price * item.quantity)}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => removeItem(index)}
+                          className="p-1 text-red-500 hover:bg-red-50 rounded"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Total */}
+                  <div className="flex items-center justify-between pt-4 border-t mt-4">
+                    <span className="text-lg font-semibold">Total Amount</span>
+                    <span className="text-2xl font-bold text-teal-600">{formatCurrency(calculateTotal())}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Notes & Submit */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Order Notes</label>
+                <textarea
+                  value={orderForm.notes}
+                  onChange={(e) => setOrderForm({...orderForm, notes: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500"
+                  rows={2}
+                  placeholder="Any special instructions..."
+                ></textarea>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => navigate('/store/dashboard')}
+                  className="flex-1 px-4 py-3 border rounded-lg hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSubmit}
+                  disabled={orderForm.items.length === 0}
+                  className="flex-1 px-4 py-3 bg-teal-600 text-white rounded-lg hover:bg-teal-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  <Receipt className="w-5 h-5" />
+                  Create Order
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+};
+
+export default StoreCreateOrder;

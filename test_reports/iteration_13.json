@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 13 fully verified. Backend (10/10 pytest passed): Cart offer SKU isolation working — POST /api/offers/cart for a single Bosch product returns exactly 1 offer (the SKU-scoped no_cost_emi) — no leakage from 442 offers. New offer types (seasonal_offer, upi_offer) accepted by POST /api/offers/admin/create and persisted with correct offer_type. Brand-wide seasonal_offer created for Bosch/Refrigerator appears on Bosch KGN56LB42I PDP alongside its SKU offer, and also on the cart offers endpoint. Total 442 Bosch offers preserved after cleanup. Frontend: PDP renders seasonal_offer card with rose 'Limited Time' badge and green 'Contact store on WhatsApp' CTA (data-testid=offer-whatsapp-<id>) with correct href starting https://wa.me/919844577440?text=. Checkout /checkout now renders OffersDisplay in RIGHT column BELOW the payment method (measured: offers_top=693 > payment_bottom=669) — only 2 relevant Bosch offers shown, no leakage. Admin Add Offer modal dropdown shows all 8 offer types in correct order (Cashback, Bank Offer, No Cost EMI, UPI Cashback / Offer, Exchange Offer, Extended Warranty, Limited Time / Seasonal Offer, Partner Offer).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_offer_types_and_cart_isolation.py",
+    "/app/test_reports/pytest/pytest_iter13.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "OFFER_TYPES whitelist in cashback_offers_routes.py now includes 8 types; POST /admin/create validates against it (good).",
+    "OfferUpdate model still does NOT whitelist offer_type on PUT — any string could be persisted via update. Consider adding whitelist validation there too. (Carried from iter 12.)",
+    "The cart endpoint uses the same non_sku_filter as offers_for_product — good DRY approach, though the filter is duplicated inline; could be extracted to a shared helper.",
+    "OffersDisplay.js: when redeem_location != 'offline_store', WhatsApp CTA is hidden but backend still sends the whatsapp_message field — harmless bandwidth cost, minor.",
+    "Checkout.js at line ~956 correctly passes cartProductIds via product?.id fallback — handles both nested and flat cart shapes."
+  ],
+  "updated_files": ["/app/backend/tests/test_offer_types_and_cart_isolation.py"],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% (PDP + Checkout position + WhatsApp CTA + 8-type dropdown all verified)"},
+  "test_credentials": "Super admin: rohit.gadiya@gmail.com / Purvi@vriddhi01 (from /app/memory/test_credentials.md). Admin login route is /admin/login (not /login).",
+  "seed_data_creation": "During tests: pytest fixture created + deleted 2 offers (seasonal + upi). UI test created 'TEST_UI Monsoon Combo Offer + 1yr warranty' (id 90e7f303-3b44-43f1-9032-1b0ddba13675) and deleted at end — final admin/list count back to 442.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 3 iter-13 asks (cart isolation, 2 new offer types, checkout offers-below-payment placement) verified on live prod URL. Cart offer count for a single Bosch product = 1. PDP for Bosch KGN56LB42I id=15b0268c-226e-4544-9b0a-204688f8ce3c shows exactly 1 SKU offer (no_cost_emi, redeem_location=online, no WhatsApp CTA). To test the WhatsApp CTA visually, temporarily create an offline_store offer and delete it after — this is what iter-13 UI test did. Admin /admin/offers has functional Add Offer modal with 8-item type select (data-testid=offer-type-select).",
+  "verified_metrics": {
+    "backend_pytest_passed": 10,
+    "backend_pytest_failed": 0,
+    "cart_offers_count_single_bosch_product": 1,
+    "pdp_offers_count_with_test_seasonal": 2,
+    "pdp_offers_count_after_cleanup": 1,
+    "admin_offer_types_dropdown_count": 8,
+    "checkout_offers_below_payment_method": true,
+    "whatsapp_href_pattern_valid": true,
+    "total_offers_final": 442
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration 12 fully verified. Backend (7/7 pytest) — bank-name expansion returns friendly list on Bosch KGN56LB42I PDP endpoint; POST /api/offers/admin/create accepts extended_warranty and returns 200 with whatsapp_message; brand-wide warranty appears as a 2nd offer on Bosch PDP alongside the SKU offer; PUT /api/offers/admin/{id} accepts terms/is_active/offer_type. Frontend admin — Add Offer modal opens, creates extended_warranty offer visible in table with Extended Warranty badge, edit re-opens pre-filled, delete cleans up. PDP shows friendly bank list 'HDFC, ICICI, Axis, SBI, Kotak, American Express, Bank of Baroda, Yes Bank, IndusInd, IDFC First, RBL' — no 'All Banks' literal. 442 total offers preserved.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_offer_bank_expansion_and_admin_crud.py",
+    "/app/test_reports/pytest/pytest_iter12.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "OfferUpdate model now includes offer_type/terms/tenure — good. Consider validating offer_type against OFFER_TYPES whitelist in PUT (currently accepts any string).",
+    "_expand_bank_names covers 'all banks', 'any bank', 'all cards', 'any card'. Consider also handling 'all major banks' / 'all credit cards' if source data uses those.",
+    "OfferEditModal writes state.offer.categories/product_ids as comma-joined strings; on save it splits — good UX. But no client-side validation for amount_type=percentage exceeding 100%.",
+    "Carried over from prior iter: `_build_whatsapp_link` computes `encoded` variable but discards it in current form (harmless).",
+    "Row-based extractor uses eligible_banks_default from legend row — for Bosch that's 'All Banks' which is now expanded server-side. Works fine."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (7/7)", "frontend": "100% (admin CRUD + PDP bank expansion)"},
+  "test_credentials": "Super admin used: rohit.gadiya@gmail.com / Purvi@vriddhi01 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Test created 'TEST_UI Warranty' offer via UI and 'TEST 3-year Extended Warranty' via API. Both deleted at end of test run. DB still holds 442 Bosch offers (unchanged).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 3 iteration-12 asks verified live on prod URL. Bosch KGN56LB42I PDP shows 'Eligible Bank Cards: HDFC, ICICI, Axis, SBI, Kotak, American Express, Bank of Baroda, Yes Bank, IndusInd, IDFC First, RBL'. Admin /admin/offers has functional Add Offer button (data-testid=add-offer-btn) opening OfferEditModal (data-testid=offer-edit-modal) with type select (offer-type-select), title (offer-title-input), banks (offer-banks-input), save (offer-save-btn) and per-row edit buttons (offer-edit-{id}). Extended Warranty type is rendered with indigo Shield badge on both admin table and PDP OffersDisplay. 442 Bosch offers still loaded.",
+  "verified_metrics": {
+    "backend_pytest_passed": 7,
+    "backend_pytest_failed": 0,
+    "admin_total_offers": 442,
+    "bosch_pdp_offers_with_extended_warranty": 2,
+    "bosch_pdp_offers_without_extended_warranty": 1,
+    "expanded_bank_list_char_length_gte_60": true
+  }
+}

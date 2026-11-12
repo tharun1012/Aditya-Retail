@@ -1,0 +1,641 @@
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, HttpUrl
+from typing import Optional, List, Dict, Any
+import os
+import httpx
+from bs4 import BeautifulSoup
+import re
+import json
+from urllib.parse import urlparse, urljoin
+
+router = APIRouter(prefix="/products", tags=["Product Extraction"])
+
+# We'll use Emergent LLM for AI extraction
+EMERGENT_LLM_KEY = None  # Will be populated from environment
+
+class ProductURLRequest(BaseModel):
+    url: HttpUrl
+    additional_context: Optional[str] = None
+
+class ExtractedProduct(BaseModel):
+    name: str
+    brand: Optional[str] = None
+    model_number: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    price: Optional[float] = None
+    mrp: Optional[float] = None
+    description: Optional[str] = None
+    short_description: Optional[str] = None
+    technical_overview: Optional[str] = None
+    highlights: List[str] = []
+    special_features: List[str] = []
+    specifications: Dict[str, Any] = {}  # Allow any value type (str or dict)
+    images: List[str] = []
+    documents: List[Dict[str, str]] = []
+    warranty: Optional[Dict[str, Any]] = None
+    energy_rating: Optional[str] = None
+    dimensions: Optional[Dict[str, Any]] = None  # Allow nested dicts
+
+
+def normalize_url(src: str, base_url: str) -> str:
+    """Normalize a URL to absolute format"""
+    if not src:
+        return None
+    src = src.strip()
+    if src.startswith('data:'):
+        return None
+    if src.startswith('//'):
+        return 'https:' + src
+    elif src.startswith('/'):
+        return urljoin(base_url, src)
+    elif not src.startswith('http'):
+        return urljoin(base_url, src)
+    return src
+
+
+def is_product_image(url: str) -> bool:
+    """Check if URL is likely a product image (not icon/logo/placeholder)"""
+    if not url:
+        return False
+    url_lower = url.lower()
+    
+    # Exclude common non-product images
+    exclude_patterns = [
+        'logo', 'icon', 'favicon', 'sprite', 'loading',
+        'avatar', 'badge', 'button', 'banner', 'ad-', 'advertisement',
+        'social', 'facebook', 'twitter', 'instagram', 'pinterest',
+        'pixel', 'tracker', '1x1', 'spacer', 'blank', 'transparent',
+        'arrow', 'close', 'search', 'cart', 'menu', 'nav-',
+        'footer-', 'header-', 'payment', 'trust', 'secure',
+        'download-icon'
+    ]
+    
+    # Check for placeholder but allow product placeholders
+    if 'placeholder' in url_lower and 'appliances' not in url_lower:
+        return False
+    
+    # IMG_ALLOW: known product CDN paths bypass the exclude list ('Ai1Cart' contains 'cart')
+    if 'product_images' in url_lower:
+        return True
+    if '/assets/images/caller' in url_lower:
+        return False
+
+    for pattern in exclude_patterns:
+        if pattern in url_lower:
+            return False
+    
+    # Brand-specific asset paths are always valid
+    brand_asset_patterns = [
+        'globalassets/appliances',  # Electrolux
+        'bosch-media', 'bosch-home',  # Bosch
+        'siemens-home',  # Siemens
+        'hindware',  # Hindware
+        'remote.jpg.ashx',  # Electrolux encoded
+        'productinformation',  # Electrolux CDN
+        'medialibrary'  # Electrolux media
+    ]
+    
+    for pattern in brand_asset_patterns:
+        if pattern in url_lower:
+            return True
+    
+    # Check for valid image extensions
+    valid_extensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']
+    has_valid_ext = any(ext in url_lower for ext in valid_extensions)
+    
+    # Also allow URLs with image dimensions or product-related keywords
+    product_keywords = ['product', 'item', 'goods', 'appliance', 'image', 'photo', 'gallery', 'zoom', 'large', 'main', 'assets']
+    has_product_keyword = any(kw in url_lower for kw in product_keywords)
+    
+    return has_valid_ext or has_product_keyword
+
+
+def extract_images_from_json(data, images_set: set, base_url: str):
+    """Recursively extract image URLs from JSON-LD or other JSON data"""
+    if isinstance(data, dict):
+        for key, value in data.items():
+            key_lower = key.lower()
+            if any(kw in key_lower for kw in ['image', 'img', 'photo', 'picture', 'thumbnail', 'url']):
+                if isinstance(value, str) and any(ext in value.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                    src = normalize_url(value, base_url)
+                    if src and is_product_image(src):
+                        images_set.add(src)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str):
+                            src = normalize_url(item, base_url)
+                            if src and is_product_image(src):
+                                images_set.add(src)
+            extract_images_from_json(value, images_set, base_url)
+    elif isinstance(data, list):
+        for item in data:
+            extract_images_from_json(item, images_set, base_url)
+
+async def scrape_webpage(url: str) -> tuple[str, str, str]:
+    """Scrape webpage content and extract text + images + documents"""
+    try:
+        print(f"🌐 Scraping URL: {url}")
+        
+        # Use multiple User-Agent headers to bypass basic bot detection
+        # Note: Avoid Brotli encoding as it can cause decompression issues
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate',  # No Brotli - causes issues with httpx
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        async with httpx.AsyncClient(
+            timeout=30.0, 
+            follow_redirects=True,
+            headers=headers
+        ) as client:
+            response = await client.get(url)
+            print(f"📡 Response status: {response.status_code}")
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            html_content = response.text  # Keep raw HTML for regex patterns
+            
+            # Remove script and style elements for text extraction
+            for script in soup(["script", "style", "nav", "footer", "header"]):
+                script.decompose()
+            
+            # Extract text
+            text = soup.get_text(separator='\n', strip=True)
+            print(f"📝 Extracted {len(text)} characters of text")
+            
+            # Extract images - Enhanced for multiple patterns
+            images = set()  # Use set to avoid duplicates
+            from urllib.parse import urlparse, urljoin
+            parsed_url = urlparse(str(url))
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            
+            # Re-parse for image extraction (before decomposing elements)
+            soup_full = BeautifulSoup(html_content, 'html.parser')
+            
+            # Pattern 1: Standard img tags with various src attributes
+            for img in soup_full.find_all('img'):
+                for attr in ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 
+                            'data-srcset', 'data-lazy', 'data-zoom-image', 'data-large-image',
+                            'data-full-image', 'srcset', 'data-bg', 'data-background']:
+                    src = img.get(attr)
+                    if src:
+                        # Handle srcset (take first URL)
+                        if 'srcset' in attr.lower():
+                            src = src.split(',')[0].split()[0]
+                        src = normalize_url(src, base_url)
+                        if src and is_product_image(src):
+                            images.add(src)
+            
+            # Pattern 2: Picture and source elements
+            for source in soup_full.find_all(['source', 'picture']):
+                for attr in ['srcset', 'data-srcset', 'src']:
+                    src = source.get(attr)
+                    if src:
+                        src = src.split(',')[0].split()[0]
+                        src = normalize_url(src, base_url)
+                        if src and is_product_image(src):
+                            images.add(src)
+            
+            # Pattern 3: Background images in style attributes
+            for elem in soup_full.find_all(style=True):
+                style = elem.get('style', '')
+                bg_urls = re.findall(r'url\(["\']?([^"\'()]+)["\']?\)', style)
+                for bg_url in bg_urls:
+                    src = normalize_url(bg_url, base_url)
+                    if src and is_product_image(src):
+                        images.add(src)
+            
+            # Pattern 4: Data attributes on divs and other elements (common for carousels/galleries)
+            for elem in soup_full.find_all(['div', 'span', 'a', 'li', 'figure']):
+                for attr in elem.attrs:
+                    if any(keyword in attr.lower() for keyword in ['image', 'img', 'src', 'url', 'photo', 'picture']):
+                        src = elem.get(attr)
+                        if src and isinstance(src, str):
+                            src = normalize_url(src, base_url)
+                            if src and is_product_image(src):
+                                images.add(src)
+            
+            # Pattern 5: Extract from JSON-LD structured data
+            for script in soup_full.find_all('script', type='application/ld+json'):
+                try:
+                    json_data = json.loads(script.string or '{}')
+                    extract_images_from_json(json_data, images, base_url)
+                except Exception:
+                    pass
+            
+            # Pattern 6: Extract from inline JavaScript (common for galleries)
+            for script in soup_full.find_all('script'):
+                if script.string:
+                    # Look for image URLs in JavaScript
+                    js_images = re.findall(r'["\']([^"\']+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"\']*)?)["\']', script.string, re.IGNORECASE)
+                    for img_url in js_images:
+                        src = normalize_url(img_url, base_url)
+                        if src and is_product_image(src):
+                            images.add(src)
+            
+            # Pattern 7: Look for gallery/carousel containers with data-images
+            for elem in soup_full.find_all(attrs={'data-images': True}):
+                try:
+                    img_data = json.loads(elem.get('data-images', '[]'))
+                    if isinstance(img_data, list):
+                        for item in img_data:
+                            if isinstance(item, str):
+                                src = normalize_url(item, base_url)
+                                if src:
+                                    images.add(src)
+                            elif isinstance(item, dict):
+                                for key in ['url', 'src', 'image', 'large', 'medium', 'original']:
+                                    if key in item:
+                                        src = normalize_url(item[key], base_url)
+                                        if src:
+                                            images.add(src)
+                except Exception:
+                    pass
+            
+            # Pattern 8: Direct regex on raw HTML for common image path patterns
+            # This catches images that BeautifulSoup might miss due to encoding
+            html_image_patterns = [
+                r'globalassets/appliances[^"\'>\s]+\.(?:jpg|jpeg|png|webp)',
+                r'globalassets/[^"\'>\s]+\.(?:jpg|jpeg|png|webp)',
+                r'remote\.jpg\.ashx\?[^"\'>\s]+',
+                r'productinformation[^"\'>\s]+\.(?:jpg|jpeg|png)',
+                r'medialibrary[^"\'>\s]+\.(?:jpg|jpeg|png)',
+            ]
+            
+            print(f"🔍 HTML content length: {len(html_content)}")
+            
+            for pattern in html_image_patterns:
+                matches = re.findall(pattern, html_content, re.IGNORECASE)
+                print(f"   Pattern '{pattern[:30]}...' found {len(matches)} matches")
+                for match in matches:
+                    src = normalize_url(match, base_url)
+                    if src:
+                        images.add(src)
+            
+            print(f"🔍 After regex patterns: {len(images)} images")
+            
+            # Pattern 9: Extract high-res versions by removing width params
+            enhanced_images = set()
+            for img in images:
+                enhanced_images.add(img)
+                # Try to get higher resolution by modifying width params
+                if 'width=' in img:
+                    # Replace small width with larger width
+                    high_res = re.sub(r'width=\d+', 'width=800', img)
+                    enhanced_images.add(high_res)
+            
+            # Pattern 10: Look for Electrolux-style encoded URLs and decode
+            for elem in soup_full.find_all(['img', 'source'], src=True):
+                src = elem.get('src', '')
+                if 'remote.jpg.ashx' in src or 'urlb64=' in src:
+                    # This is a valid image URL even if encoded
+                    enhanced_images.add(normalize_url(src, base_url))
+            
+            images = enhanced_images
+            print(f"🔍 Found {len(images)} potential product images")
+            
+            # Extract document/manual links (PDFs, DOCs, etc.)
+            documents = []
+            from urllib.parse import urlparse
+            parsed = urlparse(str(url))
+            
+            # Check all <a> tags for document links
+            for link in soup.find_all('a', href=True):
+                href = link.get('href', '')
+                link_text = link.get_text(strip=True).lower()
+                
+                # Check if it's a document link by URL extension or link text
+                is_document = (
+                    '.pdf' in href.lower() or 
+                    '.doc' in href.lower() or 
+                    '.docx' in href.lower() or
+                    'manual' in link_text or
+                    'datasheet' in link_text or
+                    'specification' in link_text or
+                    'brochure' in link_text or
+                    'catalog' in link_text or
+                    'guide' in link_text or
+                    'download' in link_text or
+                    'user guide' in link_text or
+                    'instruction' in link_text or
+                    'warranty' in link_text or
+                    'certificate' in link_text
+                )
+                
+                if is_document:
+                    # Convert relative URLs to absolute
+                    if href.startswith('//'):
+                        href = 'https:' + href
+                    elif href.startswith('/'):
+                        href = f"{parsed.scheme}://{parsed.netloc}{href}"
+                    elif not href.startswith('http'):
+                        # Relative path without leading slash
+                        base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rsplit('/', 1)[0]}"
+                        href = f"{base_url}/{href}"
+                    
+                    if href.startswith('http'):
+                        documents.append({
+                            'url': href,
+                            'name': link.get_text(strip=True) or 'Product Document',
+                            'type': 'manual' if 'manual' in link_text else 'datasheet' if 'datasheet' in link_text else 'document'
+                        })
+            
+            # Also check for data-* attributes and button elements that might contain PDF links
+            for element in soup.find_all(['button', 'div', 'span'], attrs={'data-href': True}):
+                href = element.get('data-href', '')
+                element_text = element.get_text(strip=True).lower()
+                
+                if '.pdf' in href.lower() or 'manual' in element_text or 'download' in element_text:
+                    if href.startswith('//'):
+                        href = 'https:' + href
+                    elif href.startswith('/'):
+                        href = f"{parsed.scheme}://{parsed.netloc}{href}"
+                    elif not href.startswith('http'):
+                        base_path = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rsplit('/', 1)[0]}"
+                        href = f"{base_path}/{href}"
+                    
+                    if href.startswith('http'):
+                        documents.append({
+                            'url': href,
+                            'name': element.get_text(strip=True) or 'Product Document',
+                            'type': 'manual'
+                        })
+            
+            # Regex-based PDF extraction from raw HTML
+            pdf_pattern = r'["\']([^"\']*\.pdf)["\']'
+            pdf_matches = re.findall(pdf_pattern, html_content, re.IGNORECASE)
+            for pdf_url in pdf_matches:
+                full_url = normalize_url(pdf_url, base_url)
+                if full_url:
+                    documents.append({
+                        'url': full_url,
+                        'name': 'Product Document',
+                        'type': 'document'
+                    })
+            
+            # Remove duplicates from documents
+            seen_urls = set()
+            unique_documents = []
+            for doc in documents:
+                if doc['url'] not in seen_urls:
+                    seen_urls.add(doc['url'])
+                    unique_documents.append(doc)
+                    print(f"📄 Found document: {doc['name'][:30]}... - {doc['url'][:60]}...")
+            
+            print(f"✅ Total extraction: {len(images)} images, {len(unique_documents)} documents")
+            
+            # IMG_ALLOW: product shots first, then the rest
+            images_list = sorted(list(images), key=lambda u: (0 if 'product_images' in u.lower() else 1, u))[:15]
+            print(f"🖼️ Final images: {len(images_list)}")
+            for img in images_list[:3]:
+                print(f"   - {img[:80]}...")
+            
+            return text, json.dumps(images_list), json.dumps(unique_documents[:10])
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to scrape URL: {str(e)}")
+
+async def extract_with_ai(url: str, html_text: str, images_json: str, documents_json: str, additional_context: str = None) -> ExtractedProduct:
+    """Use AI to extract structured product information"""
+    global EMERGENT_LLM_KEY
+    
+    try:
+        # Import emergent integrations
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        
+        # Get Emergent LLM key if not already set
+        if not EMERGENT_LLM_KEY:
+            EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+            if not EMERGENT_LLM_KEY:
+                raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY not configured")
+        
+        # Initialize LLM Chat
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"product_extract_{hash(url)}",
+            system_message="You are a precise product data extraction AI. Return only valid JSON."
+        ).with_model("openai", "gpt-4o-mini")
+        
+        # Construct AI prompt
+        prompt = f"""You are a product data extraction expert. Extract structured product information from the following webpage content.
+
+URL: {url}
+Additional Context: {additional_context or 'None'}
+
+Webpage Content:
+{html_text[:8000]}  # Limit to avoid token limits
+
+Available Images:
+{images_json}
+
+Available Documents/Manuals:
+{documents_json}
+
+Extract and return a JSON object with the following structure:
+{{
+  "name": "Full product name",
+  "brand": "Brand name (Bosch/Siemens/Hindware/etc)",
+  "model_number": "Model number or SKU",
+  "category": "Main category (e.g., Kitchen Appliances, Home Appliances)",
+  "subcategory": "Subcategory (e.g., Microwaves, Ovens, Hobs)",
+  "price": numeric_price_if_available_or_null,
+  "mrp": numeric_mrp_if_available_or_null,
+  "description": "Full product description",
+  "short_description": "Brief 1-2 sentence description",
+  "technical_overview": "Technical details and overview",
+  "highlights": ["Key feature 1", "Key feature 2", ...],
+  "special_features": ["Special feature 1", "Special feature 2", ...],
+  "specifications": {{
+    "Specification Name": "Value",
+    "Power": "1200W",
+    "Capacity": "25L",
+    "Dimensions": "595 x 455 x 388 mm"
+  }},
+  "images": ["image_url_1", "image_url_2", ...],
+  "documents": [
+    {{"url": "https://example.com/manual.pdf", "name": "User Manual", "type": "manual"}},
+    {{"url": "https://example.com/datasheet.pdf", "name": "Technical Datasheet", "type": "datasheet"}}
+  ],
+  "warranty": null,
+  "energy_rating": null,
+  "dimensions": null
+}}
+
+IMPORTANT:
+1. Extract ALL relevant images (product images, not logos or icons)
+2. Extract ALL document links from the "Available Documents/Manuals" list above
+3. Include PDFs, manuals, datasheets, brochures, specification documents
+4. If the "Available Documents/Manuals" list is empty, try to construct likely document URLs based on the product model number and brand (e.g., for Bosch model ABC123, try URLs like "https://www.bosch-home.in/manuals/ABC123.pdf" or mention in description that user should check brand website)
+5. Parse specifications carefully from tables or lists
+6. Identify the brand, category correctly
+7. If price is not available, set to null
+8. If warranty info not available, set warranty to null (not an object with null values)
+9. Return ONLY valid JSON, no additional text
+10. Use the images and documents lists provided above - include ALL documents from that list
+"""
+        
+        # Create user message
+        user_message = UserMessage(text=prompt)
+        
+        # Send message and get response (returns string directly)
+        response = await chat.send_message(user_message)
+        
+        # Parse AI response (response is already a string)
+        ai_text = response.strip()
+        
+        print(f"🤖 AI Response (first 500 chars): {ai_text[:500]}")
+        
+        # Extract JSON from markdown code blocks if present
+        if '```json' in ai_text:
+            ai_text = ai_text.split('```json')[1].split('```')[0].strip()
+        elif '```' in ai_text:
+            ai_text = ai_text.split('```')[1].split('```')[0].strip()
+        
+        # Remove any leading/trailing whitespace and BOM characters
+        ai_text = ai_text.strip().lstrip('\ufeff').lstrip('\ufffe')
+        
+        # Try to find JSON object in the text if it's wrapped in other text
+        if not ai_text.startswith('{'):
+            # Try to extract JSON from text
+            json_match = re.search(r'\{.*\}', ai_text, re.DOTALL)
+            if json_match:
+                ai_text = json_match.group(0)
+        
+        print(f"📝 Cleaned JSON (first 200 chars): {ai_text[:200]}")
+        
+        try:
+            product_data = json.loads(ai_text)
+        except json.JSONDecodeError as json_err:
+            print(f"❌ JSON Decode Error: {json_err}")
+            print(f"❌ Problematic text: {ai_text[:1000]}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"AI returned invalid JSON at position {json_err.pos}: {json_err.msg}"
+            )
+        
+        # Clean up warranty data if it has None values
+        # WARRANTY_NORMALIZE: AI sometimes returns warranty as a plain string
+        w = product_data.get('warranty')
+        if isinstance(w, str):
+            product_data['warranty'] = {"period": w.strip(), "terms": w.strip()} if w.strip() else None
+        elif w and not isinstance(w, dict):
+            product_data['warranty'] = None
+        if 'warranty' in product_data and product_data['warranty']:
+            warranty = product_data['warranty']
+            if warranty.get('period') is None or warranty.get('terms') is None:
+                product_data['warranty'] = None
+        # Coerce spec/documents shapes
+        if isinstance(product_data.get('specifications'), list):
+            product_data['specifications'] = {str(i): str(v) for i, v in enumerate(product_data['specifications'])}
+        elif product_data.get('specifications') is not None and not isinstance(product_data.get('specifications'), dict):
+            product_data['specifications'] = {}
+        if product_data.get('documents') is not None and not isinstance(product_data.get('documents'), list):
+            product_data['documents'] = []
+        
+        # Clean up specifications - remove None values or convert to empty string
+        if 'specifications' in product_data and product_data['specifications']:
+            cleaned_specs = {}
+            for key, value in product_data['specifications'].items():
+                if value is not None:
+                    # Ensure value is a string
+                    cleaned_specs[key] = str(value)
+                # Skip None values - don't include them in the dict
+            product_data['specifications'] = cleaned_specs
+        
+        # DIM_NORMALIZE: AI sometimes returns dimensions as str/list
+        dims = product_data.get('dimensions')
+        if dims is not None and not isinstance(dims, dict):
+            if isinstance(dims, (list, tuple)):
+                dims = " x ".join(str(d) for d in dims)
+            dims = str(dims).strip()
+            product_data['dimensions'] = {"overall": dims} if dims else None
+
+        # FIELDS_NORMALIZE: coerce every field to the type ExtractedProduct expects
+        import re as _re
+        def _num(v):
+            if v is None or isinstance(v, (int, float)):
+                return v
+            t = _re.sub(r'[^\d.]', '', str(v).replace(',', ''))
+            try:
+                return float(t) if t else None
+            except ValueError:
+                return None
+        def _lst(v):
+            if v is None:
+                return []
+            if isinstance(v, str):
+                return [v.strip()] if v.strip() else []
+            if isinstance(v, (list, tuple)):
+                return [str(i) for i in v if i]
+            return []
+        for k in ('price', 'mrp'):
+            if k in product_data:
+                product_data[k] = _num(product_data[k])
+        for k in ('highlights', 'special_features', 'images'):
+            if k in product_data:
+                product_data[k] = _lst(product_data[k])
+        for k in ('brand', 'model_number', 'category', 'subcategory', 'description',
+                  'short_description', 'technical_overview', 'energy_rating'):
+            v = product_data.get(k)
+            if v is not None and not isinstance(v, str):
+                product_data[k] = str(v)
+        if isinstance(product_data.get('documents'), list):
+            product_data['documents'] = [{str(a): str(b) for a, b in d.items()}
+                                         for d in product_data['documents'] if isinstance(d, dict)]
+        if not isinstance(product_data.get('name'), str) or not product_data.get('name'):
+            product_data['name'] = str(product_data.get('name') or 'Unknown Product')
+
+        # Return as ExtractedProduct
+        return ExtractedProduct(**product_data)
+    
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON Decode Error in outer handler: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        print(f"❌ Unexpected error in extract_with_ai: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
+
+@router.post("/extract-from-url", response_model=ExtractedProduct)
+async def extract_product_from_url(request: ProductURLRequest):
+    """Extract product information from a URL using AI"""
+    try:
+        # Step 1: Scrape the webpage
+        html_text, images_json, documents_json = await scrape_webpage(str(request.url))
+        
+        # Debug logging
+        print(f"🔍 Extracted {len(json.loads(images_json))} images")
+        print(f"📄 Extracted {len(json.loads(documents_json))} documents")
+        print(f"📄 Documents JSON: {documents_json}")
+        
+        # Step 2: Use AI to extract structured data
+        extracted_product = await extract_with_ai(
+            str(request.url),
+            html_text,
+            images_json,
+            documents_json,
+            request.additional_context
+        )
+        
+        # Debug: Check if documents made it through
+        print(f"✅ Final product has {len(extracted_product.documents)} documents")
+        
+        return extracted_product
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"❌ Extraction error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")

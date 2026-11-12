@@ -1,0 +1,42 @@
+{
+  "summary": "Tested iter20 security PR: 5 unauth 401 guards on offline-invoice admin endpoints, super_admin dry_run, find-duplicates route de-shadowing, PUT /invoices/offline/{id} GST recompute, product-page/by-slug regression, and StoreInvoiceCleanup UI flow. 11/12 backend tests passing; 1 real bug surfaced in document-numbering preview.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/document-numbering/preview/{store_id}/invoice",
+        "issue": "HRBR store returns preview 'HRBR0002/25-26' which already exists in offline_invoices (collision). Root cause: HRBR's numbering config has use_custom_format=true with custom_format='HRBR0002/25-26' — a LITERAL string with no {sequence} placeholder. format_document_number therefore returns the same value for every sequence value, and find_next_free_sequence detects it as a static format (line 302-303) and bails out without healing. The atomic $inc allocation fix in get_next_document_number IS correct on its own; the bug is that the custom_format for HRBR was persisted as a literal (probably data seed / UI let user save a value without a {sequence} placeholder). Same risk exists for any other store whose custom_format lacks the sequence token."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter20_offline_invoice_security.py",
+    "/app/test_reports/pytest/iter20.xml"
+  ],
+  "action_items": [
+    "Validate/repair document_numbering.document_configs for HRBR (and any other store) so custom_format either includes a {sequence} placeholder or is disabled (use_custom_format=false). Add server-side validation in the numbering-config PUT endpoint that rejects use_custom_format=true when the format has no {sequence} token, to prevent this class of collision going forward.",
+    "Consider surfacing a warning in preview response when the detected format is static (would collide with existing docs)."
+  ],
+  "critical_code_review_comments": [
+    "verify_admin/verify_super_admin correctly wired on the 5 targeted routes — all return 401 without a bearer token as designed.",
+    "get_next_document_number in document_numbering_routes.py uses find_one_and_update with $inc for atomic sequence allocation — correct fix for the previously reported race. Loop up to 2000 iterations to skip already-existing numbers is defensive.",
+    "Static-format guard in find_next_free_sequence (line 302) bails silently without any signal — it should probably return an is_static flag so callers can warn users; today it happily returns a colliding number.",
+    "StoreDeleteRequest.confirm mechanism (DELETE-<code>) is a sane safety net; delete-by-store dry_run correctly returns {status,dry_run,matched} without mutating data.",
+    "EditInvoiceRequest requires edited_by (non-optional); frontend StoreDocumentManager must supply it (verified schema requirement)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter20_offline_invoice_security.py (new)"
+  ],
+  "success_rate": {"backend": "91.6% (11/12)", "frontend": "100% (2/2 tested)"},
+  "test_credentials": "Super admin rohit.gadiya@gmail.com / Purvi@vriddhi01 via POST /api/auth/unified-login (access_token). Confirmed working.",
+  "seed_data_creation": "None. No documents were created or deleted. All admin deletions were dry_run:true.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter20 focus: security guards for offline invoice admin routes. All 5 endpoints correctly 401 without token, delete-by-store dry_run succeeds with super_admin token and returns matched count (1 for HRBR, document_type=invoice). PUT /invoices/offline/{id} requires edited_by field (non-optional) and correctly kept igst_total=0 with cgst/sgst for intra-state edit. find-duplicates GET returns 200 JSON — route no longer shadowed by /{invoice_id}. Legacy /api/product/by-slug/{cat}/{slug} returns {status, product:{...52 fields incl images & price}} — regression clean. Frontend: /admin/data-management → StoreInvoiceCleanup → Select HRBR → Preview Count → confirm-panel shows '1 Sales Invoices in HRBR will be PERMANENTLY deleted' — API 200 with Bearer header. Actual deletion NOT executed. Product page /washing-machine/bosch/... renders with breadcrumb + ai-summary-section. Open item: document-numbering preview for HRBR still returns colliding number because custom_format lacks {sequence} placeholder — is a data/config issue, not the atomic $inc fix. See backend_issues.minor for details.",
+  "rca of the issue": "Numbering collision RCA: db.document_numbering entry for HRBR has document_configs.invoice.use_custom_format=true and custom_format='HRBR0002/25-26' (a literal, no sequence token). format_document_number returns the literal regardless of the sequence integer, so find_next_free_sequence detects a static format (line 302) and immediately returns the existing invoice_number without advancing. Mitigation: either (a) update HRBR config to use_custom_format=false OR set custom_format='HRBR{sequence:04d}/25-26' with a placeholder; and (b) add PUT validation on /api/document-numbering config to reject custom_format lacking a sequence placeholder when use_custom_format=true. Reproduction: GET /api/document-numbering/preview/ade28bcc-5da5-4895-8d20-9303ce713d32/invoice returns HRBR0002/25-26; GET /api/invoices/offline?store_id=... shows that same invoice_number already exists."
+}

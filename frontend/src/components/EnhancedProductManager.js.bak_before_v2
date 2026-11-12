@@ -1,0 +1,1360 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { 
+  Edit, Trash2, Plus, Save, X, Upload, Image as ImageIcon, 
+  FileText, Star, Shield, Package, ChevronDown, ChevronUp, Link, Loader,
+  Download, FileUp, AlertCircle, CheckCircle
+} from 'lucide-react';
+import AdminPageHeader from './AdminPageHeader';
+
+const EnhancedProductManager = () => {
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [message, setMessage] = useState({ type: '', text: '' });
+  const [searchTerm, setSearchTerm] = useState('');
+  const [productUrl, setProductUrl] = useState('');
+  const [extracting, setExtracting] = useState(false);
+  const [categories, setCategories] = useState([]);
+  const [managedCats, setManagedCats] = useState([]);
+  const OFFICIAL_BRANDS = ['Bosch', 'Electrolux', 'Haier', 'Siemens'];
+  const OFFICIAL_CATEGORIES = ['Washing Machine', 'Refrigerator', 'Gas Hob', 'Induction Hob', 'Dishwasher', 'Sink', 'Chimney', 'Oven', 'Mixer Grinder', 'Air Fryer', 'Coffee Machine', 'Detergent', 'Powertools', 'TV', 'Clothes Dryer', 'Warmer Drawer', 'AC - Air Conditioners', 'Accessories', 'Microwave', 'Geysers', 'Vacuum Cleaners'];
+  const catKey = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/s$/, '');
+  const catOptions = (cur) => {
+    const seen = new Set();
+    const out = [];
+    [...OFFICIAL_CATEGORIES, ...managedCats].forEach((n) => {
+      const k = catKey(n);
+      if (n && !seen.has(k)) { seen.add(k); out.push(n); }
+    });
+    if (cur && !out.includes(cur)) out.push(cur);
+    return out;
+  };
+  const [changingCategory, setChangingCategory] = useState({});
+  const [editingPrice, setEditingPrice] = useState({});
+  const [savingPrice, setSavingPrice] = useState({});
+  const [expandedSections, setExpandedSections] = useState({
+    basicInfo: true,
+    images: true,
+    content: true,
+    specifications: false,
+    documents: false,
+    reviews: false,
+    warranty: false
+  });
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+
+  
+  useEffect(() => {
+    fetchProducts();
+    fetchCategories();
+  }, []);
+
+  const fetchProducts = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        setProducts(data.products);
+      }
+    } catch (error) {
+      showMessage('error', 'Error fetching products: ' + error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchCategories = async () => {
+    try {
+      try {
+        const m = await (await fetch(`${BACKEND_URL}/api/categories/`)).json();
+        setManagedCats((m.categories || []).map((c) => (c.name || '').trim()).filter(Boolean));
+      } catch (e) { /* keep official list */ }
+      const response = await fetch(`${BACKEND_URL}/api/categories/all`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        // Extract unique category names
+        const categoryNames = data.categories
+          .filter(cat => cat.is_active)
+          .map(cat => cat.name);
+        setCategories(categoryNames);
+      }
+    } catch (error) {
+      console.error('Error fetching categories:', error);
+    }
+  };
+
+  const handleCategoryChange = async (productId, newCategory) => {
+    if (!newCategory) return;
+    
+    try {
+      // Set loading state for this specific product
+      setChangingCategory(prev => ({ ...prev, [productId]: true }));
+      
+      const response = await fetch(
+        `${BACKEND_URL}/api/categories/product/${productId}/move?category=${encodeURIComponent(newCategory)}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' }
+        }
+      );
+
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        showMessage('success', `Product moved to ${newCategory} successfully`);
+        // Update the product in the local state
+        setProducts(prevProducts => 
+          prevProducts.map(p => 
+            p.id === productId ? { ...p, category: newCategory } : p
+          )
+        );
+      } else {
+        showMessage('error', 'Failed to move product');
+      }
+    } catch (error) {
+      showMessage('error', 'Error moving product: ' + error.message);
+    } finally {
+      setChangingCategory(prev => ({ ...prev, [productId]: false }));
+    }
+  };
+
+  const handleQuickPriceUpdate = async (productId, newPrice) => {
+    const parsed = parseFloat(newPrice);
+    if (newPrice === '' || isNaN(parsed) || parsed < 0) {
+      showMessage('error', 'Enter a valid price');
+      return;
+    }
+    try {
+      setSavingPrice(prev => ({ ...prev, [productId]: true }));
+      const response = await fetch(`${BACKEND_URL}/api/products/${productId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ price: parsed })
+      });
+      const data = await response.json();
+      if (response.ok && data.status === 'success') {
+        showMessage('success', 'Price updated successfully');
+        setProducts(prev =>
+          prev.map(p => (p.id === productId ? { ...p, price: parsed } : p))
+        );
+        setEditingPrice(prev => {
+          const next = { ...prev };
+          delete next[productId];
+          return next;
+        });
+      } else {
+        showMessage('error', data.detail || 'Failed to update price');
+      }
+    } catch (error) {
+      showMessage('error', 'Error updating price: ' + error.message);
+    } finally {
+      setSavingPrice(prev => ({ ...prev, [productId]: false }));
+    }
+  };
+
+  const showMessage = (type, text) => {
+    setMessage({ type, text });
+    setTimeout(() => setMessage({ type: '', text: '' }), 5000);
+  };
+
+  const toggleSection = (section) => {
+    setExpandedSections(prev => ({
+      ...prev,
+      [section]: !prev[section]
+    }));
+  };
+
+  const handleEdit = (product) => {
+    setEditingProduct({
+      ...product,
+      images: product.images || [],
+      hsn_code: product.hsn_code || '',
+      technical_overview: product.technical_overview || '',
+      highlights: product.highlights || [],
+      special_features: product.special_features || [],
+      specifications: product.specifications || {},
+      documents: product.documents || [],
+      reviews: product.reviews || [],
+      warranty: product.warranty || { period: '', terms: '' }
+    });
+    setShowAddForm(false);
+  };
+
+  const handleDelete = async (productId) => {
+    if (!window.confirm('Are you sure you want to delete this product?')) return;
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products/${productId}`, {
+        method: 'DELETE',
+      });
+
+      if (response.ok) {
+        showMessage('success', 'Product deleted successfully');
+        fetchProducts();
+      } else {
+        showMessage('error', 'Failed to delete product');
+      }
+    } catch (error) {
+      showMessage('error', 'Error: ' + error.message);
+    }
+  };
+
+  const handleImageUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    const formData = new FormData();
+    files.forEach(file => formData.append('files', file));
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/upload/images`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setEditingProduct(prev => ({
+          ...prev,
+          images: [...(prev.images || []), ...data.urls]
+        }));
+        showMessage('success', `${files.length} image(s) uploaded successfully`);
+      } else {
+        showMessage('error', 'Failed to upload images');
+      }
+    } catch (error) {
+      showMessage('error', 'Error uploading images: ' + error.message);
+    }
+  };
+
+  const handleDocumentUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    const formData = new FormData();
+    files.forEach(file => formData.append('files', file));
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/upload/documents`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const newDocs = data.files.map((file, index) => ({
+          name: files[index].name,
+          url: file.url,
+          type: files[index].type,
+          size: files[index].size
+        }));
+        
+        setEditingProduct(prev => ({
+          ...prev,
+          documents: [...(prev.documents || []), ...newDocs]
+        }));
+        showMessage('success', `${files.length} document(s) uploaded successfully`);
+      } else {
+        showMessage('error', 'Failed to upload documents');
+      }
+    } catch (error) {
+      showMessage('error', 'Error uploading documents: ' + error.message);
+    }
+  };
+
+  const removeImage = (index) => {
+    setEditingProduct(prev => ({
+      ...prev,
+      images: prev.images.filter((_, i) => i !== index)
+    }));
+  };
+
+  const setMainImage = (index) => {
+    setEditingProduct(prev => {
+      const newImages = [...prev.images];
+      const [mainImg] = newImages.splice(index, 1);
+      return {
+        ...prev,
+        images: [mainImg, ...newImages]
+      };
+    });
+  };
+
+  const removeDocument = (index) => {
+    setEditingProduct(prev => ({
+      ...prev,
+      documents: prev.documents.filter((_, i) => i !== index)
+    }));
+  };
+
+  const addHighlight = () => {
+    setEditingProduct(prev => ({
+      ...prev,
+      highlights: [...(prev.highlights || []), '']
+    }));
+  };
+
+  const updateHighlight = (index, value) => {
+    setEditingProduct(prev => {
+      const newHighlights = [...prev.highlights];
+      newHighlights[index] = value;
+      return { ...prev, highlights: newHighlights };
+    });
+  };
+
+  const removeHighlight = (index) => {
+    setEditingProduct(prev => ({
+      ...prev,
+      highlights: prev.highlights.filter((_, i) => i !== index)
+    }));
+  };
+
+  const addFeature = () => {
+    setEditingProduct(prev => ({
+      ...prev,
+      special_features: [...(prev.special_features || []), '']
+    }));
+  };
+
+  const updateFeature = (index, value) => {
+    setEditingProduct(prev => {
+      const newFeatures = [...prev.special_features];
+      newFeatures[index] = value;
+      return { ...prev, special_features: newFeatures };
+    });
+  };
+
+  const removeFeature = (index) => {
+    setEditingProduct(prev => ({
+      ...prev,
+      special_features: prev.special_features.filter((_, i) => i !== index)
+    }));
+  };
+
+  const addSpecification = () => {
+    const key = prompt('Enter specification name (e.g., "Power", "Dimensions"):');
+    if (key) {
+      setEditingProduct(prev => ({
+        ...prev,
+        specifications: { ...(prev.specifications || {}), [key]: '' }
+      }));
+    }
+  };
+
+  const updateSpecification = (key, value) => {
+    setEditingProduct(prev => ({
+      ...prev,
+      specifications: { ...prev.specifications, [key]: value }
+    }));
+  };
+
+  const removeSpecification = (key) => {
+    setEditingProduct(prev => {
+      const newSpecs = { ...prev.specifications };
+      delete newSpecs[key];
+      return { ...prev, specifications: newSpecs };
+    });
+  };
+
+  const handleSave = async () => {
+    if (!editingProduct) return;
+
+    try {
+      const url = editingProduct.id 
+        ? `${BACKEND_URL}/api/products/${editingProduct.id}`
+        : `${BACKEND_URL}/api/products`;
+      
+      const method = editingProduct.id ? 'PUT' : 'POST';
+
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingProduct)
+      });
+
+      if (response.ok) {
+        showMessage('success', `Product ${editingProduct.id ? 'updated' : 'created'} successfully`);
+        setEditingProduct(null);
+        setShowAddForm(false);
+        fetchProducts();
+      } else {
+        const error = await response.json();
+        showMessage('error', error.message || 'Failed to save product');
+      }
+    } catch (error) {
+      showMessage('error', 'Error: ' + error.message);
+    }
+  };
+
+  const handleAddNew = () => {
+    setEditingProduct({
+      name: '',
+      model_number: '',
+      brand: '',
+      category: '',
+      price: 0,
+      original_price: 0,
+      stock_quantity: 0,
+      description: '',
+      images: [],
+      technical_overview: '',
+      highlights: [],
+      special_features: [],
+      specifications: {},
+      documents: [],
+      reviews: [],
+      warranty: { period: '', terms: '' }
+    });
+    setShowAddForm(true);
+    setProductUrl('');
+  };
+
+  const handleExtractFromUrl = async () => {
+    if (!productUrl.trim()) {
+      showMessage('error', 'Please enter a product URL');
+      return;
+    }
+
+    setExtracting(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products/extract-from-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: productUrl })
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to extract product data');
+      }
+
+      const extractedData = await response.json();
+      
+      // Map extracted data to our product model
+      setEditingProduct({
+        name: extractedData.name || '',
+        model_number: extractedData.model_number || '',
+        brand: extractedData.brand || '',
+        category: extractedData.category || '',
+        subcategory: extractedData.subcategory || '',
+        price: extractedData.price || 0,
+        original_price: extractedData.mrp || extractedData.price || 0,
+        stock_quantity: 10, // Default stock
+        description: extractedData.description || '',
+        short_description: extractedData.short_description || '',
+        images: extractedData.images || [],
+        technical_overview: extractedData.technical_overview || '',
+        highlights: extractedData.highlights || [],
+        special_features: extractedData.special_features || [],
+        specifications: extractedData.specifications || {},
+        documents: extractedData.documents || [],
+        reviews: extractedData.reviews || [],
+        warranty: extractedData.warranty || { period: '', terms: '' },
+        energy_rating: extractedData.energy_rating || '',
+        dimensions: extractedData.dimensions || {}
+      });
+
+      setShowAddForm(true);
+      showMessage('success', '✅ Product data extracted successfully! Review and save.');
+      setProductUrl('');
+    } catch (error) {
+      showMessage('error', 'Extraction failed: ' + error.message);
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const handleExportCSV = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products/csv/export`);
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `products_export_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      showMessage('success', `✅ Exported ${products.length} products to CSV`);
+    } catch (error) {
+      showMessage('error', 'Export failed: ' + error.message);
+    }
+  };
+
+  const handleImportCSV = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    try {
+      setImporting(true);
+      setImportResult(null);
+      
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('update_existing', 'true');
+
+      const response = await fetch(`${BACKEND_URL}/api/products/csv/import`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await response.json();
+
+      if (data.status === 'success') {
+        setImportResult(data);
+        showMessage('success', data.message);
+        fetchProducts(); // Refresh product list
+      } else {
+        showMessage('error', data.detail || 'Import failed');
+      }
+    } catch (error) {
+      showMessage('error', 'Import failed: ' + error.message);
+    } finally {
+      setImporting(false);
+      event.target.value = ''; // Reset file input
+    }
+  };
+
+  const downloadTemplate = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products/csv/template`);
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'product_import_template.csv';
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      showMessage('success', '✅ Template downloaded');
+    } catch (error) {
+      showMessage('error', 'Template download failed: ' + error.message);
+    }
+  };
+
+  const filteredProducts = products.filter(product =>
+    product.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    product.model_number?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    product.brand?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 p-8 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading products...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-8">
+      <div className="max-w-[1800px] mx-auto">
+        {/* Header */}
+        <AdminPageHeader 
+          title="Enhanced Product Manager"
+          description="Comprehensive product management with images, documents, and detailed content"
+        />
+        
+        {/* Action Buttons */}
+        <div className="mb-8 flex flex-wrap gap-3 justify-between items-center">
+          <div className="flex flex-wrap gap-3">
+            {/* Export CSV */}
+            <button
+              onClick={handleExportCSV}
+              className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium shadow hover:shadow-lg"
+            >
+              <Download className="h-4 w-4 mr-2" />
+              Export CSV
+            </button>
+
+            {/* Import CSV */}
+            <label className="flex items-center px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium shadow hover:shadow-lg cursor-pointer">
+              <FileUp className="h-4 w-4 mr-2" />
+              {importing ? 'Importing...' : 'Import CSV'}
+              <input
+                type="file"
+                accept=".csv"
+                onChange={handleImportCSV}
+                disabled={importing}
+                className="hidden"
+              />
+            </label>
+
+            {/* Download Template */}
+            <button
+              onClick={downloadTemplate}
+              className="flex items-center px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors font-medium shadow hover:shadow-lg"
+            >
+              <FileText className="h-4 w-4 mr-2" />
+              Download Template
+            </button>
+          </div>
+
+          {/* Add Product Button */}
+          <button
+            onClick={handleAddNew}
+            className="flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium shadow-lg hover:shadow-xl"
+          >
+            <Plus className="h-5 w-5 mr-2" />
+            Add New Product
+          </button>
+        </div>
+
+        {/* Message Alert */}
+        {message.text && (
+          <div className={`mb-6 p-4 rounded-lg ${
+            message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+          }`}>
+            {message.text}
+          </div>
+        )}
+
+        {/* Import Result Details */}
+        {importResult && (
+          <div className="mb-6 p-6 bg-blue-50 border border-blue-200 rounded-lg">
+            <h3 className="text-lg font-semibold text-blue-900 mb-4 flex items-center">
+              <CheckCircle className="h-5 w-5 mr-2" />
+              Import Summary
+            </h3>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="text-center p-3 bg-green-100 rounded">
+                <div className="text-2xl font-bold text-green-800">{importResult.added}</div>
+                <div className="text-sm text-green-600">Added</div>
+              </div>
+              <div className="text-center p-3 bg-blue-100 rounded">
+                <div className="text-2xl font-bold text-blue-800">{importResult.updated}</div>
+                <div className="text-sm text-blue-600">Updated</div>
+              </div>
+              <div className="text-center p-3 bg-gray-100 rounded">
+                <div className="text-2xl font-bold text-gray-800">{importResult.skipped}</div>
+                <div className="text-sm text-gray-600">Skipped</div>
+              </div>
+            </div>
+            {importResult.errors && importResult.errors.length > 0 && (
+              <div className="mt-4">
+                <h4 className="text-sm font-semibold text-red-800 mb-2 flex items-center">
+                  <AlertCircle className="h-4 w-4 mr-1" />
+                  Errors (first 10)
+                </h4>
+                <ul className="text-sm text-red-700 list-disc list-inside">
+                  {importResult.errors.map((error, idx) => (
+                    <li key={idx}>{error}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <button
+              onClick={() => setImportResult(null)}
+              className="mt-4 text-sm text-blue-600 hover:text-blue-800"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Search Bar */}
+        <div className="mb-6">
+          <input
+            type="text"
+            placeholder="Search products by name, model number, or brand..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <div className="mt-2 text-sm text-gray-600">
+            Showing {filteredProducts.length} of {products.length} products
+            {searchTerm && ` (filtered by "${searchTerm}")`}
+          </div>
+        </div>
+
+        {/* Product List or Edit Form */}
+        {(editingProduct || showAddForm) ? (
+          <div className="bg-white rounded-lg shadow-lg p-6">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold">
+                {editingProduct?.id ? 'Edit Product' : 'Add New Product'}
+              </h2>
+              <button
+                onClick={() => {
+                  setEditingProduct(null);
+                  setShowAddForm(false);
+                  setProductUrl('');
+                }}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+
+            {/* URL Extraction Section - Only show if adding new product */}
+            {!editingProduct?.id && (
+              <div className="mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-lg p-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <Link className="h-6 w-6 text-blue-600" />
+                  <h3 className="text-lg font-semibold text-gray-800">🤖 AI-Powered Product Extraction</h3>
+                </div>
+                <p className="text-sm text-gray-600 mb-4">
+                  Paste a product URL (Bosch, Siemens, or any e-commerce site) and our AI will automatically extract all product details, images, specifications, and features!
+                </p>
+                <div className="flex gap-3">
+                  <input
+                    type="url"
+                    value={productUrl}
+                    onChange={(e) => setProductUrl(e.target.value)}
+                    placeholder="https://www.bosch-home.in/product/..."
+                    className="flex-1 px-4 py-3 border-2 border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    disabled={extracting}
+                  />
+                  <button
+                    onClick={handleExtractFromUrl}
+                    disabled={extracting || !productUrl.trim()}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    {extracting ? (
+                      <>
+                        <Loader className="h-5 w-5 animate-spin" />
+                        Extracting...
+                      </>
+                    ) : (
+                      <>
+                        <Link className="h-5 w-5" />
+                        Extract Product
+                      </>
+                    )}
+                  </button>
+                </div>
+                {extracting && (
+                  <div className="mt-4 flex items-center gap-2 text-sm text-blue-600">
+                    <Loader className="h-4 w-4 animate-spin" />
+                    <span>AI is analyzing the product page... This may take 10-20 seconds</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="space-y-6">
+              {/* Basic Information Section */}
+              <div className="border rounded-lg">
+                <button
+                  onClick={() => toggleSection('basicInfo')}
+                  className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <Package className="h-5 w-5 text-blue-600" />
+                    <h3 className="text-lg font-semibold">Basic Information</h3>
+                  </div>
+                  {expandedSections.basicInfo ? <ChevronUp /> : <ChevronDown />}
+                </button>
+                
+                {expandedSections.basicInfo && (
+                  <div className="p-4 grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Product Name *</label>
+                      <input
+                        type="text"
+                        value={editingProduct?.name || ''}
+                        onChange={(e) => setEditingProduct({...editingProduct, name: e.target.value})}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="e.g., Bosch Series 6 Dishwasher"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Model Number *</label>
+                      <input
+                        type="text"
+                        value={editingProduct?.model_number || ''}
+                        onChange={(e) => setEditingProduct({...editingProduct, model_number: e.target.value})}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="e.g., SMS4HMB62T"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Brand *</label>
+                      <input
+                        type="text"
+                        list="official-brands"
+                        value={editingProduct?.brand || ''}
+                        onChange={(e) => setEditingProduct({...editingProduct, brand: e.target.value})}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="Select or type a brand"
+                      />
+                      <datalist id="official-brands">{OFFICIAL_BRANDS.map(b => <option key={b} value={b} />)}</datalist>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Category *</label>
+                      <select
+                        value={editingProduct?.category || ''}
+                        onChange={(e) => setEditingProduct({...editingProduct, category: e.target.value})}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="">Select category...</option>
+                        {catOptions(editingProduct?.category).map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Price (₹) *</label>
+                      <input
+                        type="number"
+                        value={editingProduct?.price || 0}
+                        onChange={(e) => setEditingProduct({...editingProduct, price: parseFloat(e.target.value)})}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">MRP (₹)</label>
+                      <input
+                        type="number"
+                        value={editingProduct?.original_price || 0}
+                        onChange={(e) => setEditingProduct({...editingProduct, original_price: parseFloat(e.target.value)})}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Stock Quantity *</label>
+                      <input
+                        type="number"
+                        value={editingProduct?.stock_quantity || 0}
+                        onChange={(e) => setEditingProduct({...editingProduct, stock_quantity: parseInt(e.target.value)})}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">HSN Code</label>
+                      <input
+                        type="text"
+                        value={editingProduct?.hsn_code || ''}
+                        onChange={(e) => setEditingProduct({...editingProduct, hsn_code: e.target.value})}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="e.g., 84501200"
+                        maxLength={8}
+                      />
+                      <p className="text-xs text-gray-500 mt-1">8-digit HSN code for GST compliance</p>
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Short Description</label>
+                      <textarea
+                        value={editingProduct?.description || ''}
+                        onChange={(e) => setEditingProduct({...editingProduct, description: e.target.value})}
+                        rows={3}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="Brief product description..."
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Images Section */}
+              <div className="border rounded-lg">
+                <button
+                  onClick={() => toggleSection('images')}
+                  className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <ImageIcon className="h-5 w-5 text-purple-600" />
+                    <h3 className="text-lg font-semibold">Product Images</h3>
+                    <span className="text-sm text-gray-500">({editingProduct?.images?.length || 0} images)</span>
+                  </div>
+                  {expandedSections.images ? <ChevronUp /> : <ChevronDown />}
+                </button>
+                
+                {expandedSections.images && (
+                  <div className="p-4">
+                    <div className="mb-4">
+                      <label className="flex items-center justify-center w-full px-4 py-6 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-blue-500 transition-colors">
+                        <div className="text-center">
+                          <Upload className="h-8 w-8 text-gray-400 mx-auto mb-2" />
+                          <span className="text-sm text-gray-600">Click to upload images</span>
+                          <input
+                            type="file"
+                            multiple
+                            accept="image/*"
+                            onChange={handleImageUpload}
+                            className="hidden"
+                          />
+                        </div>
+                      </label>
+                    </div>
+
+                    {editingProduct?.images && editingProduct.images.length > 0 && (
+                      <div className="grid grid-cols-4 gap-4">
+                        {editingProduct.images.map((img, index) => (
+                          <div key={index} className="relative group">
+                            <img
+                              src={img}
+                              alt={`Product ${index + 1}`}
+                              className="w-full h-32 object-cover rounded-lg"
+                            />
+                            <div className="absolute inset-0 bg-black bg-opacity-50 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center gap-2">
+                              {index !== 0 && (
+                                <button
+                                  onClick={() => setMainImage(index)}
+                                  className="px-2 py-1 bg-blue-600 text-white text-xs rounded"
+                                >
+                                  Set Main
+                                </button>
+                              )}
+                              {index === 0 && (
+                                <span className="px-2 py-1 bg-green-600 text-white text-xs rounded">
+                                  Main
+                                </span>
+                              )}
+                              <button
+                                onClick={() => removeImage(index)}
+                                className="px-2 py-1 bg-red-600 text-white text-xs rounded"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Content Section */}
+              <div className="border rounded-lg">
+                <button
+                  onClick={() => toggleSection('content')}
+                  className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-5 w-5 text-green-600" />
+                    <h3 className="text-lg font-semibold">Product Content</h3>
+                  </div>
+                  {expandedSections.content ? <ChevronUp /> : <ChevronDown />}
+                </button>
+                
+                {expandedSections.content && (
+                  <div className="p-4 space-y-4">
+                    {/* Technical Overview */}
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Technical Overview</label>
+                      <textarea
+                        value={editingProduct?.technical_overview || ''}
+                        onChange={(e) => setEditingProduct({...editingProduct, technical_overview: e.target.value})}
+                        rows={4}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="Detailed technical description of the product..."
+                      />
+                    </div>
+
+                    {/* Highlights */}
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="block text-sm font-medium text-gray-700">Key Highlights</label>
+                        <button
+                          onClick={addHighlight}
+                          className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+                        >
+                          + Add Highlight
+                        </button>
+                      </div>
+                      {editingProduct?.highlights?.map((highlight, index) => (
+                        <div key={index} className="flex gap-2 mb-2">
+                          <input
+                            type="text"
+                            value={highlight}
+                            onChange={(e) => updateHighlight(index, e.target.value)}
+                            className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                            placeholder="e.g., Energy efficient A++ rating"
+                          />
+                          <button
+                            onClick={() => removeHighlight(index)}
+                            className="px-3 py-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200"
+                          >
+                            <X className="h-5 w-5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Special Features */}
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="block text-sm font-medium text-gray-700">Special Features</label>
+                        <button
+                          onClick={addFeature}
+                          className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+                        >
+                          + Add Feature
+                        </button>
+                      </div>
+                      {editingProduct?.special_features?.map((feature, index) => (
+                        <div key={index} className="flex gap-2 mb-2">
+                          <input
+                            type="text"
+                            value={feature}
+                            onChange={(e) => updateFeature(index, e.target.value)}
+                            className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                            placeholder="e.g., Self-cleaning filter system"
+                          />
+                          <button
+                            onClick={() => removeFeature(index)}
+                            className="px-3 py-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200"
+                          >
+                            <X className="h-5 w-5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Specifications Section */}
+              <div className="border rounded-lg">
+                <button
+                  onClick={() => toggleSection('specifications')}
+                  className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-5 w-5 text-orange-600" />
+                    <h3 className="text-lg font-semibold">Technical Specifications</h3>
+                    <span className="text-sm text-gray-500">
+                      ({Object.keys(editingProduct?.specifications || {}).length} specs)
+                    </span>
+                  </div>
+                  {expandedSections.specifications ? <ChevronUp /> : <ChevronDown />}
+                </button>
+                
+                {expandedSections.specifications && (
+                  <div className="p-4">
+                    <button
+                      onClick={addSpecification}
+                      className="mb-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                    >
+                      + Add Specification
+                    </button>
+                    
+                    <div className="space-y-3">
+                      {Object.entries(editingProduct?.specifications || {}).map(([key, value]) => (
+                        <div key={key} className="flex gap-2 items-start">
+                          <div className="flex-1 grid grid-cols-2 gap-2">
+                            <input
+                              type="text"
+                              value={key}
+                              readOnly
+                              className="px-4 py-2 border border-gray-300 rounded-lg bg-gray-50"
+                            />
+                            <input
+                              type="text"
+                              value={value}
+                              onChange={(e) => updateSpecification(key, e.target.value)}
+                              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                              placeholder="Enter value"
+                            />
+                          </div>
+                          <button
+                            onClick={() => removeSpecification(key)}
+                            className="px-3 py-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200"
+                          >
+                            <X className="h-5 w-5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Documents Section */}
+              <div className="border rounded-lg">
+                <button
+                  onClick={() => toggleSection('documents')}
+                  className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-5 w-5 text-red-600" />
+                    <h3 className="text-lg font-semibold">Manuals & Documents</h3>
+                    <span className="text-sm text-gray-500">
+                      ({editingProduct?.documents?.length || 0} files)
+                    </span>
+                  </div>
+                  {expandedSections.documents ? <ChevronUp /> : <ChevronDown />}
+                </button>
+                
+                {expandedSections.documents && (
+                  <div className="p-4">
+                    <div className="mb-4">
+                      <label className="flex items-center justify-center w-full px-4 py-6 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-red-500 transition-colors">
+                        <div className="text-center">
+                          <Upload className="h-8 w-8 text-gray-400 mx-auto mb-2" />
+                          <span className="text-sm text-gray-600">Click to upload PDFs & documents</span>
+                          <input
+                            type="file"
+                            multiple
+                            accept=".pdf,.doc,.docx"
+                            onChange={handleDocumentUpload}
+                            className="hidden"
+                          />
+                        </div>
+                      </label>
+                    </div>
+
+                    {editingProduct?.documents && editingProduct.documents.length > 0 && (
+                      <div className="space-y-2">
+                        {editingProduct.documents.map((doc, index) => (
+                          <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                            <div className="flex items-center gap-3">
+                              <FileText className="h-5 w-5 text-red-600" />
+                              <div>
+                                <div className="font-medium text-sm">{doc.name}</div>
+                                <div className="text-xs text-gray-500">
+                                  {(doc.size / 1024 / 1024).toFixed(2)} MB
+                                </div>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => removeDocument(index)}
+                              className="px-3 py-1 bg-red-100 text-red-600 rounded hover:bg-red-200 text-sm"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Warranty Section */}
+              <div className="border rounded-lg">
+                <button
+                  onClick={() => toggleSection('warranty')}
+                  className="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <Shield className="h-5 w-5 text-green-600" />
+                    <h3 className="text-lg font-semibold">Warranty Information</h3>
+                  </div>
+                  {expandedSections.warranty ? <ChevronUp /> : <ChevronDown />}
+                </button>
+                
+                {expandedSections.warranty && (
+                  <div className="p-4 space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Warranty Period</label>
+                      <input
+                        type="text"
+                        value={editingProduct?.warranty?.period || ''}
+                        onChange={(e) => setEditingProduct({
+                          ...editingProduct,
+                          warranty: { ...editingProduct.warranty, period: e.target.value }
+                        })}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="e.g., 2 Years Comprehensive Warranty"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Warranty Terms</label>
+                      <textarea
+                        value={editingProduct?.warranty?.terms || ''}
+                        onChange={(e) => setEditingProduct({
+                          ...editingProduct,
+                          warranty: { ...editingProduct.warranty, terms: e.target.value }
+                        })}
+                        rows={4}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="Warranty terms and conditions..."
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-4 pt-6 border-t">
+                <button
+                  onClick={handleSave}
+                  className="flex-1 flex items-center justify-center px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium"
+                >
+                  <Save className="h-5 w-5 mr-2" />
+                  Save Product
+                </button>
+                <button
+                  onClick={() => {
+                    setEditingProduct(null);
+                    setShowAddForm(false);
+                  }}
+                  className="px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors font-medium"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* Product List */
+          <div className="bg-white rounded-lg shadow">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[1200px]">
+                <thead>
+                  <tr className="border-b border-gray-200 bg-gray-50">
+                    <th className="text-left py-4 px-6 font-semibold text-sm text-gray-600">Product</th>
+                    <th className="text-left py-4 px-6 font-semibold text-sm text-gray-600">Model</th>
+                    <th className="text-left py-4 px-6 font-semibold text-sm text-gray-600">Brand</th>
+                    <th className="text-left py-4 px-6 font-semibold text-sm text-gray-600">Current Category</th>
+                    <th className="text-left py-4 px-6 font-semibold text-sm text-gray-600">Change Category</th>
+                    <th className="text-right py-4 px-6 font-semibold text-sm text-gray-600">Price</th>
+                    <th className="text-right py-4 px-6 font-semibold text-sm text-gray-600">Stock</th>
+                    <th className="text-center py-4 px-6 font-semibold text-sm text-gray-600 sticky right-0 bg-gray-50">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredProducts.map((product) => (
+                    <tr key={product.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                      <td className="py-4 px-6">
+                        <div className="flex items-center gap-3">
+                          {product.images && product.images[0] ? (
+                            <img
+                              src={product.images[0]}
+                              alt={product.name}
+                              className="w-12 h-12 object-cover rounded"
+                            />
+                          ) : (
+                            <div className="w-12 h-12 bg-gray-200 rounded flex items-center justify-center">
+                              <ImageIcon className="h-6 w-6 text-gray-400" />
+                            </div>
+                          )}
+                          <div>
+                            <div className="font-semibold text-gray-900">{product.name}</div>
+                            <div className="text-sm text-gray-500">{product.description?.substring(0, 50)}...</div>
+                            {product.hsn_code && (
+                              <span className="inline-flex items-center mt-1 px-1.5 py-0.5 bg-gray-100 text-gray-600 text-xs font-mono rounded">
+                                HSN: {product.hsn_code}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-4 px-6 text-sm text-gray-600">{product.model_number}</td>
+                      <td className="py-4 px-6 text-sm text-gray-600">{product.brand}</td>
+                      <td className="py-4 px-6">
+                        <span className="whitespace-nowrap px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium">
+                          {product.category}
+                        </span>
+                      </td>
+                      <td className="py-4 px-6">
+                        <select
+                          value={product.category}
+                          onChange={(e) => handleCategoryChange(product.id, e.target.value)}
+                          disabled={changingCategory[product.id]}
+                          className="w-full min-w-[180px] px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                        >
+                          <option value="">Select category...</option>
+                          {catOptions(product.category).map(cat => (
+                            <option key={cat} value={cat}>{cat}</option>
+                          ))}
+                        </select>
+                        {changingCategory[product.id] && (
+                          <span className="text-xs text-blue-600 mt-1 block">Saving...</span>
+                        )}
+                      </td>
+                      <td className="py-4 px-6 text-right font-semibold text-gray-900">
+                        {editingPrice[product.id] !== undefined ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <input
+                              type="number"
+                              value={editingPrice[product.id]}
+                              onChange={(e) => setEditingPrice(prev => ({ ...prev, [product.id]: e.target.value }))}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleQuickPriceUpdate(product.id, editingPrice[product.id]);
+                                if (e.key === 'Escape') setEditingPrice(prev => { const n = { ...prev }; delete n[product.id]; return n; });
+                              }}
+                              disabled={savingPrice[product.id]}
+                              className="w-24 px-2 py-1 border border-gray-300 rounded text-right text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
+                              autoFocus
+                            />
+                            <button
+                              onClick={() => handleQuickPriceUpdate(product.id, editingPrice[product.id])}
+                              disabled={savingPrice[product.id]}
+                              className="p-1 text-green-600 hover:bg-green-50 rounded"
+                            >
+                              <Save className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={() => setEditingPrice(prev => { const n = { ...prev }; delete n[product.id]; return n; })}
+                              disabled={savingPrice[product.id]}
+                              className="p-1 text-gray-500 hover:bg-gray-50 rounded"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-end gap-1 group">
+                            <span>₹{product.price?.toLocaleString()}</span>
+                            <button
+                              onClick={() => setEditingPrice(prev => ({ ...prev, [product.id]: product.price }))}
+                              className="p-1 text-gray-400 hover:text-blue-600 opacity-100 transition-opacity"
+                            >
+                              <Edit className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-4 px-6 text-right">
+                        {(product.stock_quantity !== undefined || product.current_stock !== undefined) ? (
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${
+                            (product.stock_quantity || product.current_stock || 0) > (product.reorder_level || 5)
+                              ? 'bg-green-100 text-green-800'
+                              : (product.stock_quantity || product.current_stock || 0) > 0
+                              ? 'bg-orange-100 text-orange-800'
+                              : 'bg-red-100 text-red-800'
+                          }`}>
+                            {product.stock_quantity || product.current_stock || 0} units
+                            {(product.stock_quantity || product.current_stock || 0) <= 0 && ' - OUT OF STOCK'}
+                            {(product.stock_quantity || product.current_stock || 0) > 0 && (product.stock_quantity || product.current_stock || 0) <= (product.reorder_level || 5) && ' - LOW'}
+                          </span>
+                        ) : (
+                          <span className="text-gray-400 text-xs">Not tracked</span>
+                        )}
+                      </td>
+                      <td className="py-4 px-6 sticky right-0 bg-white">
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            onClick={() => handleEdit(product)}
+                            className="p-2 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                          >
+                            <Edit className="h-5 w-5" />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(product.id)}
+                            className="p-2 text-red-600 hover:bg-red-50 rounded transition-colors"
+                          >
+                            <Trash2 className="h-5 w-5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default EnhancedProductManager;

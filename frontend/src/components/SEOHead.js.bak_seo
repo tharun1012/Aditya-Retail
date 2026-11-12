@@ -1,0 +1,132 @@
+import React from 'react';
+import { Helmet } from 'react-helmet-async';
+
+// JSON-LD component - renders directly in DOM (more reliable than Helmet for structured data)
+const JsonLd = ({ data }) => {
+  if (!data) return null;
+  return (
+    <script
+      type="application/ld+json"
+      dangerouslySetInnerHTML={{ __html: JSON.stringify(data) }}
+    />
+  );
+};
+
+const SEOHead = ({ 
+  title,
+  description,
+  keywords,
+  canonical,
+  ogImage,
+  ogType = 'website',
+  schema,
+  schemas,
+  noindex = false
+}) => {
+  const baseUrl = 'https://adityaretail.com';
+  const canonicalUrl = canonical ? `${baseUrl}${canonical}` : baseUrl;
+  const defaultImage = `${baseUrl}/aditya-logo.png`;
+  const imageUrl = ogImage || defaultImage;
+  
+  const defaultTitle = 'Aditya Retail - Premium Home Appliances | Bosch, Siemens';
+  const defaultDescription = 'Shop premium home appliances from top brands like Bosch and Siemens. Washing machines, refrigerators, chimneys, ovens, dishwashers with best prices and warranty. Free delivery across India.';
+  const defaultKeywords = 'home appliances, Bosch, Siemens, washing machine, refrigerator, chimney, oven, dishwasher, kitchen appliances, online shopping';
+  
+  const pageTitle = title || defaultTitle;
+  const pageDescription = description || defaultDescription;
+  const pageKeywords = keywords || defaultKeywords;
+
+  // Combine single schema + array of schemas
+  const allSchemas = [];
+  if (schema) allSchemas.push(schema);
+  if (schemas && Array.isArray(schemas)) allSchemas.push(...schemas);
+  
+  return (
+    <>
+      <Helmet>
+        {/* Basic Meta Tags */}
+        <title>{pageTitle}</title>
+        <meta name="description" content={pageDescription} />
+        <meta name="keywords" content={pageKeywords} />
+        
+        {/* Canonical URL */}
+        <link rel="canonical" href={canonicalUrl} />
+        
+        {/* Robots */}
+        {noindex ? (
+          <meta name="robots" content="noindex, nofollow" />
+        ) : (
+          <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+        )}
+        
+        {/* Open Graph / Facebook */}
+        <meta property="og:type" content={ogType} />
+        <meta property="og:url" content={canonicalUrl} />
+        <meta property="og:title" content={pageTitle} />
+        <meta property="og:description" content={pageDescription} />
+        <meta property="og:image" content={imageUrl} />
+        <meta property="og:site_name" content="Aditya Retail" />
+        
+        {/* Twitter */}
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:url" content={canonicalUrl} />
+        <meta name="twitter:title" content={pageTitle} />
+        <meta name="twitter:description" content={pageDescription} />
+        <meta name="twitter:image" content={imageUrl} />
+        
+        {/* Additional Meta */}
+        <meta name="author" content="Aditya Retail" />
+        <meta name="language" content="English" />
+        <meta name="revisit-after" content="7 days" />
+        <meta name="distribution" content="global" />
+        <meta name="rating" content="general" />
+        
+        {/* Geo Tags */}
+        <meta name="geo.region" content="IN" />
+        <meta name="geo.placename" content="India" />
+      </Helmet>
+      
+      {/* JSON-LD Schemas rendered directly in DOM */}
+      {allSchemas.map((s, i) => (
+        <JsonLd key={`schema-${i}`} data={s} />
+      ))}
+    </>
+  );
+};
+
+// Predefined SEO configurations for common pages
+export const SEOConfigs = {
+  homepage: {
+    title: 'Aditya Retail - Premium Home Appliances | Bosch & Siemens',
+    description: 'Shop premium home appliances from Bosch, Siemens & more. Washing machines, refrigerators, chimneys, ovens, dishwashers with best prices. Free delivery across India.',
+    keywords: 'home appliances online, Bosch appliances, Siemens appliances, washing machine, refrigerator, chimney, oven, dishwasher, kitchen appliances India',
+    canonical: '/',
+  },
+  
+  category: (categoryName) => ({
+    title: `Buy ${categoryName} Online | Best Prices & Offers | Aditya Retail`,
+    description: `Shop ${categoryName} from top brands like Bosch and Siemens. Get best deals, free delivery, warranty & installation. Wide range of ${categoryName} available online.`,
+    keywords: `${categoryName} online, buy ${categoryName}, ${categoryName} price, ${categoryName} offers, Bosch ${categoryName}, Siemens ${categoryName}`,
+    canonical: `/${categoryName.toLowerCase().replace(/ /g, '-')}`,
+  }),
+  
+  product: (product) => {
+    const price = product.price ? `₹${product.price.toLocaleString('en-IN')}` : '';
+    const brand = product.brand || '';
+    const catSlug = product.category ? product.category.toLowerCase().replace(/\s+/g, '-') : '';
+    const modelNumber = product.model_number || product.modelNumber;
+    
+    return {
+      title: `${product.name} - ${brand} | ${price} | Aditya Retail`,
+      description: `Buy ${product.name} by ${brand} online at ${price}. ${product.description?.substring(0, 150) || 'Premium quality appliance with warranty and free delivery.'}`,
+      keywords: `${product.name}, ${brand}, buy ${product.name}, ${product.name} price, ${product.name} online`,
+      canonical: catSlug && modelNumber
+        ? `/${catSlug}/${modelNumber}`
+        : `/product/${product.id}`,
+      ogImage: product.images?.[0] || product.image,
+      ogType: 'product',
+    };
+  }
+};
+
+export default SEOHead;

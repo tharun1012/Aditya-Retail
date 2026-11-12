@@ -1,0 +1,386 @@
+"""
+blog_autopilot.py - Aditya Retail Blog Autopilot
+STEP 2a: generate ONE blog post on demand and save it as a DRAFT.
+
+  * Nothing is published. The draft appears in BlogManagement (status = draft).
+  * dry_run=true (default) only shows the topic it would write about.
+  * Writes only to blog_posts (one new draft per call). No existing data is changed.
+  * Admin login required (same verify_admin as the blog routes).
+
+Optional env vars: BLOG_AUTOPILOT_WORDS (default 900), AUTOPILOT_BUSINESS_NAME, AUTOPILOT_CITY
+"""
+import os
+import re
+import json
+import uuid
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List
+
+from fastapi import APIRouter, HTTPException, Depends, Query
+
+from database import get_db
+from blog_routes import verify_admin, generate_slug, generate_excerpt, normalize_headings
+
+logger = logging.getLogger("blog_autopilot")
+router = APIRouter(prefix="/blog-autopilot", tags=["Blog Autopilot"])
+
+_lock: Optional[asyncio.Lock] = None
+
+
+def _get_lock() -> asyncio.Lock:
+    global _lock
+    if _lock is None:
+        _lock = asyncio.Lock()
+    return _lock
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _biz() -> str:
+    return os.environ.get("AUTOPILOT_BUSINESS_NAME", "Aditya Retail")
+
+
+def _city() -> str:
+    return os.environ.get("AUTOPILOT_CITY", "Bengaluru")
+
+
+def _strip_html(html: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html or "")).strip()
+
+
+def _parse_json(text: str):
+    if not text:
+        return None
+    t = re.sub(r"```(?:json)?", "", text).strip()
+    start, end = t.find("{"), t.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        return json.loads(t[start:end + 1])
+    except Exception:
+        return None
+
+
+async def _llm(system: str, prompt: str, tag: str) -> str:
+    key = os.environ.get("EMERGENT_LLM_KEY")
+    if not key:
+        raise RuntimeError("EMERGENT_LLM_KEY is not configured")
+    from emergentintegrations.llm.chat import LlmChat, UserMessage  # lazy import
+    chat = LlmChat(
+        api_key=key,
+        session_id=f"blogap_{tag}_{uuid.uuid4().hex[:10]}",
+        system_message=system,
+    ).with_model("gemini", "gemini-2.5-flash")
+    return await asyncio.wait_for(chat.send_message(UserMessage(text=prompt)), timeout=150)
+
+
+async def _snapshot(db) -> Dict[str, Any]:
+    async def _group(field: str, limit: int):
+        rows = await db.products.aggregate([
+            {"$match": {field: {"$nin": [None, ""]}}},
+            {"$group": {"_id": f"${field}", "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}},
+            {"$limit": limit},
+        ]).to_list(limit)
+        return [{"name": str(r["_id"]), "count": r["n"]} for r in rows]
+
+    return {"brands": await _group("brand", 15), "categories": await _group("category", 20)}
+
+
+async def _existing_titles(db, limit: int = 80) -> List[str]:
+    rows = await db.blog_posts.find({}, {"_id": 0, "title": 1}).sort("created_at", -1).limit(limit).to_list(limit)
+    return [r.get("title") for r in rows if r.get("title")]
+
+
+async def _pick_topic(db, snap: Dict[str, Any], titles: List[str]) -> Dict[str, Any]:
+    existing = {t.lower() for t in titles}
+    try:
+        system = f"You are a senior SEO content strategist for {_biz()}, a home and kitchen appliance retailer in {_city()}, India."
+        prompt = f"""Catalogue snapshot (brands and categories we actually sell):
+{json.dumps(snap, ensure_ascii=False)}
+
+Existing blog titles (do NOT repeat or closely paraphrase any):
+{json.dumps(titles[:80], ensure_ascii=False)}
+
+Pick ONE new buyer-intent blog topic (comparison, buying guide, "best X in {_city()}", installation,
+maintenance, service or warranty question). Use only brands and categories from the snapshot.
+Do not invent prices, offers or specifications.
+
+Return ONLY JSON: {{"topic": "...", "keywords": ["..."], "category": "..."}}"""
+        data = _parse_json(await _llm(system, prompt, "topic")) or {}
+        topic = str(data.get("topic") or "").strip()
+        if topic and topic.lower() not in existing:
+            return {
+                "topic": topic,
+                "keywords": [str(k) for k in (data.get("keywords") or [])][:8],
+                "category": str(data.get("category") or "General"),
+                "source": "llm",
+            }
+    except Exception as e:
+        logger.warning(f"[blog-autopilot] topic LLM failed, using fallback: {e}")
+    used = " ".join(titles).lower()
+    for c in snap["categories"]:
+        if c["name"].lower() not in used:
+            return {
+                "topic": f"How to choose the best {c['name']} in {_city()}: a practical buyer's guide",
+                "keywords": [f"best {c['name']} {_city()}", f"{c['name']} buying guide"],
+                "category": c["name"],
+                "source": "fallback",
+            }
+    raise HTTPException(status_code=409, detail="No new topic available")
+
+
+def _parse_blog(raw: str, fallback_title: str) -> Dict[str, Any]:
+    text = re.sub(r"```(?:html)?", "", raw or "").strip()
+    parts = [p.strip() for p in re.split(r"^\s*---\s*$", text, flags=re.M)]
+    if parts and parts[0] == "":
+        parts = parts[1:]
+    meta, content, faq_text = "", text, ""
+    if len(parts) >= 2:
+        meta, content = parts[0], parts[1]
+        faq_text = parts[2] if len(parts) > 2 else ""
+
+    def _m(label: str) -> str:
+        m = re.search(rf"^{label}:\s*(.+)$", meta, re.M)
+        return m.group(1).strip() if m else ""
+
+    faqs = [
+        {"question": q.strip(), "answer": a.strip()}
+        for q, a in re.findall(r"Q:\s*(.+?)\s*\n\s*A:\s*(.+?)(?=\n\s*Q:|\Z)", faq_text, re.S)
+    ]
+    return {
+        "title": _m("TITLE") or fallback_title,
+        "meta_description": _m("META_DESCRIPTION")[:160],
+        "category": _m("CATEGORY") or "General",
+        "tags": [t.strip() for t in _m("TAGS").split(",") if t.strip()],
+        "content": content.strip(),
+        "faqs": faqs,
+    }
+
+
+async def _write_article(topic: Dict[str, Any], snap: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        words = int(os.environ.get("BLOG_AUTOPILOT_WORDS", "900"))
+    except ValueError:
+        words = 900
+    brands = ", ".join(b["name"] for b in snap["brands"][:12])
+    cats = ", ".join(c["name"] for c in snap["categories"][:15])
+    system = (
+        f"You are an expert SEO content writer for {_biz()}, a home and kitchen appliance retailer in "
+        f"{_city()}, India. Write helpful, accurate content that supports purchase decisions. Never invent "
+        f"prices, discounts, model numbers, specifications, warranty terms or awards. When unsure of a fact, "
+        f"stay general."
+    )
+    prompt = f"""Write a complete, SEO-optimised blog post about: "{topic['topic']}"
+Target keywords (use naturally): {', '.join(topic.get('keywords') or []) or 'none specified'}
+Approximate length: {words} words
+Audience: home buyers in {_city()}, India
+Brands we sell: {brands}
+Product categories we sell: {cats}
+
+Rules:
+1. Use real HTML: <h2> for sections, <h3>/<h4> for sub-labels, <p>, <ul><li>. Never use
+   <p><strong>Label</strong></p> as a heading. Do not include an <h1>.
+2. Helpful and accurate. Do NOT invent prices, discounts, model numbers, specs, warranty terms or awards.
+3. Do not include links or URLs.
+4. Mention {_city()} naturally where relevant (local buying, service, installation).
+5. End with a short call-to-action to visit the store or website.
+
+Output EXACTLY in this format:
+---
+TITLE: ...
+META_DESCRIPTION: ... (under 160 characters)
+CATEGORY: ...
+TAGS: tag1, tag2, tag3
+---
+<the HTML article body>
+---
+Q: first FAQ question
+A: its answer
+Q: second FAQ question
+A: its answer
+(4 to 6 FAQs)"""
+    parsed = _parse_blog(await _llm(system, prompt, "article"), topic["topic"])
+    if len(_strip_html(parsed["content"])) < 300:
+        raise ValueError("Generated article was too short or malformed")
+    return parsed
+
+
+
+# ---- banner / category / meta-title helpers (autopilot v2) ----
+ALT_FIELD = "featured_image_alt"
+ALLOWED_CATEGORIES = ["Buying Guide", "Product Review", "Tips & Tricks", "Kitchen Design", "Maintenance", "News", "Recipes"]
+
+
+def _blog_category(title, raw):
+    t = (title or "").lower()
+    r = (raw or "").strip().lower()
+    for c in ALLOWED_CATEGORIES:
+        if c.lower() == r:
+            return c
+    if " vs" in t or "comparison" in t or "guide" in t or "best " in t or "buy" in t:
+        return "Buying Guide"
+    if "review" in t:
+        return "Product Review"
+    if "clean" in t or "maintain" in t or "care" in t:
+        return "Maintenance"
+    if "tip" in t or "trick" in t:
+        return "Tips & Tricks"
+    if "kitchen design" in t or "layout" in t:
+        return "Kitchen Design"
+    if "recipe" in t:
+        return "Recipes"
+    return "Buying Guide"
+
+
+def _trim_meta_title(title, limit=60):
+    t = (title or "").strip()
+    if len(t) <= limit:
+        return t
+    words = t.split()
+    while words and len(" ".join(words)) > limit:
+        words.pop()
+    stop = {"for", "in", "to", "the", "a", "an", "of", "and", "with", "your", "on", "at"}
+    while words and words[-1].lower().strip(":,-") in stop:
+        words.pop()
+    return " ".join(words).rstrip(" :,-") or t[:limit]
+
+
+def _looks_like_img(v):
+    if not isinstance(v, str):
+        return False
+    v = v.strip()
+    if not v or v.startswith("data:"):
+        return False
+    return v.startswith(("http", "/")) or v.lower().split("?")[0].endswith((".jpg", ".jpeg", ".png", ".webp", ".avif"))
+
+
+def _img_from(p):
+    for k, v in p.items():
+        kl = k.lower()
+        if "image" not in kl and "photo" not in kl:
+            continue
+        if _looks_like_img(v):
+            return v.strip()
+        if isinstance(v, list):
+            for it in v:
+                if _looks_like_img(it):
+                    return it.strip()
+                if isinstance(it, dict):
+                    for kk in ("url", "src", "image", "path"):
+                        if _looks_like_img(it.get(kk)):
+                            return it[kk].strip()
+    return None
+
+
+async def _pick_banner(db, title, topic):
+    text = f"{title} {topic.get('category') or ''}".lower()
+    brands = [str(b) for b in await db.products.distinct("brand") if b and str(b).lower() in text]
+    brands.sort(key=lambda b: text.find(b.lower()))
+    cats = [str(c) for c in await db.products.distinct("category") if c and str(c).lower().rstrip("s") in text]
+    queries = []
+    for c in cats:
+        for b in brands:
+            queries.append({"brand": b, "category": c})
+    for c in cats:
+        queries.append({"category": c})
+    for b in brands:
+        queries.append({"brand": b})
+    for q in queries:
+        rows = await db.products.find(q, {"_id": 0}).limit(25).to_list(25)
+        for pr in rows:
+            img = _img_from(pr)
+            if img:
+                return img, str(pr.get("name") or "")
+    return None, None
+
+
+async def _save_draft(db, parsed: Dict[str, Any], topic: Dict[str, Any], admin) -> Dict[str, Any]:
+    post_id = str(uuid.uuid4())
+    slug = generate_slug(parsed["title"])
+    if await db.blog_posts.find_one({"slug": slug}):
+        slug = f"{slug}-{post_id[:8]}"
+    content = normalize_headings(parsed["content"])
+    excerpt = generate_excerpt(content)
+    now = _now()
+    banner = None
+    try:
+        banner, _bn = await _pick_banner(db, parsed["title"], topic)
+    except Exception:
+        banner = None
+    doc = {
+        "id": post_id,
+        "title": parsed["title"],
+        "slug": slug,
+        "content": content,
+        "excerpt": excerpt,
+        "featured_image": banner,
+        "category": _blog_category(parsed["title"], parsed["category"] or topic.get("category")),
+        "tags": parsed["tags"],
+        "meta_title": _trim_meta_title(parsed["title"]),
+        "meta_description": parsed["meta_description"] or excerpt,
+        "meta_keywords": topic.get("keywords") or [],
+        "status": "draft",
+        "author": _biz(),
+        "views": 0,
+        "created_at": now,
+        "updated_at": now,
+        "published_at": None,
+        "faqs": parsed["faqs"],
+        "source": "autopilot",
+    }
+    doc[ALT_FIELD] = (parsed["title"] if banner else "")
+    await db.blog_posts.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@router.get("/status")
+async def status(db=Depends(get_db), admin=Depends(verify_admin)):
+    return {
+        "llm_key_configured": bool(os.environ.get("EMERGENT_LLM_KEY")),
+        "autopilot_drafts": await db.blog_posts.count_documents({"source": "autopilot", "status": "draft"}),
+        "autopilot_total": await db.blog_posts.count_documents({"source": "autopilot"}),
+        "generating_now": _get_lock().locked(),
+    }
+
+
+@router.post("/generate")
+async def generate(
+    topic: Optional[str] = Query(None, description="Optional: your own topic. Leave empty to let the AI pick."),
+    dry_run: bool = Query(True),
+    db=Depends(get_db),
+    admin=Depends(verify_admin),
+):
+    """dry_run=true: shows the topic only. dry_run=false: writes the article and saves it as a DRAFT."""
+    if _get_lock().locked():
+        raise HTTPException(status_code=409, detail="A blog is already being generated")
+    async with _get_lock():
+        try:
+            snap = await _snapshot(db)
+            if topic and topic.strip():
+                chosen = {"topic": topic.strip(), "keywords": [], "category": "General", "source": "manual"}
+            else:
+                chosen = await _pick_topic(db, snap, await _existing_titles(db))
+            if dry_run:
+                return {"dry_run": True, "topic": chosen,
+                        "note": "Nothing was written. Call again with dry_run=false to create a draft."}
+            parsed = await _write_article(chosen, snap)
+            doc = await _save_draft(db, parsed, chosen, admin)
+            return {
+                "dry_run": False,
+                "status": "draft_created",
+                "post": {k: doc[k] for k in ("id", "title", "slug", "category", "tags", "meta_description", "status", "featured_image")},
+                "faq_count": len(doc["faqs"]),
+                "word_count": len(_strip_html(doc["content"]).split()),
+                "note": "Saved as DRAFT. Open BlogManagement to review and publish.",
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"[blog-autopilot] generation failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Blog generation failed: {e}")

@@ -1,0 +1,5 @@
+customer_id,name,phone,email,address,city,state,pincode,gst_number,msme_udyam,customer_type,credit_limit,payment_terms,notes
+CUST-001,ABC Electronics Pvt Ltd,9876543210,accounts@abcelectronics.com,123 MG Road,Bangalore,Karnataka,560001,29AABCA1234F1ZP,,b2b,500000,30 days,B2B Registered - Same State
+CUST-002,XYZ Home Appliances,9876543211,orders@xyzhome.com,456 Anna Nagar,Chennai,Tamil Nadu,600040,33AABCX5678G1ZQ,,b2b,300000,15 days,B2B Registered - Inter-state
+CUST-003,Ramesh Kumar,9876543212,ramesh@gmail.com,789 JP Nagar,Mysore,Karnataka,570001,,,b2c,0,immediate,B2C Consumer
+CUST-004,Quick Mart MSME,9876543214,purchase@quickmart.com,555 HSR Layout,Bangalore,Karnataka,560102,29AABCQ9012H1ZR,UDYAM-KA-01-0012345,b2b_msme,100000,45 days,B2B MSME - 45 day payment compliance

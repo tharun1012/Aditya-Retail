@@ -1,0 +1,2232 @@
+import sendgrid_usage_tracker  # noqa: F401  (records every SendGrid send)
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
+from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+import uuid
+from datetime import datetime, timedelta, timezone
+import asyncio
+
+# Import WebSocket manager
+from websocket_manager import notification_manager
+
+# Import our existing modules that work
+from ai_routes import router as ai_router
+from marketing_routes import router as marketing_router
+from analytics_routes import router as analytics_router
+from orders_routes import router as orders_router
+from upload_routes import router as upload_router
+from ai_agents_routes import router as ai_agents_router
+from ai_products_routes import router as ai_products_router
+from brand_category_content_routes import router as brand_category_content_router
+from customers_routes import router as customers_router
+from customers_routes import create_customer as _create_customer_impl, CustomerCreate as _CustomerCreate
+from customer_dashboard_routes import router as customer_dashboard_router
+from campaigns_routes import router as campaigns_router
+from inventory_routes import router as inventory_router
+from auth_routes import router as auth_router
+from emergent_auth_routes import router as emergent_auth_router
+from simple_admin_auth import router as simple_admin_auth_router
+from phonepe_routes import router as phonepe_router
+from pine_labs_routes import router as pine_labs_router
+from test_admin_routes import router as test_admin_router
+from auth_verify_routes import router as auth_verify_router
+from mock_payment_routes import router as mock_payment_router
+from delivery_routes import router as delivery_router
+from marketing_advanced_routes import router as marketing_advanced_router
+from invoice_routes import router as invoice_router
+from invoice_numbering import generate_invoice_number
+from reports_routes import router as reports_router
+from settings_routes import router as settings_router
+from hsn_routes import router as hsn_router
+from offline_invoice_routes import router as offline_invoice_router
+from gst_validation_routes import router as gst_validation_router
+from purchase_routes import router as purchase_router
+from expense_routes import router as expense_router
+from payment_receipt_routes import router as payment_receipt_router
+from accounting_reports_routes import router as accounting_reports_router
+from ai_ca_agent_routes import router as ai_ca_agent_router
+from ai_accountant_api_routes import router as ai_accountant_api_router
+from document_routes import router as document_router
+from delivery_challan_routes import router as delivery_challan_router
+from product_extractor_ai import router as product_extractor_router
+from service_ticket_routes import router as service_ticket_router
+from email_test_routes import router as email_test_router
+from admin_management_routes import router as admin_management_router
+from leads_management_routes import router as leads_management_router
+from product_compare_routes import router as product_compare_router
+from email_capture_routes import router as email_capture_router
+from category_routes import router as category_router
+from smart_filters_routes import router as smart_filters_router
+from reviews_routes import router as reviews_router
+from knowledge_base_routes import router as knowledge_base_router
+from service_request_routes import router as service_request_router
+from service_reply_routes import router as service_reply_router
+from store_service_routes import router as store_service_router
+from store_visit_routes import router as store_visit_router
+from combo_offers_routes import router as combo_offers_router
+from combo_pdf_import import router as combo_pdf_router
+from banner_routes import router as banner_router
+from new_products_routes import router as new_products_router
+from social_media_routes import router as social_media_router
+from ai_po_generator_routes import router as ai_po_generator_router
+from autonomous_procurement_routes import router as autonomous_procurement_router
+from neural_ai_routes import router as neural_ai_router
+from ai_recommendations_routes import router as ai_recommendations_router
+from product_csv_routes import router as product_csv_router
+from sitemap_routes import router as sitemap_router
+from seo_settings_routes import router as seo_settings_router
+from ai_image_generation_routes import router as ai_image_generation_router
+from template_image_generation_routes import router as template_image_generation_router
+from enhanced_marketing_campaigns_routes import router as enhanced_marketing_campaigns_router
+from push_notification_routes import router as push_notification_router
+from marketing_automation_routes import router as marketing_automation_router
+from email_test_endpoint import router as email_test_endpoint_router
+from marketing_analytics_routes import router as marketing_analytics_router
+from admin_settings_routes import router as admin_settings_router
+from lead_scraping_routes import router as lead_scraping_router
+from shiprocket_routes import router as shiprocket_router
+from short_slug_migration import router as short_slug_router
+from cashback_offers_routes import router as cashback_offers_router
+from consultation_routes import router as consultation_router
+from tally_import_routes import router as tally_import_router
+from daybook_import_routes import router as daybook_import_router
+from admin_backfill_routes import router as admin_backfill_router
+from daybook_entries_routes import router as daybook_entries_router
+from smart_daybook_routes import router as smart_daybook_router
+from ai_daybook_classifier import router as ai_daybook_classifier_router
+from tally_voucher_routes import router as tally_voucher_router
+from email_logs_routes import router as email_logs_router
+from opening_balance_routes import router as opening_balance_router
+from roi_calculator_routes import router as roi_calculator_router
+from promotions_routes import router as promotions_router
+from purchase_bill_routes import router as purchase_bill_router
+from tds_routes import router as tds_router
+from stock_reconciliation_routes import router as stock_reconciliation_router
+from draft_product_routes import router as draft_product_router
+from ledger_routes import router as ledger_router
+from journal_voucher_routes import router as journal_voucher_router
+from bank_reconciliation_routes import router as bank_reconciliation_router
+from smart_bank_statement_routes import router as smart_bank_statement_router
+from landed_cost_routes import router as landed_cost_router
+from payment_reminder_routes import router as payment_reminder_router
+from financial_reports_routes import router as financial_reports_router
+from store_management_routes import router as store_management_router
+from inventory_management_routes import router as inventory_management_router
+from advanced_reports_routes import router as advanced_reports_router
+from report_export_routes import router as report_export_router
+from stock_transfer_routes import router as stock_transfer_router
+from notifications_routes import router as notifications_router
+from document_numbering_routes import router as document_numbering_router
+from quotation_routes import router as quotation_router
+from purchase_order_routes import router as purchase_order_router
+from customer_po_routes import router as customer_po_router
+from export_routes import router as export_router
+from invoice_pdf_routes import router as invoice_pdf_router
+from admin_data_management_routes import router as admin_data_management_router
+from grn_routes import router as grn_router
+from website_analytics_routes import router as website_analytics_router
+from blog_routes import router as blog_router
+from security_middleware import SecurityHeadersMiddleware
+from database import init_db, seed_sample_data, seed_tds_rates, get_db
+from models import StatusCheck, StatusCheckCreate, Cart, CartItem
+from sendgrid_email_service import sendgrid_email_service
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB connection with proper timeouts
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+client = AsyncIOMotorClient(
+    mongo_url,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=10000,
+)
+db = client[os.environ.get('DB_NAME', 'startup_template')]
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Create FastAPI application
+app = FastAPI(
+    title="Aditya Retail AI Ecommerce Platform",
+    description="Complete AI-powered ecommerce platform with 5 intelligent agents",
+    version="1.0.0"
+)
+
+# Mount static files for delivery photos
+upload_dir = Path("/app/backend/uploads")
+upload_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(upload_dir)), name="uploads")
+
+# Add Security Headers Middleware
+app.add_middleware(SecurityHeadersMiddleware)
+
+# Add Performance Middleware for caching and optimization
+from performance_middleware import PerformanceMiddleware
+from starlette.middleware.gzip import GZipMiddleware
+app.add_middleware(PerformanceMiddleware)
+app.add_middleware(GZipMiddleware, compresslevel=1, minimum_size=1000)  # Compress responses > 1KB
+
+
+# Create a router with the /api prefix
+api_router = APIRouter(prefix="/api")
+
+# Pydantic Models for API
+
+class ProductCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    short_description: Optional[str] = None
+    sku: str = Field(..., min_length=1, max_length=100)
+    price: float = Field(..., gt=0)
+    original_price: Optional[float] = None
+    cost_price: Optional[float] = None
+    brand: str = Field(..., min_length=1, max_length=100)
+    category_id: str
+    images: Optional[List[str]] = []
+    features: Optional[List[str]] = []
+    specifications: Optional[Dict[str, Any]] = {}
+    stock_quantity: int = Field(..., ge=0)
+    reorder_level: int = Field(default=10, ge=0)
+    weight: Optional[float] = Field(default=1.0, gt=0)
+    dimensions: Optional[Dict[str, float]] = {}
+    is_featured: bool = False
+    seo_title: Optional[str] = None
+    seo_description: Optional[str] = None
+
+class CartAddRequest(BaseModel):
+    product_id: str
+    quantity: int = Field(default=1, gt=0)
+
+class OrderCreateRequest(BaseModel):
+    billing_address: Dict[str, str]
+    shipping_address: Optional[Dict[str, str]] = None
+    payment_method: str = Field(..., pattern="^(phonepe|cod)$")
+    customer_notes: Optional[str] = None
+    coupon_code: Optional[str] = None
+
+class ShippingCheckRequest(BaseModel):
+    pincode: str = Field(..., min_length=6, max_length=6)
+    weight: float = Field(default=1.0, gt=0)
+    cod: bool = Field(default=False)
+
+class ServiceRequestCreate(BaseModel):
+    product_name: str
+    issue_description: str
+    priority: str = Field(default="medium", pattern="^(low|medium|high|urgent)$")
+
+# Basic routes
+@api_router.get("/")
+async def root():
+    return {
+        "message": "Welcome to Aditya Retail AI Ecommerce Platform",
+        "features": [
+            "🤖 5 AI Agents: Sales, Service, Stock, Marketing, Delivery",
+            "🛒 Complete Ecommerce: Products, Cart, Orders, Payments",
+            "🚚 Shiprocket Integration: Real-time shipping & tracking", 
+            "💳 PhonePe Payments: Secure payment gateway",
+            "📧 Email Notifications: Order & shipping updates",
+            "📊 Analytics Dashboard: Business intelligence",
+            "🔐 Role-based Access: Multi-user management"
+        ],
+        "version": "1.0.0",
+        "status": "🚀 Production Ready"
+    }
+
+@api_router.post("/status", response_model=StatusCheck)
+async def create_status_check(input: StatusCheckCreate, database = Depends(get_db)):
+    status_dict = input.dict()
+    status_obj = StatusCheck(**status_dict)
+    _ = await database.status_checks.insert_one(status_obj.dict())
+    return status_obj
+
+@api_router.get("/status", response_model=List[StatusCheck])
+async def get_status_checks(database = Depends(get_db)):
+    status_checks = await database.status_checks.find({}, {"_id": 0}).to_list(1000)
+    return [StatusCheck(**status_check) for status_check in status_checks]
+
+# Product Management Routes
+def transform_product_for_frontend(product):
+    """Transform product from snake_case to camelCase for frontend"""
+    if not product:
+        return product
+    
+    # Add stock fields (mapped from stock_quantity for consistency)
+    stock_value = product.get('stock_quantity', product.get('current_stock', product.get('stock', 0)))
+    product['stock'] = stock_value
+    product['stock_quantity'] = stock_value
+    product['current_stock'] = stock_value  # For EnhancedProductManager compatibility
+    
+    # Add originalPrice field (mapped from original_price) - keep both formats
+    if 'original_price' in product:
+        product['originalPrice'] = product['original_price']
+    
+    # Add modelNumber field (mapped from model_number)
+    if 'model_number' in product:
+        product['modelNumber'] = product['model_number']
+    
+    return product
+
+@api_router.get("/products")
+async def get_products(
+    category: Optional[str] = None,
+    brand: Optional[str] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    in_stock: Optional[bool] = None,
+    include_unlisted: Optional[bool] = None,
+    database = Depends(get_db)
+):
+    """Get products with optional filtering. Excludes unlisted products by default."""
+    
+    filter_criteria = {}
+    
+    # Only show listed products on storefront (exclude is_listed=False)
+    if not include_unlisted:
+        filter_criteria["is_listed"] = {"$ne": False}
+    
+    if category:
+        filter_criteria["category"] = {"$regex": category, "$options": "i"}
+    if brand:
+        filter_criteria["brand"] = brand
+    if min_price is not None:
+        filter_criteria["price"] = {"$gte": min_price}
+    if max_price is not None:
+        if "price" in filter_criteria:
+            filter_criteria["price"]["$lte"] = max_price
+        else:
+            filter_criteria["price"] = {"$lte": max_price}
+    if in_stock:
+        filter_criteria["stock_quantity"] = {"$gt": 0}
+    
+    import json as _json, time as _time
+    _ck = _json.dumps(filter_criteria, sort_keys=True, default=str)
+    _hit = _PRODUCTS_CACHE.get(_ck)
+    if _hit and _time.time() - _hit[0] < 30:
+        products = _hit[1]
+    else:
+        products = await database.products.find(filter_criteria, {"_id": 0}).sort("created_at", -1).to_list(5000)
+        products = [transform_product_for_frontend(p) for p in products]
+        if len(_PRODUCTS_CACHE) > 50:
+            _PRODUCTS_CACHE.clear()
+        _PRODUCTS_CACHE[_ck] = (_time.time(), products)
+    
+    return {"status": "success", "products": products, "count": len(products)}
+
+_PRODUCTS_CACHE = {}
+
+@api_router.get("/products/{product_id}")
+async def get_product(product_id: str, include_unlisted: Optional[bool] = None, database = Depends(get_db)):
+    """Get single product by ID"""
+    
+    product = await database.products.find_one({"id": product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    # Transform product for frontend
+    if not include_unlisted and product.get("approval_status") in ("pending", "rejected"):
+        raise HTTPException(status_code=404, detail="Product not found")
+    product = transform_product_for_frontend(product)
+    
+    return {"status": "success", "product": product}
+
+@api_router.get("/product/by-slug/{category}/{slug}")
+async def get_product_by_slug(category: str, slug: str, include_unlisted: Optional[bool] = None, database = Depends(get_db)):
+    """Get single product by category and slug (SEO-friendly URL)"""
+    import re
+    
+    def generate_slug(name):
+        if not name:
+            return None
+        s = name.lower()
+        s = re.sub(r'[^a-z0-9\s-]', '', s)
+        s = re.sub(r'[\s_]+', '-', s)
+        s = re.sub(r'-+', '-', s)
+        return s.strip('-')
+    
+    # First try to find by slug (current or legacy)
+    product = await database.products.find_one(
+        {"$or": [{"slug": slug}, {"legacy_slug": slug}]},
+        {"_id": 0}
+    )
+    
+    if not product:
+        # Try case-insensitive search
+        product = await database.products.find_one(
+            {"slug": {"$regex": f"^{re.escape(slug)}$", "$options": "i"}},
+            {"_id": 0}
+        )
+    
+    # If still not found, try to find by generating slug from name
+    if not product:
+        # Match by generated-from-name slug, including truncated legacy URLs
+        # and clean slugs (category words removed). Try the URL's category first,
+        # then the whole catalog.
+        def clean_variant(base, cat_name):
+            cat = generate_slug(cat_name or '') or ''
+            if not base or not cat:
+                return base
+            cleaned = re.sub(rf'(^|-){re.escape(cat)}(?=-|$)', '', base)
+            cleaned = re.sub(r'-{2,}', '-', cleaned).strip('-')
+            return cleaned if len(cleaned) >= 8 else base
+
+        def find_in(products_list):
+            for p in products_list:
+                g = generate_slug(p.get('name'))
+                gb = generate_slug(f"{p.get('brand') or ''} {p.get('name') or ''}")
+                if g == slug or gb == slug or clean_variant(g, p.get('category')) == slug:
+                    return p
+            if len(slug) >= 25:  # old links were truncated to 60 chars
+                for p in products_list:
+                    generated = generate_slug(p.get('name')) or ""
+                    stored = p.get('slug') or ""
+                    if generated.startswith(slug) or stored.startswith(slug):
+                        return p
+            return None
+
+        cat_text = re.escape(category.replace('-', ' '))
+        category_products = await database.products.find(
+            {"category": {"$regex": f"^{cat_text}s?\\s*$", "$options": "i"}},
+            {"_id": 0}
+        ).to_list(None)
+        product = find_in(category_products)
+        if not product:
+            all_products = await database.products.find(
+                {}, {"_id": 0, "id": 1, "name": 1, "brand": 1, "category": 1, "slug": 1, "legacy_slug": 1}
+            ).to_list(2000)
+            slim = find_in(all_products)
+            if slim:
+                product = await database.products.find_one({"id": slim["id"]}, {"_id": 0})
+        if product and not product.get('slug'):
+            await database.products.update_one(
+                {"id": product['id']},
+                {"$set": {"slug": generate_slug(product.get('name'))}}
+            )
+    
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    # Transform product for frontend
+    if not include_unlisted and product.get("approval_status") in ("pending", "rejected"):
+        raise HTTPException(status_code=404, detail="Product not found")
+    product = transform_product_for_frontend(product)
+    
+    return {"status": "success", "product": product}
+
+
+@api_router.get("/product/by-model/{category}/{model_number}")
+async def get_product_by_model(category: str, model_number: str, include_unlisted: Optional[bool] = None, database = Depends(get_db)):
+    """Get single product by category and model number (clean URL)"""
+    import re
+    # Never treat a brand name as a model number — /washing-machine/bosch is a brand page
+    brands = await database.products.distinct("brand")
+    if model_number.replace('-', ' ').strip().lower() in {(b or '').strip().lower() for b in brands}:
+        raise HTTPException(status_code=404, detail="Product not found")
+    # Case-insensitive match on model_number
+    product = await database.products.find_one(
+        {
+            "model_number": {"$regex": f"^{re.escape(model_number)}$", "$options": "i"},
+            "category": {"$regex": f"^{re.escape(category.replace('-', ' '))}$", "$options": "i"}
+        },
+        {"_id": 0}
+    )
+    if not product:
+        # Try without category filter (model numbers are usually unique)
+        product = await database.products.find_one(
+            {"model_number": {"$regex": f"^{re.escape(model_number)}$", "$options": "i"}},
+            {"_id": 0}
+        )
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    if not include_unlisted and product.get("approval_status") in ("pending", "rejected"):
+        raise HTTPException(status_code=404, detail="Product not found")
+    product = transform_product_for_frontend(product)
+    return {"status": "success", "product": product}
+
+@api_router.get("/products/{product_id}/ai-summary")
+async def get_product_ai_summary(product_id: str, database = Depends(get_db)):
+    """AI-generated product summary (cached on the product document)."""
+    import json as _json
+    import re as _re
+    product = await database.products.find_one({"id": product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    cached = product.get("ai_summary")
+    if isinstance(cached, dict) and cached.get("summary"):
+        return {"status": "success", "ai_summary": cached, "cached": True}
+
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    specs = product.get("specifications") or {}
+    features = product.get("features") or []
+    prompt = f"""Summarize this home appliance product for an ecommerce product page.
+
+Product: {product.get('name')}
+Brand: {product.get('brand')}
+Category: {product.get('category')}
+Price: Rs. {product.get('price')}
+Description: {(product.get('description') or '')[:1500]}
+Features: {_json.dumps(features)[:1000]}
+Specifications: {_json.dumps(specs)[:1500]}
+
+Return ONLY valid JSON (no markdown):
+{{"summary": "2-3 sentence customer-friendly overview of what this product is and who it is best for", "key_points": ["4 to 6 short bullet points covering key specs, standout features and benefits"]}}"""
+    try:
+        chat = LlmChat(
+            api_key=os.environ.get('EMERGENT_LLM_KEY'),
+            session_id=f"ai-summary-{product_id}",
+            system_message="You are a concise ecommerce product copywriter. Respond with valid JSON only."
+        ).with_model("gemini", "gemini-2.5-flash")
+        response = await chat.send_message(UserMessage(text=prompt))
+        text = _re.sub(r'^```(?:json)?\s*|\s*```$', '', response.strip())
+        start, end = text.find('{'), text.rfind('}')
+        parsed = _json.loads(text[start:end + 1])
+        summary = {
+            "summary": str(parsed.get("summary", "")).strip(),
+            "key_points": [str(p).strip() for p in (parsed.get("key_points") or []) if str(p).strip()][:6]
+        }
+        if not summary["summary"]:
+            raise ValueError("empty summary")
+        await database.products.update_one({"id": product_id}, {"$set": {"ai_summary": summary}})
+        return {"status": "success", "ai_summary": summary, "cached": False}
+    except Exception as e:
+        logging.error(f"AI summary generation failed for {product_id}: {e}")
+        raise HTTPException(status_code=500, detail="AI summary generation failed")
+
+@api_router.post("/products/migrate-slugs")
+async def migrate_product_slugs(force: bool = False, database = Depends(get_db)):
+    """
+    Add SEO-friendly slugs to products. Safe to run multiple times.
+    force=true regenerates ALL slugs using the clean format
+    (removes category words duplicated in the product name).
+    """
+    import re
+    
+    def generate_slug(name):
+        if not name:
+            return None
+        slug = name.lower()
+        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+        slug = re.sub(r'[\s_]+', '-', slug)
+        slug = re.sub(r'-+', '-', slug)
+        slug = slug.strip('-')
+        return slug
+
+    def generate_clean_slug(name, category):
+        base = generate_slug(name)
+        if not base:
+            return None
+        cat = generate_slug(category or '')
+        if cat:
+            cleaned = re.sub(rf'(^|-){re.escape(cat)}(?=-|$)', '', base)
+            cleaned = re.sub(r'-{2,}', '-', cleaned).strip('-')
+            if len(cleaned) >= 8:
+                return cleaned
+        return base
+    
+    try:
+        if force:
+            products = await database.products.find(
+                {}, {"_id": 0, "id": 1, "name": 1, "category": 1, "slug": 1}
+            ).to_list(None)
+        else:
+            products = await database.products.find(
+                {"$or": [{"slug": {"$exists": False}}, {"slug": None}, {"slug": ""}]},
+                {"_id": 0, "id": 1, "name": 1, "category": 1}
+            ).to_list(None)
+        
+        updated_count = 0
+        for product in products:
+            slug = generate_clean_slug(product.get('name'), product.get('category'))
+            if slug and slug != product.get('slug'):
+                await database.products.update_one(
+                    {"id": product['id']},
+                    {"$set": {"slug": slug}}
+                )
+                updated_count += 1
+        
+        # Get total count
+        total = await database.products.count_documents({})
+        with_slugs = await database.products.count_documents({"slug": {"$exists": True, "$nin": [None, ""]}})
+        
+        return {
+            "status": "success",
+            "message": f"Migration complete. Updated {updated_count} products.",
+            "total_products": total,
+            "products_with_slugs": with_slugs
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Migration failed: {str(e)}")
+
+@api_router.post("/products/normalize-categories")
+async def normalize_product_categories(database = Depends(get_db)):
+    """
+    Fix inconsistent category names & typos (Refrigerators->Refrigerator, Micrwave->Microwave, etc.)
+    and trim whitespace from brand/category. Safe to run multiple times.
+    """
+    from neural_ai_agents import normalize_category
+    try:
+        products = await database.products.find({}, {"_id": 0, "id": 1, "category": 1, "brand": 1}).to_list(None)
+        updated = 0
+        changes = {}
+        for p in products:
+            update = {}
+            raw_cat = p.get('category')
+            fixed_cat = normalize_category(raw_cat)
+            if raw_cat != fixed_cat:
+                update['category'] = fixed_cat
+                changes[f"{raw_cat} -> {fixed_cat}"] = changes.get(f"{raw_cat} -> {fixed_cat}", 0) + 1
+            raw_brand = p.get('brand')
+            if raw_brand and raw_brand != raw_brand.strip():
+                update['brand'] = raw_brand.strip()
+                changes[f"brand '{raw_brand}' -> '{raw_brand.strip()}'"] = changes.get(f"brand '{raw_brand}' -> '{raw_brand.strip()}'", 0) + 1
+            if update:
+                await database.products.update_one({"id": p['id']}, {"$set": update})
+                updated += 1
+        return {
+            "status": "success",
+            "message": f"Normalized {updated} products",
+            "changes": changes
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Normalization failed: {str(e)}")
+
+@api_router.post("/products")
+async def create_product(product_data: dict, database = Depends(get_db)):
+    """Create new product - accepts any product fields"""
+    try:
+        import uuid
+        from datetime import datetime
+        
+        # Ensure required fields
+        if not product_data.get('id'):
+            product_data['id'] = str(uuid.uuid4())
+        
+        if not product_data.get('created_at'):
+            product_data['created_at'] = datetime.utcnow().isoformat()
+        
+        # Default is_listed to True for products created via admin/API
+        # Products from billing will explicitly set is_listed=False
+        if 'is_listed' not in product_data:
+            product_data['is_listed'] = True
+        
+        # Remove _id if present (MongoDB ObjectId can't be serialized)
+        product_data.pop('_id', None)
+        
+        from product_normalize import normalize_product_fields
+        normalize_product_fields(product_data)
+        # --- approval workflow ---
+        force_create = bool(product_data.pop('force_create', False))
+        model_no = str(product_data.get('model_number') or '').strip()
+        if model_no and not force_create:
+            import re as _re
+            dup = await database.products.find_one(
+                {"model_number": {"$regex": "^" + _re.escape(model_no) + "$", "$options": "i"}},
+                {"_id": 0, "id": 1, "name": 1, "model_number": 1, "brand": 1, "category": 1, "approval_status": 1}
+            )
+            if dup:
+                raise HTTPException(status_code=409, detail={
+                    "code": "DUPLICATE_PRODUCT",
+                    "message": "A product with this model number already exists",
+                    "existing": dup
+                })
+        if not product_data.get('approval_status'):
+            product_data['approval_status'] = 'pending'
+        if product_data['approval_status'] == 'pending':
+            product_data['is_listed'] = False
+        # Insert the product with all fields
+        await database.products.insert_one(product_data)
+        
+        # Remove _id from response
+        product_data.pop('_id', None)
+        
+        return {"status": "success", "product": product_data, "message": "Product created successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Error creating product: {error_details}")
+        raise HTTPException(status_code=500, detail=f"Error creating product: {str(e)}")
+
+@api_router.put("/products/{product_id}")
+async def update_product(product_id: str, product_data: dict, database = Depends(get_db)):
+    """Update existing product"""
+    try:
+        from product_normalize import normalize_product_fields
+        normalize_product_fields(product_data)
+        # Remove fields that shouldn't be in MongoDB update
+        product_data.pop('_id', None)
+        product_data.pop('id', None)
+        product_data.pop('approval_status', None)
+        _cur = await database.products.find_one({"id": product_id}, {"_id": 0, "approval_status": 1})
+        if _cur and _cur.get("approval_status") == "pending":
+            product_data.pop('is_listed', None)
+        
+        # Update the product
+        result = await database.products.update_one(
+            {"id": product_id},
+            {"$set": product_data}
+        )
+        
+        if result.modified_count == 0 and result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        return {"status": "success", "message": "Product updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating product: {str(e)}")
+
+@api_router.delete("/products/{product_id}")
+async def delete_product(product_id: str, database = Depends(get_db)):
+    """Delete a product"""
+    try:
+        result = await database.products.delete_one({"id": product_id})
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        return {"status": "success", "message": "Product deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting product: {str(e)}")
+
+
+@api_router.post("/products/{product_id}/toggle-listing")
+async def toggle_product_listing(product_id: str, database = Depends(get_db)):
+    """Toggle product listing status (listed/unlisted)"""
+    try:
+        product = await database.products.find_one({"id": product_id}, {"_id": 0, "is_listed": 1})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        _st = await database.products.find_one({"id": product_id}, {"_id": 0, "approval_status": 1})
+        if _st and _st.get("approval_status") == "pending":
+            raise HTTPException(status_code=400, detail="Product is pending approval. Approve it first.")
+        new_status = not product.get("is_listed", True)
+        await database.products.update_one(
+            {"id": product_id},
+            {"$set": {"is_listed": new_status}}
+        )
+        return {"status": "success", "is_listed": new_status, "message": f"Product {'listed' if new_status else 'unlisted'}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error toggling listing: {str(e)}")
+
+@api_router.get("/pending-products")
+async def list_pending_products(database = Depends(get_db)):
+    """Products waiting for approval before going on the website"""
+    items = await database.products.find({"approval_status": "pending", "review_status": {"$ne": "published"}}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return {"status": "success", "products": items, "count": len(items)}
+
+@api_router.post("/pending-products/{product_id}/approve")
+async def approve_product(product_id: str, database = Depends(get_db)):
+    from datetime import datetime
+    res = await database.products.update_one(
+        {"id": product_id, "approval_status": "pending"},
+        {"$set": {"approval_status": "approved", "is_listed": True, "approved_at": datetime.utcnow().isoformat()}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Pending product not found")
+    return {"status": "success", "message": "Product approved and listed on website"}
+
+@api_router.post("/pending-products/{product_id}/reject")
+async def reject_product(product_id: str, database = Depends(get_db)):
+    res = await database.products.update_one(
+        {"id": product_id, "approval_status": "pending"},
+        {"$set": {"approval_status": "rejected", "is_listed": False}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Pending product not found")
+    return {"status": "success", "message": "Product rejected (kept off website)"}
+
+@api_router.post("/products/bulk-action")
+async def bulk_product_action(action_data: dict, database = Depends(get_db)):
+    """Bulk list, unlist, or delete products"""
+    try:
+        product_ids = action_data.get("product_ids", [])
+        action = action_data.get("action", "")  # "list", "unlist", "delete"
+        
+        if not product_ids or not action:
+            raise HTTPException(status_code=400, detail="product_ids and action required")
+        
+        if action == "list":
+            result = await database.products.update_many(
+                {"id": {"$in": product_ids}, "approval_status": {"$ne": "pending"}},
+                {"$set": {"is_listed": True}}
+            )
+            return {"status": "success", "modified": result.modified_count, "message": f"{result.modified_count} products listed"}
+        elif action == "unlist":
+            result = await database.products.update_many(
+                {"id": {"$in": product_ids}},
+                {"$set": {"is_listed": False}}
+            )
+            return {"status": "success", "modified": result.modified_count, "message": f"{result.modified_count} products unlisted"}
+        elif action == "delete":
+            result = await database.products.delete_many({"id": {"$in": product_ids}})
+            return {"status": "success", "deleted": result.deleted_count, "message": f"{result.deleted_count} products deleted"}
+        else:
+            raise HTTPException(status_code=400, detail="Invalid action. Use: list, unlist, delete")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error performing bulk action: {str(e)}")
+
+@api_router.get("/export/products-csv")
+async def export_products_csv():
+    """Export all products to CSV for bulk editing"""
+    import os
+    import sys
+    sys.path.append('/app/backend')
+    
+    try:
+        # Import and run the export function
+        from bulk_product_management import BulkProductManager
+        
+        manager = BulkProductManager()
+        csv_filename = await manager.export_products_to_csv()
+        manager.client.close()
+        
+        # Check if file exists
+        full_path = f"/app/backend/{csv_filename}" if not csv_filename.startswith('/') else csv_filename
+        
+        if csv_filename and os.path.exists(full_path):
+            headers = {
+                "Content-Disposition": "attachment; filename=products_for_update.csv",
+                "Content-Type": "text/csv",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
+            
+            return FileResponse(
+                path=full_path,
+                filename="products_for_update.csv",
+                media_type="text/csv",
+                headers=headers
+            )
+        else:
+            raise HTTPException(status_code=500, detail=f"CSV file not found: {full_path}")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error exporting CSV: {str(e)}")
+
+@api_router.get("/download/products-csv")
+async def download_static_csv():
+    """Direct download of products CSV"""
+    import os
+    
+    csv_path = "/app/backend/products_for_update.csv"
+    
+    # Regenerate CSV if it doesn't exist or is old
+    if not os.path.exists(csv_path):
+        from bulk_product_management import BulkProductManager
+        manager = BulkProductManager()
+        await manager.export_products_to_csv()
+        manager.client.close()
+    
+    if os.path.exists(csv_path):
+        return FileResponse(
+            path=csv_path,
+            filename="products_for_update.csv",
+            media_type="application/octet-stream"
+        )
+    else:
+        raise HTTPException(status_code=404, detail="CSV file not found")
+
+# Cart Management Routes
+@api_router.post("/cart/add")
+async def add_to_cart(
+    product_id: str, 
+    quantity: int = 1, 
+    session_id: Optional[str] = None,
+    database = Depends(get_db)
+):
+    """Add item to cart"""
+    
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    
+    # Check if product exists
+    product = await database.products.find_one({"id": product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    # Check stock availability
+    if product["stock"] < quantity:
+        raise HTTPException(status_code=400, detail="Insufficient stock")
+    
+    # Find or create cart
+    cart = await database.carts.find_one({"session_id": session_id}, {"_id": 0})
+    
+    if not cart:
+        # Create new cart
+        cart_item = CartItem(product_id=product_id, quantity=quantity)
+        new_cart = Cart(session_id=session_id, items=[cart_item])
+        await database.carts.insert_one(new_cart.dict())
+        cart = new_cart.dict()
+    else:
+        # Update existing cart
+        existing_item = None
+        for item in cart["items"]:
+            if item["product_id"] == product_id:
+                existing_item = item
+                break
+        
+        if existing_item:
+            existing_item["quantity"] += quantity
+        else:
+            cart["items"].append(CartItem(product_id=product_id, quantity=quantity).dict())
+        
+        cart["updated_at"] = datetime.utcnow()
+        await database.carts.update_one(
+            {"session_id": session_id},
+            {"$set": cart}
+        )
+    
+    return {
+        "status": "success",
+        "message": "Item added to cart",
+        "session_id": session_id,
+        "cart": cart
+    }
+
+@api_router.get("/cart/{session_id}")
+async def get_cart(session_id: str, database = Depends(get_db)):
+    """Get cart contents"""
+    
+    cart = await database.carts.find_one({"session_id": session_id}, {"_id": 0})
+    if not cart:
+        return {"status": "success", "cart": None, "items": [], "total": 0}
+    
+    # Get product details for cart items
+    cart_with_products = []
+    total = 0
+    
+    for item in cart["items"]:
+        product = await database.products.find_one({"id": item["product_id"]}, {"_id": 0})
+        if product:
+            item_total = product["price"] * item["quantity"]
+            cart_with_products.append({
+                "product": product,
+                "quantity": item["quantity"],
+                "item_total": item_total
+            })
+            total += item_total
+    
+    return {
+        "status": "success",
+        "cart": cart,
+        "items": cart_with_products,
+        "total": total
+    }
+
+@api_router.get("/orders")
+async def get_all_orders(
+    page: int = 1,
+    limit: int = 20,
+    search: str = None,
+    status: str = None,
+    start_date: str = None,
+    end_date: str = None,
+    database = Depends(get_db)
+):
+    """Get all orders with pagination and filters"""
+    query = {}
+    
+    if search:
+        query["$or"] = [
+            {"order_number": {"$regex": search, "$options": "i"}},
+            {"customer_details.name": {"$regex": search, "$options": "i"}},
+            {"customer_details.email": {"$regex": search, "$options": "i"}}
+        ]
+    
+    if status and status != 'all':
+        query["status"] = status
+    
+    if start_date:
+        query["order_date"] = query.get("order_date", {})
+        query["order_date"]["$gte"] = start_date
+    
+    if end_date:
+        query["order_date"] = query.get("order_date", {})
+        query["order_date"]["$lte"] = end_date
+    
+    total = await database.orders.count_documents(query)
+    skip = (page - 1) * limit
+    
+    orders = await database.orders.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+    
+    return {
+        "orders": orders,
+        "total": total,
+        "page": page,
+        "pages": (total + limit - 1) // limit
+    }
+
+@api_router.get("/orders/stats")
+async def get_orders_stats(database = Depends(get_db)):
+    """Get orders statistics"""
+    total = await database.orders.count_documents({})
+    
+    # Sum total amount
+    pipeline = [
+        {"$group": {
+            "_id": None,
+            "totalAmount": {"$sum": "$total_amount"},
+            "confirmed": {"$sum": {"$cond": [{"$eq": ["$status", "confirmed"]}, 1, 0]}},
+            "pending": {"$sum": {"$cond": [{"$eq": ["$status", "pending"]}, 1, 0]}},
+            "delivered": {"$sum": {"$cond": [{"$eq": ["$status", "delivered"]}, 1, 0]}}
+        }}
+    ]
+    
+    result = await database.orders.aggregate(pipeline).to_list(1)
+    
+    if result:
+        return {
+            "total": total,
+            "totalAmount": result[0].get("totalAmount", 0),
+            "confirmed": result[0].get("confirmed", 0),
+            "pending": result[0].get("pending", 0),
+            "delivered": result[0].get("delivered", 0)
+        }
+    
+    return {"total": 0, "totalAmount": 0, "confirmed": 0, "pending": 0, "delivered": 0}
+
+@api_router.get("/orders/{order_id}")
+async def get_order(order_id: str, database = Depends(get_db)):
+    """Get order details"""
+    
+    order = await database.orders.find_one({"order_id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    return {"status": "success", "order": order}
+
+def _order_lookup_query(order_id: str) -> dict:
+    return {"$or": [{"order_id": order_id}, {"id": order_id}, {"order_number": order_id}]}
+
+@api_router.post("/admin/daily-digest/send")
+async def trigger_daily_digest(force: bool = True, database = Depends(get_db)):
+    """Manually send today's Daily Orders Digest to the CRM inbox"""
+    from daily_digest_service import send_daily_digest
+    try:
+        result = await send_daily_digest(database, force=force)
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Digest send failed: {str(e)}")
+
+@api_router.get("/orders/{order_id}/pdf")
+async def download_order_pdf(order_id: str, database = Depends(get_db)):
+    """Download an order summary PDF"""
+    from fastapi.responses import Response
+    order = await database.orders.find_one(_order_lookup_query(order_id), {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    from order_pdf_generator import build_order_pdf
+    pdf_bytes = build_order_pdf(order)
+    order_num = order.get("order_number") or order.get("id")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="Order-{order_num}.pdf"'},
+    )
+
+class OrderEmailRequest(BaseModel):
+    to_email: str
+    note: Optional[str] = None
+
+@api_router.post("/orders/{order_id}/email-pdf")
+async def email_order_pdf(order_id: str, req: OrderEmailRequest, database = Depends(get_db)):
+    """Email the order summary PDF to any recipient (store / customer / warehouse)"""
+    order = await database.orders.find_one(_order_lookup_query(order_id), {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    from order_pdf_generator import build_order_pdf
+    from sendgrid_email_service import sendgrid_email_service
+
+    pdf_bytes = build_order_pdf(order)
+    order_num = order.get("order_number") or order.get("id")
+    cust = order.get("customer_details") or {}
+    note_html = f"<p style='background:#fff8e1;padding:10px;border-radius:6px;'>{req.note}</p>" if req.note else ""
+    body = f"""<div style="font-family:Arial,sans-serif;max-width:560px;">
+<h2 style="color:#1e3a5f;">Order Copy — {order_num}</h2>
+{note_html}
+<p>Please find attached the order summary PDF for order <b>{order_num}</b>.</p>
+<table style="font-size:14px;color:#333;">
+<tr><td style="padding:4px 12px 4px 0;color:#777;">Customer</td><td>{cust.get('name') or 'N/A'} ({cust.get('phone') or 'N/A'})</td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#777;">Order Value</td><td>₹{(order.get('total_amount') or 0):,.2f}</td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#777;">Status</td><td>{order.get('order_status') or order.get('status') or 'placed'} / payment {order.get('payment_status') or 'N/A'}</td></tr>
+</table>
+<p style="color:#999;font-size:12px;margin-top:16px;">Sent manually from the Aditya Retail admin Orders panel.</p>
+</div>"""
+
+    result = sendgrid_email_service.send_email(
+        to_email=req.to_email,
+        subject=f"Order Copy — {order_num} | Aditya Retail",
+        body=body,
+        from_agent="sales",
+        html=True,
+        attachments=[{"content": pdf_bytes, "filename": f"Order-{order_num}.pdf", "type": "application/pdf"}],
+    )
+    success = bool(result and result.get("status") in ("sent", "success"))
+    await database.outgoing_emails.insert_one({
+        "id": str(uuid.uuid4()),
+        "tag": "manual_order_pdf",
+        "order_number": order_num,
+        "to": req.to_email,
+        "status": "sent" if success else "failed",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    if not success:
+        raise HTTPException(status_code=502, detail=f"Email send failed: {result}")
+    return {"status": "success", "message": f"Order PDF emailed to {req.to_email}"}
+
+# Categories and Brands
+@api_router.get("/categories")
+async def get_categories(database = Depends(get_db)):
+    """Get all product categories"""
+    
+    categories = await database.products.distinct("category")
+    categories = sorted({c.strip() for c in categories if c and c.strip()})
+    return {"status": "success", "categories": categories}
+
+@api_router.get("/brands")
+async def get_brands(database = Depends(get_db)):
+    """Get all brands"""
+    
+    brands = await database.products.distinct("brand")
+    return {"status": "success", "brands": brands}
+
+# Simple Authentication Routes
+class UserRegister(BaseModel):
+    username: str
+    email: str
+    password: str
+    first_name: str
+    last_name: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+@api_router.post("/auth/register")
+async def register_user(user_data: UserRegister, database = Depends(get_db)):
+    """Register new user"""
+    # Check if user exists
+    existing_user = await database.users.find_one({
+        "$or": [
+            {"username": user_data.username},
+            {"email": user_data.email}
+        ]
+    })
+    
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username or email already exists")
+    
+    # Create user
+    user = {
+        "id": str(uuid.uuid4()),
+        "username": user_data.username,
+        "email": user_data.email,
+        "password": user_data.password,  # In production, hash this!
+        "first_name": user_data.first_name,
+        "last_name": user_data.last_name,
+        "role": "customer",
+        "created_at": datetime.utcnow()
+    }
+    
+    await database.users.insert_one(user)
+    
+    return {
+        "status": "success",
+        "message": "User registered successfully",
+        "user_id": user["id"]
+    }
+
+@api_router.post("/auth/login")
+async def login_user(login_data: UserLogin, database = Depends(get_db)):
+    """Login user - accepts username or email"""
+    # Try to find user by username or email
+    user = await database.users.find_one({
+        "$or": [
+            {"username": login_data.username},
+            {"email": login_data.username}
+        ]
+    })
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Handle both hashed and plain text passwords
+    import bcrypt
+    password_valid = False
+    
+    if "hashed_password" in user:
+        # Check bcrypt hashed password
+        try:
+            password_valid = bcrypt.checkpw(
+                login_data.password.encode('utf-8'), 
+                user["hashed_password"].encode('utf-8')
+            )
+        except Exception:
+            password_valid = False
+    elif "password" in user:
+        # Check plain text password (for demo/test users)
+        password_valid = user["password"] == login_data.password
+    
+    if not password_valid:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Create simple token (in production, use JWT)
+    token = str(uuid.uuid4())
+    
+    # Store session
+    await database.sessions.insert_one({
+        "token": token,
+        "user_id": user["id"],
+        "created_at": datetime.utcnow(),
+        "expires_at": datetime.utcnow() + timedelta(days=30)
+    })
+    
+    return {
+        "status": "success",
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "email": user["email"],
+            "first_name": user["first_name"],
+            "last_name": user["last_name"],
+            "role": user.get("role", "customer")
+        }
+    }
+
+@api_router.get("/auth/me-legacy")
+async def get_current_user_legacy(token: str, database = Depends(get_db)):
+    """Get current user info - legacy token-based auth"""
+    session = await database.sessions.find_one({
+        "token": token,
+        "expires_at": {"$gt": datetime.utcnow()}
+    })
+    
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    user = await database.users.find_one({"id": session["user_id"]})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    
+    return {
+        "status": "success",
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "email": user["email"],
+            "first_name": user["first_name"],
+            "last_name": user["last_name"],
+            "role": user.get("role", "customer")
+        }
+    }
+
+# Enhanced Cart Routes with User Support
+@api_router.post("/cart/add-auth")
+async def add_to_cart_authenticated(
+    product_id: str, 
+    quantity: int = 1,
+    token: Optional[str] = None,
+    session_id: Optional[str] = None,
+    database = Depends(get_db)
+):
+    """Add item to cart (supports both authenticated and guest users)"""
+    
+    user_id = None
+    if token:
+        session = await database.sessions.find_one({
+            "token": token,
+            "expires_at": {"$gt": datetime.utcnow()}
+        })
+        if session:
+            user_id = session["user_id"]
+    
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    
+    # Check product exists and has stock
+    product = await database.products.find_one({"id": product_id})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    if product["stock"] < quantity:
+        raise HTTPException(status_code=400, detail="Insufficient stock")
+    
+    # Find or create cart
+    cart_filter = {"session_id": session_id}
+    if user_id:
+        cart_filter["user_id"] = user_id
+    
+    cart = await database.carts.find_one(cart_filter)
+    
+    if not cart:
+        cart = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "session_id": session_id,
+            "items": [],
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+        await database.carts.insert_one(cart)
+    
+    # Check if item already exists
+    item_exists = False
+    for item in cart.get("items", []):
+        if item["product_id"] == product_id:
+            item["quantity"] += quantity
+            item["updated_at"] = datetime.utcnow()
+            item_exists = True
+            break
+    
+    if not item_exists:
+        cart.setdefault("items", []).append({
+            "product_id": product_id,
+            "quantity": quantity,
+            "added_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        })
+    
+    # Update cart
+    await database.carts.update_one(
+        {"id": cart["id"]},
+        {
+            "$set": {
+                "items": cart["items"],
+                "updated_at": datetime.utcnow()
+            }
+        }
+    )
+    
+    return {
+        "status": "success",
+        "message": "Item added to cart",
+        "session_id": session_id,
+        "cart_id": cart["id"]
+    }
+
+# Shipping Calculator
+@api_router.post("/shipping/calculate")
+async def calculate_shipping(request: ShippingCheckRequest):
+    """Calculate shipping cost"""
+    
+    pincode = request.pincode
+    weight = request.weight
+    cod = request.cod
+    
+    # Simple shipping calculation based on pincode zones
+    metro_pincodes = ['110', '400', '700', '560', '600', '500']
+    is_metro = any(pincode.startswith(code) for code in metro_pincodes)
+    
+    base_cost = 40 if is_metro else 60
+    weight_cost = weight * (15 if is_metro else 25)
+    cod_charges = 25 if cod else 0
+    
+    total_cost = base_cost + weight_cost + cod_charges
+    estimated_days = 3 if is_metro else 7
+    
+    # Free shipping above ₹500
+    if total_cost > 100:  # Reduced threshold for demo
+        total_cost = cod_charges  # Only COD charges if applicable
+    
+    return {
+        "status": "success",
+        "pincode": pincode,
+        "serviceable": True,
+        "shipping_cost": total_cost,
+        "estimated_delivery_days": estimated_days,
+        "cod_available": True,
+        "zone": "metro" if is_metro else "non-metro"
+    }
+
+# Order Placement
+
+async def apply_combo_pricing(database, items):
+    """Price combo lines from the combo record, never from the browser. Returns (items, delta)."""
+    now = datetime.now(timezone.utc).isoformat()
+    delta = 0.0
+    groups = {}
+    for it in items:
+        if it.get("combo_id"):
+            groups.setdefault(it["combo_id"], []).append(it)
+    for cid, lines in groups.items():
+        combo = await database.combo_offers.find_one({"id": cid}, {"_id": 0})
+        pids = [l.get("product_id") for l in lines]
+        qtys = {l.get("quantity") for l in lines}
+        valid = bool(
+            combo and combo.get("is_active")
+            and (combo.get("valid_from") or "") <= now <= (combo.get("valid_until") or "")
+            and sorted(pids) == sorted(combo.get("product_ids", []))
+            and len(qtys) == 1
+        )
+        if valid:
+            snap = {p["id"]: (p.get("price") or 0) for p in combo.get("products", [])}
+            order_ids = combo["product_ids"]
+            base = sum(snap.get(i, 0) for i in order_ids) or 1
+            target = round(combo["final_price"])
+            shares, allocated = {}, 0
+            for n, pid in enumerate(order_ids):
+                share = target - allocated if n == len(order_ids) - 1 else round(target * snap.get(pid, 0) / base)
+                allocated += share
+                shares[pid] = share
+            for l in lines:
+                new = shares[l["product_id"]]
+                delta += (new - (l.get("price") or 0)) * l["quantity"]
+                l["price"] = new
+                l["total"] = new * l["quantity"]
+        else:
+            for l in lines:
+                prod = await database.products.find_one({"id": l.get("product_id")}, {"_id": 0, "price": 1})
+                if prod:
+                    new = prod.get("price") or 0
+                    delta += (new - (l.get("price") or 0)) * l["quantity"]
+                    l["price"] = new
+                    l["total"] = new * l["quantity"]
+                l.pop("combo_id", None)
+    return items, delta
+
+
+@api_router.post("/orders/create")
+async def create_order(
+    order_data: Dict[str, Any],
+    database = Depends(get_db)
+):
+    """Create new order"""
+    
+    items_in, combo_delta = await apply_combo_pricing(database, order_data.get("items", []))
+
+    # Generate unified invoice number (same series as offline invoices)
+    order_number = await generate_invoice_number(database, order_type="online")
+    
+    # Create order
+    order_id = str(uuid.uuid4())
+    order = {
+        "id": order_id,
+        "order_id": order_id,  # Add order_id field for database index
+        "order_number": order_number,
+        "customer_id": order_data.get("customer_id") or order_data.get("user_id"),
+        "session_id": order_data.get("session_id"),
+        "customer_details": order_data.get("customer_details", {}),
+        "billing_address": order_data.get("billing_address", {}),
+        "shipping_address": order_data.get("shipping_address", {}),
+        "items": items_in,
+        "subtotal": (order_data.get("subtotal", 0) or 0) + combo_delta,
+        "shipping_cost": order_data.get("shipping_cost", 0),
+        "tax_amount": (order_data.get("tax_amount", 0) or 0) + combo_delta * 0.18 / 1.18,
+        "discount_amount": order_data.get("discount_amount", 0),
+        "total_amount": (order_data.get("total_amount", 0) or 0) + combo_delta,
+        "payment_method": order_data.get("payment_method", "cod"),
+        "payment_status": "pending",
+        "order_status": "placed",
+        "is_locked": True,  # Orders are locked by default
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await database.orders.insert_one(order)
+    print(f"[Order] Created order {order_number} in database")
+    
+    # Update product stock
+    for item in order["items"]:
+        await database.products.update_one(
+            {"id": item["product_id"]},
+            {"$inc": {"stock": -item["quantity"]}}
+        )
+    
+    # Clear cart if session provided
+    if order_data.get("session_id"):
+        await database.carts.delete_many({"session_id": order_data["session_id"]})
+    
+    # Send order confirmation email
+    customer_email = order.get("customer_details", {}).get("email")
+    if customer_email:
+        try:
+            # Build order items HTML
+            items_html = ""
+            for item in order["items"]:
+                _item_display_name = item.get('product_name') or item.get('name') or 'Product'
+                items_html += f"""
+                <tr>
+                    <td style="padding: 10px; border-bottom: 1px solid #eee;">{_item_display_name}</td>
+                    <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">{item.get('quantity', 0)}</td>
+                    <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">₹{item.get('price', 0):,.2f}</td>
+                    <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">₹{(item.get('price', 0) * item.get('quantity', 0)):,.2f}</td>
+                </tr>
+                """
+            
+            # Build email HTML
+            email_html = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <h2 style="color: #2563eb;">Order Confirmation</h2>
+                    <p>Dear {order.get("customer_details", {}).get("name", "Customer")},</p>
+                    <p>Thank you for your order! We're excited to confirm that we've received your order and it's being processed.</p>
+                    
+                    <div style="background: #f3f4f6; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="margin-top: 0;">Order Details</h3>
+                        <p><strong>Order Number:</strong> {order_number}</p>
+                        <p><strong>Order Date:</strong> {datetime.now().strftime('%B %d, %Y')}</p>
+                        <p><strong>Payment Method:</strong> {order.get('payment_method', 'COD').upper()}</p>
+                    </div>
+                    
+                    <h3>Items Ordered</h3>
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <thead>
+                            <tr style="background: #f9fafb;">
+                                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Product</th>
+                                <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Qty</th>
+                                <th style="padding: 10px; text-align: right; border-bottom: 2px solid #ddd;">Price</th>
+                                <th style="padding: 10px; text-align: right; border-bottom: 2px solid #ddd;">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {items_html}
+                        </tbody>
+                    </table>
+                    
+                    <div style="margin-top: 20px; text-align: right;">
+                        <p><strong>Subtotal:</strong> ₹{order.get('subtotal', 0):,.2f}</p>
+                        <p><strong>Shipping:</strong> ₹{order.get('shipping_cost', 0):,.2f}</p>
+                        <p><strong>Tax:</strong> ₹{order.get('tax_amount', 0):,.2f}</p>
+                        {f"<p><strong>Discount:</strong> -₹{order.get('discount_amount', 0):,.2f}</p>" if order.get('discount_amount', 0) > 0 else ""}
+                        <p style="font-size: 18px; color: #2563eb;"><strong>Total:</strong> ₹{order.get('total_amount', 0):,.2f}</p>
+                    </div>
+                    
+                    <div style="background: #fef3c7; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <h3 style="margin-top: 0;">Shipping Address</h3>
+                        <p>
+                            {order.get("shipping_address", {}).get("address", "")}<br>
+                            {order.get("shipping_address", {}).get("city", "")}, {order.get("shipping_address", {}).get("state", "")} {order.get("shipping_address", {}).get("pincode", "")}<br>
+                            Phone: {order.get("customer_details", {}).get("phone", "")}
+                        </p>
+                    </div>
+                    
+                    <p><strong>Estimated Delivery:</strong> 7 business days</p>
+                    
+                    <p>We'll send you a shipping confirmation email with tracking details once your order ships.</p>
+                    
+                    <p>If you have any questions about your order, please contact us.</p>
+                    
+                    <p>Thank you for shopping with Aditya Retail!</p>
+                    
+                    <hr style="margin: 30px 0; border: none; border-top: 1px solid #ddd;">
+                    <p style="font-size: 12px; color: #666;">
+                        <strong>Aditya Retail</strong><br>
+                        Email: online.adityaretail@gmail.com
+                    </p>
+                </div>
+            </body>
+            </html>
+            """
+            
+            # Generate PDF copy of the order to attach to the confirmation email
+            pdf_attachments = None
+            try:
+                from order_pdf_generator import build_order_pdf
+                pdf_bytes = build_order_pdf(order)
+                pdf_attachments = [{
+                    "content": pdf_bytes,
+                    "filename": f"{order_number}.pdf",
+                    "type": "application/pdf"
+                }]
+            except Exception as _pdf_err:
+                print(f"[Order Email] Could not generate PDF attachment: {_pdf_err}")
+            
+            # Send email
+            email_result = sendgrid_email_service.send_email(
+                to_email=customer_email,
+                subject=f"Order Confirmation - {order_number}",
+                body=email_html,
+                from_agent="sales",
+                html=True,
+                attachments=pdf_attachments
+            )
+            
+            print(f"[Order Email] Sent confirmation to {customer_email}: {email_result.get('status')}")
+
+            # Also notify the CRM inbox (dasarahalli.adityaretail@gmail.com) that a new
+            # order landed. Uses the same lead-notifier module so the internal team
+            # gets a consistent alert format across leads AND actual orders.
+            try:
+                from crm_lead_notifier import notify_new_lead
+                notify_new_lead(
+                    {
+                        "id": order["id"],
+                        "name": order.get("customer_details", {}).get("name", "Customer"),
+                        "email": customer_email,
+                        "phone": order.get("customer_details", {}).get("phone"),
+                        "source": f"🛍️ Online Order · {order_number}",
+                        "status": "order_placed",
+                    },
+                    source="sales",
+                    extra={"order_doc": order},
+                )
+            except Exception as _crm_e:
+                print(f"[Order Email] CRM notify failed: {_crm_e}")
+
+        except Exception as e:
+            print(f"[Order Email] Failed to send confirmation email: {str(e)}")
+            # Don't fail the order if email fails
+    
+    # Auto-create customer account if email provided and no existing account
+    customer_account_result = None
+    if customer_email:
+        try:
+            from offline_invoice_routes import auto_create_customer_account
+            customer_data = {
+                "email": customer_email,
+                "phone": order.get("customer_details", {}).get("phone", ""),
+                "name": order.get("customer_details", {}).get("name", "Valued Customer")
+            }
+            customer_account_result = await auto_create_customer_account(
+                database, 
+                customer_data, 
+                order_number, 
+                "Aditya Retail"
+            )
+            if customer_account_result and customer_account_result.get("created"):
+                print(f"[Order] Auto-created customer account for {customer_email}")
+        except Exception as account_error:
+            print(f"[Order] Failed to auto-create customer account: {str(account_error)}")
+
+    # ------------------------------------------------------------------
+    # Auto-sync order to Shiprocket. Runs for both COD and prepaid orders.
+    # Failures here are logged but do NOT fail order creation — the order
+    # can always be re-synced later via /api/shipping/sync-order/{order_id}.
+    # ------------------------------------------------------------------
+    try:
+        from shiprocket_routes import create_shiprocket_order as _sr_create, CreateShipmentRequest as _SRReq
+        addr = order.get("shipping_address") or order.get("billing_address") or {}
+        cust = order.get("customer_details") or {}
+        # Build item list in the format Shiprocket expects
+        sr_items = [
+            {
+                "name": (it.get("name") or "Product")[:50],
+                "sku": it.get("sku") or it.get("model_number") or it.get("product_id") or "SKU001",
+                "quantity": int(it.get("quantity") or 1),
+                "price": float(it.get("price") or 0),
+            }
+            for it in order.get("items", [])
+        ]
+        # Compute a rough weight — 1kg per item if not specified
+        total_weight = sum(float(it.get("weight") or 1.0) * int(it.get("quantity") or 1) for it in order.get("items", []))
+        total_weight = max(total_weight, 0.5)
+
+        sr_req = _SRReq(
+            order_id=order["id"],
+            order_number=order_number,
+            customer_name=(cust.get("name") or "Customer")[:100],
+            customer_email=cust.get("email") or "noemail@adityaretail.com",
+            customer_phone=str(cust.get("phone") or ""),
+            address=(addr.get("address") or addr.get("line1") or "Address not provided")[:200],
+            city=addr.get("city") or "Bangalore",
+            state=addr.get("state") or "Karnataka",
+            pincode=str(addr.get("pincode") or addr.get("zipcode") or "560058"),
+            payment_method="COD" if (order.get("payment_method") or "cod").lower() == "cod" else "Prepaid",
+            items=sr_items,
+            subtotal=float(order.get("subtotal") or order.get("total_amount") or 0),
+            weight=total_weight,
+        )
+        sr_result = await _sr_create(sr_req)
+        if sr_result and sr_result.get("status") == "success":
+            await database.orders.update_one(
+                {"id": order["id"]},
+                {"$set": {
+                    "shiprocket_order_id": sr_result.get("shiprocket_order_id"),
+                    "shiprocket_shipment_id": sr_result.get("shipment_id"),
+                    "shiprocket_synced_at": datetime.now(timezone.utc).isoformat(),
+                }}
+            )
+            print(f"[Shiprocket] Order {order_number} synced → SR#{sr_result.get('shiprocket_order_id')}")
+        else:
+            reason = (sr_result or {}).get("message") or str(sr_result)
+            await database.orders.update_one(
+                {"id": order["id"]},
+                {"$set": {"shiprocket_sync_error": reason[:500], "shiprocket_synced_at": None}}
+            )
+            print(f"[Shiprocket] Sync failed for {order_number}: {reason}")
+    except Exception as sr_e:
+        try:
+            await database.orders.update_one(
+                {"id": order["id"]},
+                {"$set": {"shiprocket_sync_error": str(sr_e)[:500]}}
+            )
+        except Exception:
+            pass
+        print(f"[Shiprocket] Auto-sync exception for {order_number}: {sr_e}")
+
+    response_data = {
+        "status": "success",
+        "message": "Order placed successfully",
+        "order_id": order["id"],
+        "order_number": order_number,
+        "estimated_delivery": f"{7} business days"
+    }
+    
+    # Add account creation info to response
+    if customer_account_result and customer_account_result.get("created"):
+        response_data["account_created"] = True
+        response_data["account_message"] = "A customer account has been created for you. Check your email for login credentials."
+    
+    return response_data
+
+# ============ ROUTE ALIASES FOR BACKWARD COMPATIBILITY ============
+# These handle cases where frontend uses different URL patterns
+
+@api_router.get("/customers/")
+@api_router.get("/customers")
+async def get_customers_alias(page: int = 1, limit: int = 20, segment: Optional[str] = None, store_code: Optional[str] = None):
+    """Alias for /admin/customers endpoint - also supports store_code filter"""
+    try:
+        from database import get_db
+        db = await get_db()
+        
+        query = {}
+        if store_code:
+            query["store_code"] = store_code
+        if segment:
+            if segment == "vip":
+                query["total_spent"] = {"$gte": 50000}
+            elif segment == "regular":
+                query["order_count"] = {"$gte": 5}
+            elif segment == "new":
+                query["order_count"] = {"$lt": 2}
+        
+        skip = (page - 1) * limit
+        customers = await db.customers.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+        total = await db.customers.count_documents(query)
+        
+        return {
+            "status": "success",
+            "customers": customers,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get("/customers/search")
+async def search_customers(q: str, limit: int = 10, store_code: Optional[str] = None):
+    """Search customers by name, phone, or email"""
+    try:
+        from database import get_db
+        db = await get_db()
+        
+        if not q or len(q) < 2:
+            return {"status": "success", "customers": []}
+        
+        # Build search query - search in name, phone, email
+        search_query = {
+            "$or": [
+                {"name": {"$regex": q, "$options": "i"}},
+                {"phone": {"$regex": q, "$options": "i"}},
+                {"email": {"$regex": q, "$options": "i"}},
+                {"gst_number": {"$regex": q, "$options": "i"}}
+            ]
+        }
+        
+        if store_code:
+            search_query["store_code"] = store_code
+        
+        customers = await db.customers.find(
+            search_query,
+            {"_id": 0}
+        ).sort("name", 1).limit(limit).to_list(limit)
+        
+        return {
+            "status": "success",
+            "customers": customers,
+            "total": len(customers)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CustomerCreateRequest(BaseModel):
+    name: str
+    phone: str
+    email: Optional[str] = None
+    customer_type: str = "B2C"
+    gst_number: Optional[str] = None
+    billing_address: Optional[str] = None
+    billing_city: Optional[str] = None
+    billing_state: Optional[str] = None
+    billing_pincode: Optional[str] = None
+    shipping_address: Optional[str] = None
+    shipping_city: Optional[str] = None
+    shipping_state: Optional[str] = None
+    shipping_pincode: Optional[str] = None
+    shipping_phone: Optional[str] = None
+    shipping_location_link: Optional[str] = None
+    store_code: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@api_router.post("/customers/")
+@api_router.post("/customers")
+async def create_customer_alias(customer: CustomerCreateRequest):
+    """Create a new customer (alias for store users) - delegates to customers_routes to avoid duplicate logic"""
+    try:
+        shared_customer = _CustomerCreate(**customer.dict())
+        return await _create_customer_impl(shared_customer)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/offline-invoices/")
+@api_router.get("/offline-invoices")
+async def get_offline_invoices_alias():
+    """Alias for /invoices/offline endpoint"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/api/invoices/offline/stores", status_code=307)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include AI routes and Marketing routes under the API prefix
+api_router.include_router(gst_validation_router)
+api_router.include_router(short_slug_router)
+api_router.include_router(sitemap_router)
+api_router.include_router(ai_router)
+api_router.include_router(marketing_router)
+api_router.include_router(analytics_router)
+api_router.include_router(orders_router)
+api_router.include_router(upload_router)
+api_router.include_router(ai_agents_router)
+api_router.include_router(ai_products_router)
+api_router.include_router(brand_category_content_router)
+api_router.include_router(customers_router)
+api_router.include_router(customer_dashboard_router)
+api_router.include_router(campaigns_router)
+api_router.include_router(inventory_router)
+api_router.include_router(emergent_auth_router)
+from mail_leads import router as mail_router
+api_router.include_router(mail_router)
+from website_leads import router as website_leads_router
+from lead_sweeps import router as lead_sweeps_router
+api_router.include_router(website_leads_router)
+api_router.include_router(lead_sweeps_router)
+from contact_leads import router as contact_leads_router
+api_router.include_router(contact_leads_router)
+
+@app.on_event("startup")
+async def _start_lead_sweep_loop():
+    from lead_sweeps import start_loop
+    start_loop()
+api_router.include_router(simple_admin_auth_router)
+api_router.include_router(auth_router)
+from customer_password_routes import router as customer_password_router
+api_router.include_router(customer_password_router)
+from customer_ai_routes import router as customer_ai_router
+api_router.include_router(customer_ai_router)
+api_router.include_router(test_admin_router)
+api_router.include_router(auth_verify_router)
+api_router.include_router(phonepe_router)
+api_router.include_router(pine_labs_router)
+api_router.include_router(mock_payment_router)
+api_router.include_router(delivery_router)
+api_router.include_router(marketing_advanced_router)
+api_router.include_router(invoice_router)
+api_router.include_router(reports_router)
+api_router.include_router(settings_router)
+api_router.include_router(hsn_router)
+api_router.include_router(offline_invoice_router)
+api_router.include_router(purchase_router)
+api_router.include_router(expense_router)
+api_router.include_router(payment_receipt_router)
+api_router.include_router(accounting_reports_router)
+api_router.include_router(ai_ca_agent_router)
+api_router.include_router(ai_accountant_api_router)
+api_router.include_router(document_router)
+api_router.include_router(delivery_challan_router)
+api_router.include_router(product_extractor_router)
+api_router.include_router(service_ticket_router)
+api_router.include_router(email_test_router)
+api_router.include_router(admin_management_router)
+api_router.include_router(leads_management_router)
+api_router.include_router(product_compare_router)
+api_router.include_router(email_capture_router)
+api_router.include_router(category_router)
+api_router.include_router(smart_filters_router)
+api_router.include_router(reviews_router)
+api_router.include_router(knowledge_base_router)
+api_router.include_router(service_request_router)
+api_router.include_router(service_reply_router)
+api_router.include_router(store_service_router)
+api_router.include_router(store_visit_router)
+api_router.include_router(combo_offers_router)
+api_router.include_router(combo_pdf_router)
+api_router.include_router(promotions_router)
+api_router.include_router(banner_router)
+api_router.include_router(new_products_router)
+api_router.include_router(social_media_router)
+api_router.include_router(ai_po_generator_router)
+api_router.include_router(autonomous_procurement_router)
+api_router.include_router(neural_ai_router)
+api_router.include_router(ai_recommendations_router)
+api_router.include_router(product_csv_router)
+api_router.include_router(ai_image_generation_router)
+api_router.include_router(template_image_generation_router)
+api_router.include_router(enhanced_marketing_campaigns_router)
+api_router.include_router(push_notification_router)
+api_router.include_router(marketing_automation_router)
+api_router.include_router(email_test_endpoint_router)
+api_router.include_router(marketing_analytics_router)
+api_router.include_router(seo_settings_router)
+api_router.include_router(admin_settings_router)
+api_router.include_router(lead_scraping_router)
+api_router.include_router(shiprocket_router)
+api_router.include_router(cashback_offers_router)
+api_router.include_router(consultation_router)
+api_router.include_router(tally_import_router)
+api_router.include_router(admin_backfill_router)
+api_router.include_router(tally_voucher_router)
+api_router.include_router(daybook_import_router)
+api_router.include_router(daybook_entries_router)
+api_router.include_router(smart_daybook_router)
+api_router.include_router(ai_daybook_classifier_router)
+api_router.include_router(opening_balance_router)
+api_router.include_router(roi_calculator_router)
+api_router.include_router(purchase_bill_router)
+api_router.include_router(tds_router)
+api_router.include_router(stock_reconciliation_router)
+api_router.include_router(draft_product_router)
+api_router.include_router(ledger_router)
+api_router.include_router(journal_voucher_router)
+api_router.include_router(bank_reconciliation_router)
+api_router.include_router(smart_bank_statement_router)
+api_router.include_router(landed_cost_router)
+api_router.include_router(payment_reminder_router)
+api_router.include_router(email_logs_router)
+api_router.include_router(financial_reports_router)
+api_router.include_router(store_management_router)
+api_router.include_router(inventory_management_router)
+api_router.include_router(advanced_reports_router)
+api_router.include_router(report_export_router)
+api_router.include_router(stock_transfer_router)
+api_router.include_router(notifications_router)
+api_router.include_router(document_numbering_router)
+api_router.include_router(quotation_router)
+api_router.include_router(purchase_order_router)
+api_router.include_router(customer_po_router)
+api_router.include_router(export_router)
+api_router.include_router(invoice_pdf_router)
+api_router.include_router(grn_router)
+api_router.include_router(website_analytics_router)
+api_router.include_router(blog_router)
+from blog_autopilot import router as blog_autopilot_router
+api_router.include_router(blog_autopilot_router)
+
+
+app.include_router(api_router)
+
+# Admin Data Management Routes
+app.include_router(admin_data_management_router, prefix="/api")
+from product_cleanup_routes import router as product_cleanup_router
+app.include_router(product_cleanup_router, prefix="/api")
+
+# SEO Routes (sitemap - no /api prefix)
+app.include_router(sitemap_router)
+
+
+# ============ WEBSOCKET ENDPOINT ============
+
+@app.websocket("/api/ws/notifications")
+@app.websocket("/ws/notifications")
+async def websocket_notifications(
+    websocket: WebSocket,
+    user_id: Optional[str] = None,
+    store_id: Optional[str] = None,
+    role: Optional[str] = None
+):
+    """
+    WebSocket endpoint for real-time notifications.
+    
+    Connect with query params:
+    - user_id: For user-specific notifications
+    - store_id: For store-specific notifications  
+    - role: For role-based notifications (admin, store_manager, etc.)
+    
+    Example: ws://host/ws/notifications?user_id=123&role=admin
+    """
+    connection_id = str(uuid.uuid4())
+    
+    try:
+        await notification_manager.connect(
+            websocket=websocket,
+            connection_id=connection_id,
+            user_id=user_id,
+            store_id=store_id,
+            role=role
+        )
+        
+        # Keep connection alive and handle incoming messages
+        while True:
+            try:
+                # Wait for any message from client (ping/pong or commands)
+                data = await websocket.receive_text()
+                
+                # Handle ping
+                if data == "ping":
+                    await websocket.send_text("pong")
+                
+                # Handle status request
+                elif data == "status":
+                    stats = notification_manager.get_connection_count()
+                    await websocket.send_json({
+                        "type": "status",
+                        "data": stats
+                    })
+                    
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(f"WebSocket error: {e}")
+                break
+                
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"WebSocket connection error: {e}")
+    finally:
+        notification_manager.disconnect(connection_id)
+
+
+@app.get("/api/ws/status")
+async def get_websocket_status():
+    """Get WebSocket connection statistics"""
+    return notification_manager.get_connection_count()
+
+
+# Health check endpoint for Kubernetes
+@app.get("/")
+async def root_probe():
+    """Root probe: some entrypoint readiness checks curl / on :8001 expecting 2xx"""
+    return {"status": "ok", "service": "aditya-retail-backend"}
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Kubernetes liveness/readiness probes"""
+    return {"status": "healthy", "service": "aditya-retail-backend"}
+
+
+@app.get("/api/health")
+async def api_health_check():
+    """API Health check endpoint"""
+    return {"status": "healthy", "service": "aditya-retail-backend", "version": "1.0.0"}
+
+
+# Alias route for invoice PDF download (frontend compatibility)
+@app.get("/api/invoices/{invoice_id}/pdf")
+async def download_invoice_pdf_alias(invoice_id: str, db = Depends(get_db)):
+    """Alias route for invoice PDF download - checks both offline_invoices and orders"""
+    # First check if it's an offline invoice (most common case)
+    offline_invoice = await db.offline_invoices.find_one(
+        {"$or": [{"id": invoice_id}, {"invoice_number": invoice_id}]},
+        {"_id": 0}
+    )
+    
+    if offline_invoice:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=f"/api/invoice-pdf/offline/{invoice_id}", status_code=307)
+    
+    # Fall back to orders collection
+    order = await db.orders.find_one(
+        {"$or": [{"id": invoice_id}, {"order_id": invoice_id}, {"order_number": invoice_id}]},
+        {"_id": 0}
+    )
+    
+    if order:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=f"/api/invoice-pdf/order/{invoice_id}", status_code=307)
+    
+    # Not found in either collection
+    raise HTTPException(status_code=404, detail="Invoice not found")
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+async def _startup_init():
+    """Initialize database and seed data in background (never blocks health checks)"""
+    try:
+        # Test database connection first
+        try:
+            await db.command('ping')
+            logger.info("✅ MongoDB connection successful")
+        except Exception as db_error:
+            logger.warning(f"⚠️ MongoDB connection issue: {db_error}")
+            # Continue startup - app can still serve health checks
+        
+        try:
+            await init_db()
+            await seed_sample_data()
+            await seed_tds_rates()
+            from seo_seed import seed_seo_pages
+            await seed_seo_pages()
+        except Exception as init_error:
+            logger.warning(f"⚠️ Database initialization issue: {init_error}")
+        
+        logger.info("✅ AI Ecommerce Platform started successfully!")
+        logger.info("🤖 AI Agents: Sales | Service | Stock | Marketing | Delivery")
+        logger.info("🛍️ Products, Orders, and Cart management ready")
+        
+        # Start AI Accounting Scheduler
+        try:
+            from ai_accountant_scheduler import start_scheduler
+            start_scheduler()
+            logger.info("📅 AI Accounting Scheduler started - Daily accountant will run at 2:00 AM")
+        except Exception as scheduler_error:
+            logger.warning(f"⚠️ Scheduler initialization skipped: {scheduler_error}")
+
+        # Start Pine Labs auto-reconcile loop (every 5 min) — catches any prepaid
+        # orders whose payment callback was missed so status flips from
+        # "pending" → "completed" automatically, and CRM + Shiprocket fire.
+        try:
+            import asyncio
+
+            async def _auto_reconcile_loop():
+                await asyncio.sleep(60)  # let boot finish
+                while True:
+                    try:
+                        from pine_labs_routes import admin_reconcile_all_pending
+                        result = await admin_reconcile_all_pending(lookback_hours=72, database=db)
+                        if result.get("updated", 0) > 0 or result.get("checked_with_gateway", 0) > 0:
+                            logger.info(
+                                f"[Auto-Reconcile] scanned={result.get('scanned')} "
+                                f"checked={result.get('checked_with_gateway')} "
+                                f"updated={result.get('updated')} "
+                                f"pending={result.get('still_pending')}"
+                            )
+                    except Exception as _re:
+                        logger.warning(f"[Auto-Reconcile] loop error: {_re}")
+                    await asyncio.sleep(300)  # 5 minutes
+
+            asyncio.create_task(_auto_reconcile_loop())
+            logger.info("🔄 Pine Labs auto-reconcile loop started (every 5 min)")
+        except Exception as _re_e:
+            logger.warning(f"⚠️ Auto-reconcile loop init failed: {_re_e}")
+
+        # Daily Orders Digest — auto-emails the CRM inbox every evening (7 PM IST)
+        try:
+            import asyncio
+
+            async def _daily_digest_loop():
+                from daily_digest_service import send_daily_digest, IST, DIGEST_HOUR_IST
+                await asyncio.sleep(120)
+                while True:
+                    try:
+                        now_ist = datetime.now(IST)
+                        if now_ist.hour >= DIGEST_HOUR_IST:
+                            result = await send_daily_digest(db)
+                            if result.get("status") == "sent":
+                                logger.info(f"[Daily Digest] auto-sent: {result}")
+                    except Exception as _dd:
+                        logger.warning(f"[Daily Digest] loop error: {_dd}")
+                    await asyncio.sleep(600)  # check every 10 min
+
+            asyncio.create_task(_daily_digest_loop())
+            logger.info("📊 Daily Orders Digest loop started (sends at 7 PM IST)")
+        except Exception as _dd_e:
+            logger.warning(f"⚠️ Daily digest loop init failed: {_dd_e}")
+
+        # Shiprocket tracking sync — polls courier status every 30 min and
+        # auto-updates order stages (processing → shipped → delivered) + customer emails
+        try:
+            import asyncio
+
+            async def _sr_tracking_loop():
+                from shiprocket_tracking_service import poll_shiprocket_updates
+                await asyncio.sleep(180)
+                while True:
+                    try:
+                        await poll_shiprocket_updates(db)
+                    except Exception as _sr_e:
+                        logger.warning(f"[SR-Track] loop error: {_sr_e}")
+                    await asyncio.sleep(1800)  # 30 minutes
+
+            asyncio.create_task(_sr_tracking_loop())
+            logger.info("🚚 Shiprocket tracking sync loop started (every 30 min)")
+        except Exception as _sr_le:
+            logger.warning(f"⚠️ Shiprocket tracking loop init failed: {_sr_le}")
+
+        # Customer reminders: warranty expiry + consumable reorder emails (daily 9 AM IST)
+        try:
+            from customer_reminders import reminders_loop
+            asyncio.create_task(reminders_loop(db))
+            logger.info("⏰ Customer reminders loop started (daily 9 AM IST)")
+        except Exception as _rm_e:
+            logger.warning(f"⚠️ Customer reminders loop init failed: {_rm_e}")
+            
+    except Exception as e:
+        logger.error(f"❌ Startup failed: {e}")
+        # Don't raise - allow the app to start anyway for health checks
+
+@app.on_event("startup")
+async def startup_event():
+    """Complete instantly so /health responds immediately; init runs in background"""
+    asyncio.create_task(_startup_init())
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
+    logger.info("Database connection closed")
+
+
+
+# ---- loop-lag watchdog: logs what blocks the event loop ----
+import threading as _wd_th, sys as _wd_sys, traceback as _wd_tb, time as _wd_t
+import urllib.request as _wd_url, logging as _wd_log
+
+def _loop_watchdog():
+    log = _wd_log.getLogger("loop_watchdog")
+    main_id = _wd_th.main_thread().ident
+    _wd_t.sleep(30)
+    while True:
+        try:
+            _wd_url.urlopen("http://127.0.0.1:8001/health", timeout=3).read()
+        except Exception as e:
+            fr = _wd_sys._current_frames().get(main_id)
+            stack = "".join(_wd_tb.format_stack(fr)[-12:]) if fr else "n/a"
+            log.error("LOOP BLOCKED (%s) STACK: %s", e, " | ".join(l.strip().replace("\n", " > ") for l in stack.split("File ") if l.strip()))
+        _wd_t.sleep(5)
+
+_wd_th.Thread(target=_loop_watchdog, daemon=True, name="loop_watchdog").start()

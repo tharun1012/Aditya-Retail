@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration 18 — Lead CRM crash fix, PDF order email, AI Compare feature. Backend 11/11 pytest pass (poisoned lead sanitize on both GET /api/leads/ list and GET /api/leads/LEAD-POISON-TEST-001 detail — notes coerced to '' with 'Automated follow-up sent' folded into interactions[] as a STRING; full Lead CRUD + stage moves (contacted→won) via API; DELETE 200 on real id + 404 on non-existent; order_pdf_generator.build_order_pdf returns real PDF bytes starting with %PDF; crm_lead_notifier.notify_new_lead with extra.order_doc emitted '📎 Attached: Order-TEST-ITER18-ORD-001.pdf' and SendGrid returned 202 to dasarahalli.adityaretail@gmail.com; POST /api/products-compare/ on cached pair a828c353...+6b280e40... returned 12-row comparison JSON with summary+verdict+best_for_product1/2, second identical POST correctly returned cached:true, invalid product ids returned 404). Frontend Playwright: /admin/leads loads with poisoned lead present; drawer for 'Poison Test' opens and Activity Log renders 'Follow_up - AI CRM Agent — Automated follow-up sent' with NO error boundary; created a lead via API, opened its drawer, moved through Contacted → Won (both persisted per subsequent GET), then clicked data-testid=lead-delete-btn — verified 404 after delete; product /product/a828c353-a2a0-46b7-ac23-eede28ea13c6 → compare-product-btn opens product-compare-modal, compare-search-input present, compare-candidate-6b280e40 (cached pair) clickable, compare-result renders full comparison table with green advantage highlights and Expert Verdict; regression: Sales/Service/Delivery/Expert Consultation tabs all render clean; Customer CRM 'View Details' still opens customer-detail-modal. Only issue noted is minor UX: 'Total Leads' funnel counter shows the LAST-VIEWED tab's count instead of 'All Leads' count when a tab is active — cosmetic only.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/admin/leads Lead CRM stat cards", "issues": ["When a team tab (e.g. 'Expert Consultation') is active, the top-left stat card is labeled 'Expert Consultation Leads: 1' but the 'All Leads' tab shows 13. When 'All Leads' is active the card reverts to 'Total Leads: 0' (probably because it reflects the currently-filtered subset AFTER search). Cosmetic only — data accessible via team tabs."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter18_leads_pdf_compare.py",
+    "/app/test_reports/pytest/iter18_leads_pdf_compare.xml",
+    "/app/test_reports/iter18_poison_drawer.png",
+    "/app/test_reports/iter18_flow_b.png",
+    "/app/test_reports/iter18_compare.png",
+    "/app/test_reports/iter18_leads.png"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "leads_management_routes.py sanitize_lead() correctly folds list-notes into interactions and stringifies non-primitive values inside interactions/follow_ups — good defensive design. sanitize is applied on both list endpoint and single-lead endpoint, which prevents front-end crash symmetrically.",
+    "leads_management_routes.py update_lead() when only 'notes' is passed inserts an interaction but does NOT call the $set with update_fields — that's fine because update_fields only carries updated_at. Just document that a pure notes update won't refresh updated_at (minor).",
+    "product_compare_routes.py caches on pair_key using sorted product ids — so order-swapped inputs hit the same cache row. Correct. LLM cost saved.",
+    "crm_lead_notifier.py catches PDF generation exceptions and still sends the email without attachment — resilient. Consider logging PDF size when successful for observability.",
+    "order_pdf_generator.py uses a ternary in TableStyle at line 75 (`('SPAN', (1,-1),(3,-1)) if addr_line else ('BOTTOMPADDING',...)`) which duplicates the BOTTOMPADDING command; not a bug (it just repeats the pad) but is confusing — consider building the style list conditionally."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter18_leads_pdf_compare.py (new — 11 pytest cases across Lead sanitize, Lead CRUD, PDF, notifier attachment, AI compare + cache + 404)"
+  ],
+  "success_rate": {"backend": "100% (11/11 pytest)", "frontend": "100% (all review_request UI criteria pass)"},
+  "test_credentials": "Admin: rohit.gadiya@gmail.com / Purvi@vriddhi01 via /api/auth/unified-login. UI login form works reliably.",
+  "seed_data_creation": "Created 1 TEST_iter18_del_* lead via API for delete/stage-move test — DELETED at end. Poisoned lead LEAD-POISON-TEST-001 and seeded Ravi/Sunita/Mohan/Priya were NOT touched. One SendGrid email actually sent to dasarahalli.adityaretail@gmail.com per review request (SendGrid Status 202, PDF Order-TEST-ITER18-ORD-001.pdf attached).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The 3 review-request features are fully working end-to-end: (1) Lead sanitize both list & detail; (2) PDF attach on order email via notify_new_lead(extra.order_doc); (3) AI Product Compare with cache and 404. Cached pair a828c353...+6b280e40... in db.product_comparisons is preserved. Poisoned lead LEAD-POISON-TEST-001 is preserved. Iteration 17's flagged /admin/service-tickets crash is OUT OF SCOPE for this review-request but still exists as a known separate issue.",
+  "rca_of_the_issue": "N/A — no bugs found this iteration. Poisoned-lead crash (from prior iteration) is fully mitigated by sanitize_lead() which is called in both @router.get('/') and @router.get('/{lead_id}'). Verified by asserting `notes==''` and 'Automated follow-up sent' string content lives inside interactions[] on the API response, and by opening the drawer in Playwright and confirming zero ErrorBoundary occurrences."
+}

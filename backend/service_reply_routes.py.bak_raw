@@ -1,0 +1,121 @@
+import os, re
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
+from database import get_db
+
+router = APIRouter(prefix="/service-replies", tags=["service-replies"])
+
+TICKET_RE = re.compile(r"SRV-\d{8}-\d{4}")
+PAIR_RE = re.compile(r"^[ \t]*([A-Za-z0-9][A-Za-z0-9\-]{4,})[ \t]+(\d{8,12})[ \t]*$", re.M)
+KEY_RE = re.compile(r"(service request number|service request no|complaint number|complaint no|request number|ticket number|SR number|SR no)", re.I)
+CUT_RE = re.compile(r"^[ \t]*(?:From:|Sent:|On [^\n]{0,90}\n?[^\n]{0,90}wrote:|-{2,}[ \t]*(?:Original Message|Forwarded message)|>)", re.I | re.M)
+
+
+class IngestIn(BaseModel):
+    message_id: str
+    subject: str = ""
+    from_email: str = ""
+    text: str = ""
+    date: Optional[str] = None
+
+
+def check_secret(x):
+    s = os.environ.get("MAIL_WEBHOOK_SECRET")
+    if not s or x != s:
+        raise HTTPException(401, "Invalid webhook secret")
+
+
+def norm(m):
+    return (m or "").upper().replace("O", "0").replace("I", "1")
+
+
+def top_part(text):
+    cut = CUT_RE.search(text)
+    body = text[:cut.start()] if cut else text
+    return re.sub(r"\n{3,}", "\n\n", body).strip()
+
+
+def extract_sr(top, ticket):
+    own = norm(ticket.get("model"))
+    pairs = [(norm(m), n) for m, n in PAIR_RE.findall(top)]
+    if pairs:
+        if own:
+            for m, n in pairs:
+                if m == own:
+                    return n
+            return None
+        return pairs[0][1] if len(pairs) == 1 else None
+    k = KEY_RE.search(top)
+    seg = top[k.end():k.end() + 300] if k else ""
+    phone = re.sub(r"\D", "", str(ticket.get("customer_phone") or ""))[-10:]
+    nums = {n for n in re.findall(r"\b\d{8,12}\b", seg) if not phone or n[-10:] != phone}
+    return nums.pop() if len(nums) == 1 else None
+
+
+def visible_text(top, ticket):
+    own = norm(ticket.get("model"))
+    out = []
+    for line in top.split("\n"):
+        m = PAIR_RE.match(line)
+        if m and norm(m.group(1)) != own:
+            continue
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+@router.post("/ingest")
+async def ingest(body: IngestIn, x_webhook_secret: Optional[str] = Header(default=None), database=Depends(get_db)):
+    check_secret(x_webhook_secret)
+    log = database.service_reply_log
+    await log.create_index("message_id", unique=True)
+    if await log.find_one({"message_id": body.message_id}):
+        return {"status": "duplicate"}
+    now = datetime.now(timezone.utc).isoformat()
+    full = f"{body.subject}\n{body.text}"
+
+    tickets = []
+    for source in (body.subject, body.text):
+        for tn in dict.fromkeys(TICKET_RE.findall(source or "")):
+            t = await database.service_tickets.find_one({"ticket_number": tn}, {"_id": 0})
+            if t:
+                tickets.append(t)
+        if tickets:
+            break
+
+    if not tickets:
+        since = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+        digits = re.sub(r"\D", "", full)
+        cands = []
+        async for t in database.service_tickets.find(
+                {"company_mail_status": "sent", "created_at": {"$gte": since}}, {"_id": 0}):
+            ph = re.sub(r"\D", "", str(t.get("customer_phone") or ""))[-10:]
+            if t.get("model") and norm(t["model"]) in norm(full) and ph and ph in digits:
+                cands.append(t)
+        if len(cands) == 1:
+            tickets = cands
+
+    if not tickets:
+        await database.service_reply_unmatched.insert_one({**body.dict(), "created_at": now})
+        await log.insert_one({"message_id": body.message_id, "status": "unmatched", "created_at": now})
+        return {"status": "unmatched"}
+
+    top = top_part(body.text)
+    matched = []
+    for t in tickets:
+        sr = extract_sr(top, t)
+        clean = visible_text(top, t)
+        await database.service_ticket_messages.insert_one({
+            "ticket_number": t["ticket_number"], "direction": "in", "message_id": body.message_id,
+            "from": body.from_email, "subject": body.subject, "body_clean": clean,
+            "body_raw": body.text, "sr_number": sr, "at": now})
+        upd = {"updated_at": now}
+        if sr:
+            upd.update({"brand_complaint_number": sr, "brand_response_date": now, "status": "brand_ticket_created"})
+        await database.service_tickets.update_one(
+            {"ticket_number": t["ticket_number"]},
+            {"$set": upd, "$push": {"company_messages": {"at": now, "sr_number": sr, "text": clean}}})
+        matched.append({"ticket": t["ticket_number"], "sr_number": sr})
+    await log.insert_one({"message_id": body.message_id, "status": "matched", "created_at": now})
+    return {"status": "ok", "matched": matched}

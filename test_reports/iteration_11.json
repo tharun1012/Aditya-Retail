@@ -1,0 +1,41 @@
+{
+  "summary": "End-to-end verification of Bosch cashback offer visibility on PDP after DB re-population. Backend (442 offers loaded, 102 SKU-matched) and Frontend PDP (offers-display renders exactly 1 card with all required fields for KGN56LB42I) both fully verified. No leakage to non-Bosch products. /checkout still loads normally. All acceptance criteria PASS.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_cashback_sku_isolation_and_fields.py",
+    "/app/test_reports/pytest/pytest_cashback_iter10.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Carry-over from iter 9/10 (unchanged this iter): cashback_offers_routes.py `_build_whatsapp_link` still has dead assignment for `encoded`; `_col_index` still uses leading-space substring match for ' cb'; `insert_many` still lacks `ordered=False`. All cosmetic — none blocking.",
+    "PDP loads ~14 background APIs (best sellers, combos, category images, AI recommendations, carousels, brands, seasonal, options) that intermittently fail with 'TypeError: Failed to fetch' on initial navigation (before service worker registers). Those are unrelated to the offer flow but pollute console. Consider consolidating parallel prefetch calls or catching more gracefully.",
+    "Two 404s on PDP for images/static assets — main agent should audit the missing resources (not related to offers)."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (all 3 endpoints verified: /admin/list=442, /product/{bosch_pid}=1 offer, /product/{siemens_pid}=0 offers)",
+    "frontend": "100% (all 8 acceptance criteria PASS on Bosch PDP; non-Bosch shows no leakage; /checkout OK)"
+  },
+  "test_credentials": "None required",
+  "seed_data_creation": "Reused already-loaded /tmp/bosch_cashback.xlsx data — DB was populated by main agent before this iteration (442 offers, 102 matched). No re-upload needed.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Bosch cashback offer PDP flow is fully working. Verified live PDP for product KGN56LB42I (id 15b0268c-226e-4544-9b0a-204688f8ce3c) renders `[data-testid=\"offers-display\"]` with 1 `[data-testid^=\"offer-card-\"]` containing: 'No Cost EMI' badge, title 'Bosch / Bosch Spl Refrigerator · KGN56LB42I', 'Upto ₹2,500', 'Min purchase ₹68,400', 'Bank Terms' with EMI text 'In 3 months NCEMI, in 6 months 2.5%...', 'Tenure: 3,6,9 & 12', 'Eligible Bank Cards' = 'All Banks', 'Applied at checkout'. Header count is 'Available Offers (1)' (correct, not 50). Non-Bosch Siemens gas hob (id 9dce461c-1fcd-4f64-8ece-74cc492c33be) returns 0 offers and offers-display is absent (correct isolation). Bosch chimney (a828c353) correctly shows its own DIB098G50I offer. /checkout loads with empty-cart message and no error boundary.",
+  "verified_metrics": {
+    "backend_admin_total_offers": 442,
+    "backend_admin_matched_offers": 102,
+    "bosch_kgn56lb42i_offers_returned": 1,
+    "siemens_hob_offers_returned": 0,
+    "pdp_offer_cards_rendered": 1,
+    "pdp_available_offers_label": "Available Offers (1)"
+  },
+  "rca of the issue": "Original user-reported issue ('Cash back offer not visible at PDP') was caused by DB cleanup during earlier test iterations that removed all Bosch offers. Main agent re-uploaded /tmp/bosch_cashback.xlsx via POST /api/offers/admin/upload-pdf which restored 442 offers (102 SKU-matched). Verified in this iteration that both backend query and frontend OffersDisplay render correctly — no code fix was required this iteration."
+}

@@ -1,0 +1,1118 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { 
+  Plus, RefreshCw, Eye, Check, X, Clock, Package, 
+  AlertTriangle, FileText, Calendar, Search 
+} from 'lucide-react';
+
+
+const PORequestsTab = ({ storeData, formatCurrency }) => {
+  const [poRequests, setPORequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [selectedRequest, setSelectedRequest] = useState(null);
+
+  useEffect(() => {
+    if (storeData) {
+      fetchPORequests();
+    }
+  }, [storeData]);
+
+  const fetchPORequests = async () => {
+    try {
+      setLoading(true);
+
+      const [requestsRes, ordersRes] = await Promise.all([
+        fetch(`${BACKEND_URL}/api/stock-transfer/po-requests/all`),
+        fetch(`${BACKEND_URL}/api/purchase-orders/`)
+      ]);
+
+      const requestsData = await requestsRes.json();
+      const ordersData = await ordersRes.json();
+
+      const normalizedRequests = (requestsData.requests || []).map(r => ({
+        ...r,
+        _type: 'request',
+        _number: r.request_number || `POR-${r.id?.slice(0, 8)}`,
+        _amount: r.total_amount,
+        _supplier: r.supplier_name || 'N/A',
+        _itemsCount: r.items?.length || 0,
+        _date: r.created_at,
+        _status: r.status || 'pending'
+      }));
+
+      const normalizedOrders = (ordersData.purchase_orders || []).map(po => ({
+        ...po,
+        _type: 'purchase_order',
+        _number: po.po_number || `PO-${po.id?.slice(0, 8)}`,
+        _amount: po.total_amount,
+        _supplier: po.vendor_name || 'N/A',
+        _itemsCount: po.items?.length || 0,
+        _date: po.created_at,
+        _status: po.status || 'draft'
+      }));
+
+      const merged = [...normalizedRequests, ...normalizedOrders].sort(
+        (a, b) => new Date(b._date) - new Date(a._date)
+      );
+
+      setPORequests(merged);
+    } catch (error) {
+      console.error('Error fetching PO requests:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const formatDate = (dateStr) => {
+    if (!dateStr) return 'N/A';
+    return new Date(dateStr).toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric'
+    });
+  };
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'approved':
+        return 'bg-green-100 text-green-700';
+      case 'pending':
+        return 'bg-yellow-100 text-yellow-700';
+      case 'rejected':
+        return 'bg-red-100 text-red-700';
+      case 'draft':
+        return 'bg-gray-100 text-gray-700';
+      default:
+        return 'bg-gray-100 text-gray-700';
+    }
+  };
+
+  const getStatusIcon = (status) => {
+    switch (status) {
+      case 'approved':
+        return <Check className="w-4 h-4" />;
+      case 'pending':
+        return <Clock className="w-4 h-4" />;
+      case 'rejected':
+        return <X className="w-4 h-4" />;
+      case 'draft':
+        return <FileText className="w-4 h-4" />;
+      default:
+        return <Clock className="w-4 h-4" />;
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-xl shadow-sm p-8">
+        <div className="flex items-center justify-center">
+          <RefreshCw className="w-6 h-6 animate-spin text-teal-600" />
+          <span className="ml-2 text-gray-600">Loading PO requests...</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="bg-white rounded-xl shadow-sm">
+        <div className="p-4 border-b flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-800">Purchase Order Requests</h2>
+            <p className="text-sm text-gray-500">
+              Manage and track your purchase order requests
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={fetchPORequests}
+              className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg"
+              title="Refresh"
+            >
+              <RefreshCw className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              New Request
+            </button>
+          </div>
+        </div>
+
+        {/* Stats */}
+        <div className="p-4 border-b">
+          <div className="grid grid-cols-4 gap-4">
+            <div className="text-center">
+              <p className="text-2xl font-bold text-gray-800">
+                {poRequests.filter(req => req._status === 'pending').length}
+              </p>
+              <p className="text-sm text-gray-500">Pending</p>
+            </div>
+            <div className="text-center">
+              <p className="text-2xl font-bold text-green-600">
+                {poRequests.filter(req => req._status === 'approved').length}
+              </p>
+              <p className="text-sm text-gray-500">Approved</p>
+            </div>
+            <div className="text-center">
+              <p className="text-2xl font-bold text-red-600">
+                {poRequests.filter(req => req._status === 'rejected').length}
+              </p>
+              <p className="text-sm text-gray-500">Rejected</p>
+            </div>
+            <div className="text-center">
+              <p className="text-2xl font-bold text-gray-600">
+                {poRequests.filter(req => req._status === 'draft').length}
+              </p>
+              <p className="text-sm text-gray-500">Drafts</p>
+            </div>
+          </div>
+        </div>
+
+        {/* PO Requests Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Number</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Supplier</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Items</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Total Amount</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {poRequests.map((request) => (
+                <tr key={`${request._type}-${request.id}`} className="hover:bg-gray-50">
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${request._type === 'purchase_order' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
+                      {request._type === 'purchase_order' ? 'PO' : 'Request'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-sm font-medium text-teal-600">
+                    {request._number}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-800">
+                    {request._supplier}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-500">
+                    {request._itemsCount} items
+                  </td>
+                  <td className="px-4 py-3 text-sm font-medium text-gray-800">
+                    {formatCurrency(request._amount)}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-500">
+                    {formatDate(request._date)}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(request._status)}`}>
+                      {getStatusIcon(request._status)}
+                      {request._status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => setSelectedRequest(request)}
+                      className="p-1 text-gray-500 hover:bg-gray-100 rounded"
+                      title="View Details"
+                    >
+                      <Eye className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {poRequests.length === 0 && (
+            <div className="p-8 text-center text-gray-500">
+              <Package className="w-12 h-12 mx-auto mb-4 text-gray-300" />
+              <p className="text-lg font-medium mb-2">No PO requests found</p>
+              <p className="text-sm">Create your first purchase order request to get started</p>
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="mt-4 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors"
+              >
+                Create PO Request
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Create Modal */}
+      {showCreateModal && (
+        <CreatePORequestModal 
+          storeData={storeData} 
+          onClose={() => setShowCreateModal(false)} 
+          onSuccess={() => {
+            setShowCreateModal(false);
+            fetchPORequests();
+          }} 
+        />
+      )}
+
+      {/* Details Modal Placeholder */}
+      {selectedRequest && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">PO Request Details</h3>
+              <button
+                onClick={() => setSelectedRequest(null)}
+                className="p-2 hover:bg-gray-100 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-500">Request Number</label>
+                  <p className="text-gray-800">{selectedRequest.request_number || `POR-${selectedRequest.id?.slice(0, 8)}`}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-500">Status</label>
+                  <p className="text-gray-800 capitalize">{selectedRequest.status}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-500">Supplier</label>
+                  <p className="text-gray-800">{selectedRequest.supplier_name || 'N/A'}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-500">Total Amount</label>
+                  <p className="text-gray-800 font-medium">{formatCurrency(selectedRequest.total_amount)}</p>
+                </div>
+              </div>
+              
+              <div>
+                <label className="text-sm font-medium text-gray-500">Items</label>
+                <p className="text-gray-600">
+                  {selectedRequest.items?.length || 0} items requested
+                </p>
+              </div>
+            </div>
+            
+            <div className="flex justify-end mt-6">
+              <button
+                onClick={() => setSelectedRequest(null)}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Create PO Request Modal Component
+const CreatePORequestModal = ({ storeData, onClose, onSuccess }) => {
+  const [items, setItems] = useState([{ model_number: '', product_name: '', product_id: '', quantity: 1, notes: '', hsn_code: '', rate: '', tax_rate: 18, discount_percent: 0 }]);
+  const [urgency, setUrgency] = useState('normal');
+  const [notes, setNotes] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const [products, setProducts] = useState([]);
+  const [hsnCodes, setHsnCodes] = useState([]);
+  const [productSearch, setProductSearch] = useState({});
+  const [showAddProductModal, setShowAddProductModal] = useState(false);
+  const [addProductForIndex, setAddProductForIndex] = useState(null);
+  const [newProduct, setNewProduct] = useState({
+    name: '',
+    brand: '',
+    model_number: '',
+    price: 0,
+    hsn_code: '',
+    category: '',
+    description: '',
+    current_stock: 0
+  });
+  const [addProductLoading, setAddProductLoading] = useState(false);
+  const [newProductHsnSuggestions, setNewProductHsnSuggestions] = useState([]);
+  const [manualHsnMode, setManualHsnMode] = useState(false);
+  const [manualHsnGstRate, setManualHsnGstRate] = useState(18);
+
+  useEffect(() => {
+    fetchProducts();
+    fetchHSNCodes();
+  }, []);
+
+  const fetchProducts = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products?limit=1000`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        setProducts(data.products);
+      }
+    } catch (err) {
+      console.error('Failed to fetch products');
+    }
+  };
+
+  const fetchHSNCodes = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/hsn/?active_only=true`);
+      const data = await response.json();
+      setHsnCodes(data);
+    } catch (err) {
+      console.error('Failed to fetch HSN codes');
+    }
+  };
+
+  const getFilteredProducts = (searchTerm) => {
+    if (!searchTerm) return products;
+    const term = searchTerm.toLowerCase();
+    return products.filter(p =>
+      p.name.toLowerCase().includes(term) ||
+      p.brand?.toLowerCase().includes(term) ||
+      p.model_number?.toLowerCase().includes(term)
+    );
+  };
+
+  const handleProductSelect = (index, productId) => {
+    const product = products.find(p => p.id === productId);
+    if (product) {
+      const newItems = [...items];
+      newItems[index] = {
+        ...newItems[index],
+        product_id: product.id,
+        product_name: product.name,
+        model_number: product.model_number || product.sku || newItems[index].model_number,
+        hsn_code: product.hsn_code || newItems[index].hsn_code,
+        rate: product.price || newItems[index].rate,
+        tax_rate: (hsnCodes.find(h => h.code === product.hsn_code)?.gst_rate) ?? newItems[index].tax_rate
+      };
+      setItems(newItems);
+    }
+  };
+
+  const fetchNewProductHsnSuggestion = async (productName) => {
+    if (!productName || productName.length < 2) {
+      setNewProductHsnSuggestions([]);
+      return;
+    }
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/hsn/suggest?product_name=${encodeURIComponent(productName)}`);
+      const data = await response.json();
+      if (data.suggestions && data.suggestions.length > 0) {
+        setNewProductHsnSuggestions(data.suggestions);
+        if (!newProduct.hsn_code && data.suggestions[0].match_score >= 50) {
+          setNewProduct(prev => ({ ...prev, hsn_code: data.suggestions[0].code }));
+        }
+      } else {
+        setNewProductHsnSuggestions([]);
+      }
+    } catch (err) {
+      console.error('Error fetching HSN suggestions:', err);
+    }
+  };
+
+  const openAddProductModal = (index) => {
+    setAddProductForIndex(index);
+    setNewProduct({
+      name: '',
+      brand: '',
+      model_number: '',
+      price: 0,
+      hsn_code: '',
+      category: '',
+      description: '',
+      current_stock: 0
+    });
+    setManualHsnMode(false);
+    setManualHsnGstRate(18);
+    setNewProductHsnSuggestions([]);
+    setShowAddProductModal(true);
+  };
+
+  const handleCreateProduct = async () => {
+    if (!newProduct.name || !newProduct.price || !newProduct.hsn_code) {
+      setError('Please fill in product name, price, and HSN code');
+      return;
+    }
+
+    setAddProductLoading(true);
+    try {
+      let gstRate = 18.0;
+      const existingHsn = hsnCodes.find(h => h.code === newProduct.hsn_code);
+
+      if (manualHsnMode && !existingHsn) {
+        try {
+          const hsnResponse = await fetch(`${BACKEND_URL}/api/hsn/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              code: newProduct.hsn_code,
+              description: `HSN ${newProduct.hsn_code} - ${newProduct.category || newProduct.name}`,
+              gst_rate: manualHsnGstRate,
+              category: newProduct.category || 'Uncategorized',
+              is_active: true
+            })
+          });
+          if (hsnResponse.ok) {
+            await fetchHSNCodes();
+            gstRate = manualHsnGstRate;
+          }
+        } catch (hsnError) {
+          console.log('HSN code might already exist or failed to save:', hsnError);
+        }
+        gstRate = manualHsnGstRate;
+      } else if (existingHsn) {
+        gstRate = existingHsn.gst_rate || 18.0;
+      }
+
+      const response = await fetch(`${BACKEND_URL}/api/products`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...newProduct,
+          id: `PROD-${Date.now()}`,
+          price: parseFloat(newProduct.price),
+          current_stock: parseInt(newProduct.current_stock) || 0
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        await fetchProducts();
+
+        if (addProductForIndex !== null) {
+          const newItems = [...items];
+          newItems[addProductForIndex] = {
+            ...newItems[addProductForIndex],
+            product_id: data.product?.id || data.id,
+            product_name: newProduct.name,
+            model_number: newProduct.model_number || newItems[addProductForIndex].model_number
+          };
+          setItems(newItems);
+        }
+
+        setShowAddProductModal(false);
+        setManualHsnMode(false);
+        setManualHsnGstRate(18);
+      } else {
+        setError(data.detail || 'Failed to create product');
+      }
+    } catch (err) {
+      setError('Error creating product: ' + err.message);
+    } finally {
+      setAddProductLoading(false);
+    }
+  };
+
+  const addItem = () => {
+    setItems([...items, { model_number: '', product_name: '', product_id: '', quantity: 1, notes: '', hsn_code: '', rate: '', tax_rate: 18, discount_percent: 0 }]);
+  };
+
+  const removeItem = (index) => {
+    if (items.length > 1) {
+      setItems(items.filter((_, i) => i !== index));
+    }
+  };
+
+  const updateItem = (index, field, value) => {
+    const newItems = [...items];
+    newItems[index][field] = value;
+    setItems(newItems);
+  };
+
+  const calcItemTax = (item) => {
+    const rate = parseFloat(item.rate) || 0;
+    const qty = parseInt(item.quantity) || 0;
+    const taxRate = parseFloat(item.tax_rate) || 0;
+    const discountPct = parseFloat(item.discount_percent) || 0;
+    const gross = rate * qty;
+    const discountAmt = gross * (discountPct / 100);
+    const net = gross - discountAmt;
+    const taxableAmount = taxRate ? net / (1 + taxRate / 100) : net;
+    const totalTax = net - taxableAmount;
+    const cgst = totalTax / 2;
+    const sgst = totalTax / 2;
+    return { gross, discountAmt, net, taxableAmount, totalTax, cgst, sgst, lineTotal: net };
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    
+    // Validate items
+    const validItems = items.filter(item => item.model_number.trim() && item.quantity > 0);
+    if (validItems.length === 0) {
+      setError('Please add at least one item with model number and quantity');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/stock-transfer/po-request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_id: storeData.id,
+          items: validItems,
+          urgency,
+          notes
+        })
+      });
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        onSuccess();
+      } else {
+        setError(data.detail || 'Failed to create PO request');
+      }
+    } catch (err) {
+      setError('Connection error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="p-6 border-b flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-gray-800">Create PO Request</h2>
+            <p className="text-sm text-gray-500">Request stock from procurement</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4" />
+              {error}
+            </div>
+          )}
+
+          {/* Items */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Items Required</label>
+            <div className="space-y-3">
+              {items.map((item, index) => (
+                <div key={index} className="border rounded-lg p-3 space-y-2">
+                  <div className="flex gap-2 items-start">
+                    <div className="flex-1 relative">
+                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="text"
+                        value={productSearch[index] || ''}
+                        onChange={(e) => setProductSearch({ ...productSearch, [index]: e.target.value })}
+                        placeholder="Type model no, brand or product name to search..."
+                        className="w-full pl-8 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500 text-sm"
+                      />
+                      {productSearch[index] && productSearch[index].length > 1 && (
+                        <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                          {getFilteredProducts(productSearch[index]).length === 0 ? (
+                            <div className="p-3 text-sm text-gray-500">No products found matching "{productSearch[index]}"</div>
+                          ) : (
+                            getFilteredProducts(productSearch[index]).slice(0, 10).map(product => (
+                              <div
+                                key={product.id}
+                                onClick={() => {
+                                  handleProductSelect(index, product.id);
+                                  setProductSearch({ ...productSearch, [index]: '' });
+                                }}
+                                className="p-3 hover:bg-teal-50 cursor-pointer border-b last:border-b-0"
+                              >
+                                <div className="font-medium text-gray-900 text-sm">{product.name}</div>
+                                <div className="text-xs text-gray-500 flex gap-2 mt-1">
+                                  <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{product.brand}</span>
+                                  {product.model_number && <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{product.model_number}</span>}
+                                  <span className={`px-1.5 py-0.5 rounded ${(product.stock_quantity ?? product.current_stock ?? 0) > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                    Stock: {product.stock_quantity ?? product.current_stock ?? 0}
+                                  </span>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <select
+                      value={item.product_id || ''}
+                      onChange={(e) => { if (e.target.value) handleProductSelect(index, e.target.value); }}
+                      className="w-40 px-2 py-2 border rounded-lg text-sm bg-white"
+                    >
+                      <option value="">All Products ▼</option>
+                      {products.map(product => (
+                        <option key={product.id} value={product.id}>
+                          {product.model_number || product.name?.substring(0, 30)}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => openAddProductModal(index)}
+                      className="px-2 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 flex items-center gap-1 whitespace-nowrap"
+                      title="Add new product to inventory"
+                    >
+                      <Package className="w-4 h-4" />
+                      + New
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeItem(index)}
+                      className="p-2 text-red-500 hover:bg-red-50 rounded-lg"
+                      disabled={items.length === 1}
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  {item.product_name && (
+                    <div className="text-xs text-teal-700 bg-teal-50 rounded px-2 py-1">
+                      Selected: {item.product_name} {item.model_number && `(${item.model_number})`}
+                    </div>
+                  )}
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={item.model_number}
+                      onChange={(e) => updateItem(index, 'model_number', e.target.value)}
+                      placeholder="Model Number / SKU"
+                      className="flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500 text-sm"
+                      required
+                    />
+                    <input
+                      type="number"
+                      value={item.quantity}
+                      onChange={(e) => updateItem(index, 'quantity', parseInt(e.target.value) || 1)}
+                      placeholder="Qty"
+                      min="1"
+                      className="w-24 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500 text-sm"
+                      required
+                    />
+                    <input
+                      type="text"
+                      value={item.notes}
+                      onChange={(e) => updateItem(index, 'notes', e.target.value)}
+                      placeholder="Notes (optional)"
+                      className="flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500 text-sm"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">HSN Code</label>
+                      <input
+                        type="text"
+                        list={`po-hsn-list-${index}`}
+                        value={item.hsn_code}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          const selectedHsn = hsnCodes.find(h => h.code === value);
+                          const nextItems = [...items];
+                          nextItems[index] = {
+                            ...nextItems[index],
+                            hsn_code: value,
+                            tax_rate: selectedHsn ? selectedHsn.gst_rate : nextItems[index].tax_rate
+                          };
+                          setItems(nextItems);
+                        }}
+                        placeholder="Type or select HSN"
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                      />
+                      <datalist id={`po-hsn-list-${index}`}>
+                        {hsnCodes.map(hsn => (
+                          <option key={hsn.id || hsn.code} value={hsn.code}>
+                            {hsn.description?.substring(0, 40)}
+                          </option>
+                        ))}
+                      </datalist>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Rate (₹) incl. GST</label>
+                      <input
+                        type="number"
+                        value={item.rate}
+                        onChange={(e) => updateItem(index, 'rate', e.target.value)}
+                        placeholder="0.00"
+                        min="0"
+                        step="0.01"
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Tax Rate %</label>
+                      <select
+                        value={item.tax_rate}
+                        onChange={(e) => updateItem(index, 'tax_rate', parseFloat(e.target.value))}
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs bg-white"
+                      >
+                        <option value={0}>0%</option>
+                        <option value={5}>5%</option>
+                        <option value={12}>12%</option>
+                        <option value={18}>18%</option>
+                        <option value={28}>28%</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Discount %</label>
+                      <input
+                        type="number"
+                        value={item.discount_percent}
+                        onChange={(e) => updateItem(index, 'discount_percent', e.target.value)}
+                        placeholder="0"
+                        min="0"
+                        max="100"
+                        step="0.01"
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                      />
+                    </div>
+                    <div className="flex flex-col justify-end">
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Line Total</label>
+                      <div className="px-2 py-1.5 bg-gray-50 border rounded-lg text-xs font-semibold text-gray-800">
+                        ₹{calcItemTax(item).lineTotal.toFixed(2)}
+                      </div>
+                    </div>
+                  </div>
+                  {parseFloat(item.rate) > 0 && (
+                    <div className="grid grid-cols-3 gap-2 text-xs bg-gray-50 rounded-lg p-2">
+                      <div>
+                        <div className="font-medium text-gray-600">Taxable Amt</div>
+                        <div className="text-gray-900">₹{calcItemTax(item).taxableAmount.toFixed(2)}</div>
+                      </div>
+                      <div>
+                        <div className="font-medium text-gray-600">CGST @{(item.tax_rate || 0) / 2}%</div>
+                        <div className="text-gray-900">₹{calcItemTax(item).cgst.toFixed(2)}</div>
+                      </div>
+                      <div>
+                        <div className="font-medium text-gray-600">SGST @{(item.tax_rate || 0) / 2}%</div>
+                        <div className="text-gray-900">₹{calcItemTax(item).sgst.toFixed(2)}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={addItem}
+              className="mt-2 text-sm text-teal-600 hover:text-teal-700 flex items-center gap-1"
+            >
+              <Plus className="w-4 h-4" /> Add Another Item
+            </button>
+          </div>
+
+          {/* Order Value Summary */}
+          <div className="bg-gray-50 border rounded-lg p-3 space-y-1 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-600">Taxable Amount:</span>
+              <span>₹{items.reduce((sum, it) => sum + calcItemTax(it).taxableAmount, 0).toFixed(2)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-600">Total Tax (CGST+SGST):</span>
+              <span>₹{items.reduce((sum, it) => sum + calcItemTax(it).totalTax, 0).toFixed(2)}</span>
+            </div>
+            <div className="flex justify-between font-semibold text-gray-900 border-t pt-1">
+              <span>Estimated Order Value:</span>
+              <span>₹{items.reduce((sum, it) => sum + calcItemTax(it).lineTotal, 0).toFixed(2)}</span>
+            </div>
+          </div>
+
+          {/* Urgency */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Urgency</label>
+            <div className="flex gap-2">
+              {['normal', 'urgent', 'critical'].map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  onClick={() => setUrgency(level)}
+                  className={`px-4 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                    urgency === level
+                      ? level === 'critical' ? 'bg-red-100 border-red-300 text-red-700'
+                        : level === 'urgent' ? 'bg-orange-100 border-orange-300 text-orange-700'
+                        : 'bg-teal-100 border-teal-300 text-teal-700'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  {level.charAt(0).toUpperCase() + level.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Notes */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Additional Notes</label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Any special instructions or notes for the procurement team..."
+              rows={3}
+              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-teal-500 text-sm"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 disabled:opacity-50 flex items-center gap-2"
+            >
+              {loading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  Submitting...
+                </>
+              ) : (
+                'Submit Request'
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    {showAddProductModal && (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] p-4">
+        <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-blue-600 text-white p-4 rounded-t-lg flex justify-between items-center">
+            <h3 className="text-lg font-semibold flex items-center gap-2">
+              <Package className="w-5 h-5" />
+              Add New Product
+            </h3>
+            <button
+              type="button"
+              onClick={() => setShowAddProductModal(false)}
+              className="text-white hover:bg-blue-700 p-1 rounded"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="p-6 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Product Name *</label>
+              <input
+                type="text"
+                value={newProduct.name}
+                onChange={(e) => {
+                  setNewProduct({ ...newProduct, name: e.target.value });
+                  fetchNewProductHsnSuggestion(e.target.value);
+                }}
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="e.g., Bosch Built-in Oven 60cm"
+                required
+              />
+              {newProductHsnSuggestions.length > 0 && (
+                <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
+                  <div className="text-xs font-medium text-blue-800 mb-1">
+                    Suggested HSN Codes based on product name:
+                  </div>
+                  <div className="space-y-1">
+                    {newProductHsnSuggestions.slice(0, 3).map((suggestion, sIdx) => (
+                      <button
+                        key={sIdx}
+                        type="button"
+                        onClick={() => {
+                          setNewProduct({ ...newProduct, hsn_code: suggestion.code });
+                          setNewProductHsnSuggestions([]);
+                        }}
+                        className={`w-full text-left px-2 py-1 rounded text-xs hover:bg-blue-100 transition-colors ${
+                          newProduct.hsn_code === suggestion.code ? 'bg-blue-200 border border-blue-400' : 'bg-white'
+                        }`}
+                      >
+                        <span className="font-semibold text-blue-700">{suggestion.code}</span>
+                        <span className="text-gray-600 ml-2">{suggestion.category || suggestion.description?.substring(0, 30)}</span>
+                        <span className="text-green-600 ml-2 font-medium">{suggestion.gst_rate}% GST</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Brand</label>
+                <input
+                  type="text"
+                  value={newProduct.brand}
+                  onChange={(e) => setNewProduct({ ...newProduct, brand: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g., Bosch, Siemens"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Model Number</label>
+                <input
+                  type="text"
+                  value={newProduct.model_number}
+                  onChange={(e) => setNewProduct({ ...newProduct, model_number: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g., HBA534BS0"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Selling Price (₹) *</label>
+                <input
+                  type="number"
+                  value={newProduct.price}
+                  onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="Price incl. GST"
+                  required
+                  step="0.01"
+                  min="0"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Opening Stock</label>
+                <input
+                  type="number"
+                  value={newProduct.current_stock}
+                  onChange={(e) => setNewProduct({ ...newProduct, current_stock: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="Initial stock quantity"
+                  min="0"
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">HSN Code *</label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setManualHsnMode(!manualHsnMode);
+                    if (!manualHsnMode) {
+                      setNewProduct({ ...newProduct, hsn_code: '' });
+                    }
+                  }}
+                  className="text-xs text-blue-600 hover:text-blue-800 underline"
+                >
+                  {manualHsnMode ? 'Select from list' : 'Enter manually'}
+                </button>
+              </div>
+
+              {manualHsnMode ? (
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={newProduct.hsn_code}
+                    onChange={(e) => setNewProduct({ ...newProduct, hsn_code: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                    placeholder="Enter HSN code (e.g., 85081100)"
+                    required
+                    maxLength={8}
+                  />
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-gray-600">GST Rate:</label>
+                    <select
+                      value={manualHsnGstRate}
+                      onChange={(e) => setManualHsnGstRate(parseFloat(e.target.value))}
+                      className="px-2 py-1 border rounded text-sm"
+                    >
+                      <option value={0}>0%</option>
+                      <option value={5}>5%</option>
+                      <option value={12}>12%</option>
+                      <option value={18}>18%</option>
+                      <option value={28}>28%</option>
+                    </select>
+                  </div>
+                  <p className="text-xs text-amber-600">
+                    Note: Manually entered HSN codes will be added to the system
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <select
+                    value={newProduct.hsn_code}
+                    onChange={(e) => setNewProduct({ ...newProduct, hsn_code: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                    required
+                  >
+                    <option value="">-- Select HSN Code --</option>
+                    {hsnCodes.map(hsn => (
+                      <option key={hsn.id || hsn.code} value={hsn.code}>
+                        {hsn.code} - {hsn.description?.substring(0, 40)}{hsn.description?.length > 40 ? '...' : ''} ({hsn.gst_rate}%)
+                      </option>
+                    ))}
+                  </select>
+                  {newProduct.hsn_code && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      GST Rate: {hsnCodes.find(h => h.code === newProduct.hsn_code)?.gst_rate || 18}%
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+              <input
+                type="text"
+                value={newProduct.category}
+                onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="e.g., Built-in Ovens, Refrigerators"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <textarea
+                value={newProduct.description}
+                onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                rows="2"
+                placeholder="Brief product description"
+              ></textarea>
+            </div>
+
+            <div className="flex gap-3 pt-4">
+              <button
+                type="button"
+                onClick={() => setShowAddProductModal(false)}
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleCreateProduct}
+                disabled={addProductLoading}
+                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center gap-2"
+              >
+                {addProductLoading ? 'Saving...' : 'Add Product'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
+  );
+};
+
+export default PORequestsTab;

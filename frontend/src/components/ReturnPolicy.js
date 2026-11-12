@@ -1,0 +1,257 @@
+import React from 'react';
+import { RotateCcw, Package, Truck, AlertTriangle, CheckCircle, XCircle, Clock } from 'lucide-react';
+
+const ReturnPolicy = () => {
+  return (
+    <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-md p-8">
+        <div className="flex items-center gap-3 mb-6">
+          <RotateCcw className="w-8 h-8 text-blue-600" />
+          <h1 className="text-3xl font-bold text-gray-900">Return & Refund Policy</h1>
+        </div>
+        
+        <p className="text-gray-600 mb-6">Last updated: December 2024</p>
+
+        {/* Important Notice */}
+        <div className="bg-blue-50 border-l-4 border-blue-500 p-4 mb-8">
+          <div className="flex">
+            <AlertTriangle className="w-6 h-6 text-blue-600 mr-3" />
+            <div>
+              <h3 className="text-lg font-semibold text-blue-800">Important Notice</h3>
+              <p className="text-blue-700 mt-1">
+                At Aditya Retail, we are committed to ensuring your complete satisfaction. Please read our return policy carefully to understand the process for different scenarios.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="prose prose-gray max-w-none">
+          
+          {/* Key Highlights */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">Key Highlights</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-green-50 p-4 rounded-lg border border-green-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <CheckCircle className="w-5 h-5 text-green-600" />
+                  <span className="font-semibold text-green-800">Transit Damage</span>
+                </div>
+                <p className="text-green-700 text-sm">Handled by Aditya Retail upon inspection</p>
+              </div>
+              <div className="bg-purple-50 p-4 rounded-lg border border-purple-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <Package className="w-5 h-5 text-purple-600" />
+                  <span className="font-semibold text-purple-800">Defective Products</span>
+                </div>
+                <p className="text-purple-700 text-sm">Handled directly by the Brand (Bosch, Siemens, etc.)</p>
+              </div>
+              <div className="bg-orange-50 p-4 rounded-lg border border-orange-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <Clock className="w-5 h-5 text-orange-600" />
+                  <span className="font-semibold text-orange-800">Report Within</span>
+                </div>
+                <p className="text-orange-700 text-sm">48 hours of delivery for transit damage</p>
+              </div>
+              <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <RotateCcw className="w-5 h-5 text-blue-600" />
+                  <span className="font-semibold text-blue-800">Refund Timeline</span>
+                </div>
+                <p className="text-blue-700 text-sm">7-10 business days after approval</p>
+              </div>
+            </div>
+          </section>
+
+          {/* Transit Damage Section */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <Truck className="w-6 h-6 text-blue-600" />
+              1. Transit Damage - Handled by Aditya Retail
+            </h2>
+            <div className="bg-gray-50 p-4 rounded-lg mb-4">
+              <p className="text-gray-700 mb-4">
+                If your product arrives damaged due to transit (shipping), Aditya Retail will take full responsibility and handle the return/replacement upon inspection.
+              </p>
+              
+              <h3 className="text-lg font-medium text-gray-800 mb-2">What qualifies as Transit Damage?</h3>
+              <ul className="list-disc pl-6 text-gray-700 mb-4">
+                <li>Physical damage to the product (dents, scratches, broken parts)</li>
+                <li>Damaged or tampered packaging</li>
+                <li>Missing items from the package</li>
+                <li>Wrong product delivered</li>
+              </ul>
+              
+              <h3 className="text-lg font-medium text-gray-800 mb-2">How to Report Transit Damage:</h3>
+              <ol className="list-decimal pl-6 text-gray-700 mb-4">
+                <li><strong>Report within 48 hours</strong> of delivery</li>
+                <li>Take clear photos/videos of the damage and packaging</li>
+                <li>Do not install or use the damaged product</li>
+                <li>Contact us via email or phone with your order number and photos</li>
+                <li>Our team will arrange inspection and pickup</li>
+              </ol>
+              
+              <h3 className="text-lg font-medium text-gray-800 mb-2">Resolution Options:</h3>
+              <ul className="list-disc pl-6 text-gray-700">
+                <li><strong>Replacement:</strong> We will send a new product at no extra cost</li>
+                <li><strong>Full Refund:</strong> If replacement is not available, full refund will be processed</li>
+              </ul>
+            </div>
+          </section>
+
+          {/* Defective Products Section */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <Package className="w-6 h-6 text-purple-600" />
+              2. Defective Products - Handled by Brand
+            </h2>
+            <div className="bg-purple-50 p-4 rounded-lg mb-4">
+              <p className="text-gray-700 mb-4">
+                For products that are defective or develop faults after delivery (manufacturing defects), the return/replacement will be handled directly by the respective brand under their warranty policy.
+              </p>
+              
+              <h3 className="text-lg font-medium text-gray-800 mb-2">What qualifies as a Defective Product?</h3>
+              <ul className="list-disc pl-6 text-gray-700 mb-4">
+                <li>Product not functioning as intended</li>
+                <li>Manufacturing defects discovered after installation</li>
+                <li>Electrical or mechanical failures</li>
+                <li>Components not working properly</li>
+              </ul>
+              
+              <h3 className="text-lg font-medium text-gray-800 mb-2">How to Claim for Defective Products:</h3>
+              <ol className="list-decimal pl-6 text-gray-700 mb-4">
+                <li>Register your product on the brand's official website</li>
+                <li>Contact the brand's customer care or authorized service center</li>
+                <li>Keep your invoice and warranty card ready</li>
+                <li>The brand will inspect and provide repair/replacement under warranty</li>
+              </ol>
+              
+              <h3 className="text-lg font-medium text-gray-800 mb-2">Brand Service Centers:</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <div className="bg-white p-3 rounded border">
+                  <p className="font-semibold text-gray-800">Bosch Home Appliances</p>
+                  <p className="text-gray-600 text-sm">Website: bosch-home.in</p>
+                  <p className="text-gray-600 text-sm">Helpline: 1800-266-1880</p>
+                </div>
+                <div className="bg-white p-3 rounded border">
+                  <p className="font-semibold text-gray-800">Siemens Home Appliances</p>
+                  <p className="text-gray-600 text-sm">Website: siemens-home.bsh-group.in</p>
+                  <p className="text-gray-600 text-sm">Helpline: 1800-209-1850</p>
+                </div>
+              </div>
+            </div>
+            
+            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4">
+              <p className="text-yellow-800">
+                <strong>Note:</strong> Aditya Retail will assist you in connecting with the brand's service team, but the final decision on repair/replacement under warranty lies with the brand.
+              </p>
+            </div>
+          </section>
+
+          {/* Non-Returnable Items */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <XCircle className="w-6 h-6 text-red-600" />
+              3. Non-Returnable Items
+            </h2>
+            <p className="text-gray-700 mb-4">The following items cannot be returned:</p>
+            <ul className="list-disc pl-6 text-gray-700">
+              <li>Products damaged due to misuse, negligence, or improper installation</li>
+              <li>Products with tampered serial numbers or warranty seals</li>
+              <li>Products that have been installed and used (unless defective)</li>
+              <li>Products returned after the specified return window</li>
+              <li>Customized or made-to-order products</li>
+              <li>Products without original packaging and accessories</li>
+            </ul>
+          </section>
+
+          {/* Return Process */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">4. Return Process</h2>
+            <div className="space-y-4">
+              <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
+                <div className="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center font-semibold">1</div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Initiate Return Request</h3>
+                  <p className="text-gray-600">Contact us via email (orders@adityaretailonline.com) or phone with your order number and reason for return.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
+                <div className="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center font-semibold">2</div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Submit Evidence</h3>
+                  <p className="text-gray-600">Share photos/videos of the product showing the issue (for transit damage).</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
+                <div className="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center font-semibold">3</div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Inspection & Approval</h3>
+                  <p className="text-gray-600">Our team will review your request and schedule a pickup if approved.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
+                <div className="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center font-semibold">4</div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Pickup & Verification</h3>
+                  <p className="text-gray-600">Product will be picked up and verified at our warehouse.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
+                <div className="w-8 h-8 bg-green-600 text-white rounded-full flex items-center justify-center font-semibold">5</div>
+                <div>
+                  <h3 className="font-semibold text-gray-800">Refund/Replacement</h3>
+                  <p className="text-gray-600">Refund will be processed within 7-10 business days, or replacement will be shipped.</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Refund Information */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">5. Refund Information</h2>
+            <table className="w-full border-collapse border border-gray-300">
+              <thead>
+                <tr className="bg-gray-100">
+                  <th className="border border-gray-300 p-3 text-left">Payment Method</th>
+                  <th className="border border-gray-300 p-3 text-left">Refund Timeline</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className="border border-gray-300 p-3">UPI / PhonePe / Google Pay</td>
+                  <td className="border border-gray-300 p-3">3-5 business days</td>
+                </tr>
+                <tr>
+                  <td className="border border-gray-300 p-3">Credit/Debit Card</td>
+                  <td className="border border-gray-300 p-3">5-7 business days</td>
+                </tr>
+                <tr>
+                  <td className="border border-gray-300 p-3">Net Banking</td>
+                  <td className="border border-gray-300 p-3">5-7 business days</td>
+                </tr>
+                <tr>
+                  <td className="border border-gray-300 p-3">Cash on Delivery (COD)</td>
+                  <td className="border border-gray-300 p-3">7-10 business days (via bank transfer)</td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="text-gray-600 text-sm mt-2">*Refund timelines are subject to bank processing times</p>
+          </section>
+
+          {/* Contact */}
+          <section className="mb-8">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">6. Contact Us</h2>
+            <p className="text-gray-700 mb-4">For return requests or queries, please contact us:</p>
+            <div className="bg-gray-50 p-4 rounded-lg">
+              <p className="text-gray-700"><strong>Email:</strong> orders@adityaretailonline.com</p>
+              <p className="text-gray-700"><strong>Phone:</strong> +91 98445 77440</p>
+              <p className="text-gray-700"><strong>Working Hours:</strong> Monday to Saturday, 9:00 AM - 6:00 PM</p>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ReturnPolicy;

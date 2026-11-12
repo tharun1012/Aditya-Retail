@@ -1,0 +1,753 @@
+from fastapi import APIRouter, HTTPException, Depends
+from typing import Dict, Any, Optional
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from ai_agents import AIAgentManager, InventoryAnalyzer, MarketingInsights
+from models import (
+    ChatRequest, ChatMessage, ChatSession, ServiceRequest, ServiceRequestCreate,
+    InventoryAlert, MarketingCampaign
+)
+from database import get_db
+
+router = APIRouter(prefix="/ai", tags=["AI Agents"])
+
+# Initialize AI Agent Manager
+ai_manager = AIAgentManager()
+
+@router.post("/chat")
+async def chat_with_agent(request: ChatRequest, db = Depends(get_db)):
+    """Chat with AI agents - with automatic lead capture"""
+    
+    try:
+        # Get AI response with session_id in context
+        context_with_session = request.context or {}
+        context_with_session['session_id'] = request.session_id
+        
+        response = await ai_manager.get_agent_response(
+            agent_type=request.agent_type,
+            message=request.message,
+            context=context_with_session
+        )
+        
+        # Process product links in response - convert all to relative URLs
+        import re
+        
+        # Convert PRODUCT_LINK:id to relative URLs with hash router format
+        # Format: [Product Name](PRODUCT_LINK:product_id) → [Product Name](/#/product/product_id)
+        response = re.sub(
+            r'\(PRODUCT_LINK:([a-zA-Z0-9_-]+)\)',
+            r'(/#/product/\1)',
+            response
+        )
+        
+        # Convert any full URLs to relative URLs - catches ALL domains including preview and live
+        # Pattern: (https://anything.com/product/id) or (https://anything.com/#/product/id)
+        response = re.sub(
+            r'\(https?://[^/\s\)]+(?:/[^/\s\)]*)*?/(?:#/)?product/([a-zA-Z0-9_-]+)\)',
+            r'(/#/product/\1)',
+            response
+        )
+        
+        # Convert /product/id to /#/product/id for hash router (without full URL)
+        response = re.sub(
+            r'\(/product/([a-zA-Z0-9_-]+)\)',
+            r'(/#/product/\1)',
+            response
+        )
+        
+        # Also catch URLs that might be written without parentheses
+        # Convert standalone URLs in text to relative format
+        response = re.sub(
+            r'https?://[^/\s]+(?:/[^\s]*)?/(?:#/)?product/([a-zA-Z0-9_-]+)',
+            r'/#/product/\1',
+            response
+        )
+        
+        # Store user message
+        user_message = ChatMessage(
+            session_id=request.session_id,
+            agent_type=request.agent_type,
+            sender="user",
+            message=request.message,
+            context=request.context
+        )
+        
+        # Store AI response
+        ai_message = ChatMessage(
+            session_id=request.session_id,
+            agent_type=request.agent_type,
+            sender="ai",
+            message=response,
+            context={"agent_type": request.agent_type}
+        )
+        
+        # Insert messages into database
+        await db.chat_messages.insert_one(user_message.dict())
+        await db.chat_messages.insert_one(ai_message.dict())
+        
+        # Update or create chat session
+        session_filter = {"session_id": request.session_id, "agent_type": request.agent_type}
+        existing_session = await db.chat_sessions.find_one(session_filter, {"_id": 0})
+        
+        if existing_session:
+            await db.chat_sessions.update_one(
+                session_filter,
+                {"$set": {"updated_at": datetime.utcnow(), "status": "active"}}
+            )
+        else:
+            new_session = ChatSession(
+                session_id=request.session_id,
+                agent_type=request.agent_type,
+                context=request.context or {}
+            )
+            await db.chat_sessions.insert_one(new_session.dict())
+        
+        # AUTO LEAD CAPTURE - Enhanced to capture ALL conversations
+        if request.agent_type in ["sales", "service"]:
+            try:
+                from ai_chat_lead_service import ai_chat_lead_service
+                
+                # Get conversation history for this session
+                conversation_history = await db.chat_messages.find(
+                    {"session_id": request.session_id}
+                ).sort([("timestamp", -1)]).limit(20).to_list(20)
+                
+                message_count = len(conversation_history)
+                
+                # Extract contact information
+                contact_info = await ai_chat_lead_service.extract_contact_info(conversation_history)
+                
+                # Analyze conversation for product interests (always do this)
+                conversation_analysis = await ai_chat_lead_service.analyze_conversation_intent(conversation_history)
+                
+                # Determine if this is a high-intent conversation
+                is_high_intent = (
+                    message_count >= 3 or
+                    conversation_analysis.get('buying_timeline') in ['immediate', 'this_week'] or
+                    len(conversation_analysis.get('interested_products', [])) > 0 or
+                    conversation_analysis.get('budget_range')
+                )
+                
+                # Create/update lead if:
+                # 1. We have contact info, OR
+                # 2. It's a high-intent conversation (3+ messages or product interest)
+                if contact_info.get('has_contact') or is_high_intent:
+                    # Create or update lead
+                    lead_id = await ai_chat_lead_service.create_lead_from_chat(
+                        contact_info,
+                        conversation_analysis,
+                        request.session_id,
+                        db
+                    )
+                    
+                    if lead_id:
+                        print(f"✅ Lead captured from chat: {lead_id} (contact: {contact_info.get('has_contact')}, high_intent: {is_high_intent})")
+                
+                # After 2+ messages without contact info, flag for contact capture
+                if message_count >= 2 and not contact_info.get('has_contact'):
+                    # Store hint for next AI response to ask for contact
+                    await db.chat_sessions.update_one(
+                        {"session_id": request.session_id, "agent_type": request.agent_type},
+                        {"$set": {"needs_contact_capture": True, "contact_reminder_count": message_count}}
+                    )
+                    
+            except Exception as e:
+                print(f"⚠️ Lead capture error (non-critical): {e}")
+        
+        return {
+            "status": "success",
+            "agent_type": request.agent_type,
+            "response": response,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI chat error: {str(e)}")
+
+@router.get("/chat/history/{session_id}")
+async def get_chat_history(session_id: str, agent_type: Optional[str] = None, db = Depends(get_db)):
+    """Get chat history for a session"""
+    
+    try:
+        filter_criteria = {"session_id": session_id}
+        if agent_type:
+            filter_criteria["agent_type"] = agent_type
+        
+        messages = await db.chat_messages.find(
+            filter_criteria, {"_id": 0}
+        ).sort("timestamp", 1).to_list(1000)
+        
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "messages": messages
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving chat history: {str(e)}")
+
+@router.post("/service/request")
+async def create_service_request(request: ServiceRequestCreate, db = Depends(get_db)):
+    """Create a new service request via AI Service Agent (Legacy endpoint)"""
+    
+    try:
+        service_request = ServiceRequest(**request.dict())
+        await db.service_requests.insert_one(service_request.dict())
+        
+        # Generate AI response for service request confirmation
+        context = {
+            "service_request": service_request.dict(),
+            "customer": {
+                "name": request.customer_name,
+                "email": request.customer_email,
+                "phone": request.customer_phone
+            }
+        }
+        
+        confirmation_message = f"Service request created for {request.product_name}. Issue: {request.issue_description}"
+        ai_response = await ai_manager.get_agent_response(
+            agent_type="service",
+            message=confirmation_message,
+            context=context
+        )
+        
+        return {
+            "status": "success",
+            "service_request": service_request.dict(),
+            "ai_response": ai_response,
+            "request_id": service_request.request_id
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating service request: {str(e)}")
+
+@router.post("/create-lead-from-chat")
+async def create_lead_from_chat(
+    session_id: str,
+    conversation_summary: str,
+    agent_type: str = "sales",
+    db = Depends(get_db)
+):
+    """
+    Create lead automatically from AI chat conversation
+    Called when customer shows interest and AI has captured contact info
+    """
+    try:
+        from lead_automation_service import lead_automation
+        
+        conversation_data = {
+            "session_id": session_id,
+            "agent_type": agent_type,
+            "full_conversation": conversation_summary,
+            "summary": conversation_summary[:500],
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        lead_id = await lead_automation.auto_create_lead_from_chat(conversation_data, db)
+        
+        if lead_id:
+            return {
+                "status": "success",
+                "message": "Lead created successfully from AI conversation",
+                "lead_id": lead_id
+            }
+        else:
+            return {
+                "status": "info",
+                "message": "Could not extract sufficient contact information from conversation"
+            }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating lead from chat: {str(e)}")
+
+@router.post("/service/create-ticket")
+async def create_service_ticket_via_ai(
+    session_id: str,
+    customer_name: str,
+    customer_phone: str,
+    customer_email: str,
+    customer_address: str,
+    product_name: str,
+    brand: str,
+    model_number: Optional[str] = None,
+    purchase_date: Optional[str] = None,
+    issue_description: str = "",
+    db = Depends(get_db)
+):
+    """
+    Create service ticket through AI agent conversation.
+    Called by frontend after AI agent collects all customer details.
+    """
+    try:
+        from service_ticket_routes import ServiceTicketCreate, CustomerDetails, ProductDetails
+        from datetime import datetime, timezone
+        import uuid
+        
+        # Create ticket data
+        ticket_data = ServiceTicketCreate(
+            customer_details=CustomerDetails(
+                name=customer_name,
+                phone=customer_phone,
+                email=customer_email,
+                address=customer_address
+            ),
+            product_details=ProductDetails(
+                product_name=product_name,
+                brand=brand,
+                model_number=model_number,
+                purchase_date=purchase_date
+            ),
+            issue_description=issue_description,
+            session_id=session_id
+        )
+        
+        # Generate ticket ID
+        ticket_id = f"ADR-SRV-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{str(uuid.uuid4())[:8].upper()}"
+        
+        # Create ticket document
+        ticket = {
+            "ticket_id": ticket_id,
+            "customer_details": ticket_data.customer_details.dict(),
+            "product_details": ticket_data.product_details.dict(),
+            "issue_description": issue_description,
+            "session_id": session_id,
+            "status": "awaiting_brand_response",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "brand_complaint_number": None,
+            "follow_ups": []
+        }
+        
+        # Insert into database
+        await db.service_tickets.insert_one(ticket)
+        
+        # Get AI confirmation message
+        confirmation_context = {
+            "ticket_id": ticket_id,
+            "customer_name": customer_name,
+            "brand": brand,
+            "product_name": product_name
+        }
+        
+        confirmation_message = f"Service ticket {ticket_id} has been created for {customer_name}. Please provide a confirmation message."
+        ai_response = await ai_manager.get_agent_response(
+            agent_type="service",
+            message=confirmation_message,
+            context=confirmation_context
+        )
+        
+        print(f"✅ Service ticket {ticket_id} created via AI agent for {customer_name}")
+        print("✉️ [MOCK] Emails would be sent to brand and customer")
+        
+        return {
+            "status": "success",
+            "ticket_id": ticket_id,
+            "message": "Service ticket created successfully",
+            "ai_response": ai_response,
+            "note": "Email functionality will be active once SMTP credentials are configured"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating service ticket: {str(e)}")
+
+@router.get("/inventory/analysis")
+async def get_inventory_analysis(db = Depends(get_db)):
+    """Get AI-powered inventory analysis"""
+    
+    try:
+        # Get all products
+        products = await db.products.find({"is_listed": {"$ne": False}}, {"_id": 0}).to_list(1000)
+        
+        # Analyze inventory
+        analysis = InventoryAnalyzer.analyze_stock_levels(products)
+        
+        # Generate AI insights
+        inventory_context = {
+            "inventory": products[:10],  # Sample for context
+            "analysis": analysis
+        }
+        
+        ai_insights = await ai_manager.get_agent_response(
+            agent_type="stock",
+            message="Please provide current inventory analysis and recommendations",
+            context=inventory_context
+        )
+        
+        # Create inventory alerts for critical items
+        alerts = []
+        for product in analysis["alerts"]["critical"]:
+            alert = InventoryAlert(
+                product_id=product.get("id"),
+                product_name=product.get("name"),
+                current_stock=product.get("stock", 0),
+                reorder_level=10,
+                suggested_reorder_qty=25,
+                priority="high"
+            )
+            alerts.append(alert.dict())
+            await db.inventory_alerts.insert_one(alert.dict())
+        
+        return {
+            "status": "success",
+            "analysis": analysis,
+            "ai_insights": ai_insights,
+            "alerts_created": len(alerts)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error analyzing inventory: {str(e)}")
+
+@router.get("/marketing/insights")
+async def get_marketing_insights(db = Depends(get_db)):
+    """Get AI-powered marketing insights and campaign suggestions"""
+    
+    try:
+        # Get recent customer behavior data (simulated)
+        recent_sessions = []  # In real app, fetch from analytics
+        
+        # Get inventory data for campaign suggestions
+        products = await db.products.find({"is_listed": {"$ne": False}}, {"_id": 0}).to_list(1000)
+        inventory_analysis = InventoryAnalyzer.analyze_stock_levels(products)
+        
+        # Generate marketing insights
+        behavior_insights = MarketingInsights.analyze_customer_behavior(recent_sessions)
+        campaign_suggestions = MarketingInsights.suggest_campaigns("winter", inventory_analysis)
+        
+        # Get AI marketing recommendations
+        marketing_context = {
+            "inventory": inventory_analysis,
+            "behavior": behavior_insights,
+            "products": products[:5]  # Sample products
+        }
+        
+        ai_recommendations = await ai_manager.get_agent_response(
+            agent_type="marketing",
+            message="Based on current inventory and customer behavior, what marketing campaigns should we run?",
+            context=marketing_context
+        )
+        
+        return {
+            "status": "success",
+            "behavior_insights": behavior_insights,
+            "campaign_suggestions": campaign_suggestions,
+            "ai_recommendations": ai_recommendations,
+            "inventory_summary": {
+                "low_stock_items": inventory_analysis["low_stock_count"],
+                "out_of_stock_items": inventory_analysis["out_of_stock_count"]
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating marketing insights: {str(e)}")
+
+@router.post("/delivery/update")
+async def update_delivery_status(
+    order_id: str, 
+    status: str, 
+    tracking_id: Optional[str] = None,
+    customer_message: Optional[str] = None,
+    db = Depends(get_db)
+):
+    """Update delivery status and notify customer via AI Delivery Agent"""
+    
+    try:
+        # Update order in database
+        update_data = {
+            "delivery_status": status,
+            "updated_at": datetime.utcnow()
+        }
+        
+        if tracking_id:
+            update_data["tracking_id"] = tracking_id
+            
+        await db.orders.update_one(
+            {"order_id": order_id},
+            {"$set": update_data}
+        )
+        
+        # Get order details
+        order = await db.orders.find_one({"order_id": order_id}, {"_id": 0})
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Generate AI delivery update message
+        delivery_context = {
+            "order": order,
+            "status": status,
+            "tracking_id": tracking_id
+        }
+        
+        message = customer_message or f"Order {order_id} status updated to: {status}"
+        ai_response = await ai_manager.get_agent_response(
+            agent_type="delivery",
+            message=message,
+            context=delivery_context
+        )
+        
+        return {
+            "status": "success",
+            "order_id": order_id,
+            "delivery_status": status,
+            "ai_message": ai_response,
+            "tracking_id": tracking_id
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating delivery status: {str(e)}")
+
+@router.get("/dashboard/summary")
+async def get_ai_dashboard_summary(db = Depends(get_db)):
+    """Get AI-powered dashboard summary with insights from all agents"""
+    
+    try:
+        # Get data for all agents
+        products = await db.products.find({"is_listed": {"$ne": False}}, {"_id": 0}).to_list(1000)
+        orders = await db.orders.find({}, {"_id": 0}).sort("created_at", -1).limit(100).to_list(100)
+        service_requests = await db.service_requests.find({"status": {"$ne": "closed"}}, {"_id": 0}).to_list(100)
+        
+        # Generate inventory analysis
+        inventory_analysis = InventoryAnalyzer.analyze_stock_levels(products)
+        
+        # Calculate key metrics
+        total_revenue = sum(order.get("total", 0) for order in orders)
+        active_orders = len([o for o in orders if o.get("status") not in ["delivered", "cancelled"]])
+        pending_service_requests = len(service_requests)
+        
+        # Get AI insights from different agents
+        sales_context = {"products": products[:5], "orders": orders[:5]}
+        sales_insights = await ai_manager.get_agent_response(
+            agent_type="sales",
+            message="Provide sales performance summary and recommendations",
+            context=sales_context
+        )
+        
+        stock_insights = await ai_manager.get_agent_response(
+            agent_type="stock", 
+            message="Provide inventory status summary",
+            context={"inventory": products[:10]}
+        )
+        
+        service_insights = await ai_manager.get_agent_response(
+            agent_type="service",
+            message="Provide service operations summary", 
+            context={"service_requests": service_requests[:5]}
+        )
+        
+        return {
+            "status": "success",
+            "summary": {
+                "total_products": len(products),
+                "active_orders": active_orders,
+                "total_revenue": total_revenue,
+                "pending_service_requests": pending_service_requests,
+                "low_stock_alerts": inventory_analysis["low_stock_count"],
+                "out_of_stock_items": inventory_analysis["out_of_stock_count"]
+            },
+            "ai_insights": {
+                "sales": sales_insights,
+                "inventory": stock_insights,
+                "service": service_insights
+            },
+            "recommendations": inventory_analysis["recommendations"]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating dashboard summary: {str(e)}")
+
+
+# ==================== AI AGENT HELPER ENDPOINTS ====================
+
+@router.get("/delivery/track-order")
+async def track_order_for_ai(
+    order_id: Optional[str] = None,
+    phone: Optional[str] = None,
+    db = Depends(get_db)
+):
+    """Track order by order ID or phone number for AI Delivery Agent."""
+    try:
+        if not order_id and not phone:
+            return {"status": "error", "message": "Please provide order_id or phone"}
+        
+        orders = []
+        clean_phone = phone[-10:] if phone else ""
+        
+        # Search in offline_invoices (store orders)
+        if order_id:
+            query = {"$or": [{"invoice_number": order_id}, {"id": order_id}]}
+        else:
+            query = {"customer_phone": {"$regex": clean_phone}}
+        
+        offline_orders = await db.offline_invoices.find(query, {"_id": 0}).sort("created_at", -1).limit(5).to_list(5)
+        
+        for order in offline_orders:
+            orders.append({
+                "order_type": "store_order",
+                "order_number": order.get("invoice_number", "N/A"),
+                "status": order.get("status", "processing"),
+                "customer_name": order.get("customer_name", ""),
+                "total_amount": order.get("total_amount", 0),
+                "items_count": len(order.get("items", [])),
+                "delivery_address": order.get("shipping_address", order.get("customer_address", "")),
+                "assigned_to": order.get("assigned_delivery_person", ""),
+                "created_at": order.get("created_at", ""),
+                "expected_delivery": order.get("expected_delivery_date", "")
+            })
+        
+        # Search in online orders
+        if order_id:
+            query = {"$or": [{"order_number": order_id}, {"id": order_id}]}
+        else:
+            query = {"customer.phone": {"$regex": clean_phone}}
+        
+        online_orders = await db.orders.find(query, {"_id": 0}).sort("created_at", -1).limit(5).to_list(5)
+        
+        for order in online_orders:
+            orders.append({
+                "order_type": "online_order",
+                "order_number": order.get("order_number", "N/A"),
+                "status": order.get("status", "processing"),
+                "customer_name": order.get("customer", {}).get("name", ""),
+                "total_amount": order.get("total_amount", 0),
+                "items_count": len(order.get("items", [])),
+                "delivery_address": order.get("shipping_address", ""),
+                "created_at": order.get("created_at", ""),
+                "expected_delivery": order.get("expected_delivery", "")
+            })
+        
+        if not orders:
+            return {"status": "not_found", "message": "No orders found"}
+        
+        return {"status": "success", "orders": orders}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error tracking order: {str(e)}")
+
+
+@router.post("/delivery/reschedule")
+async def reschedule_delivery_via_ai(
+    order_id: str,
+    new_date: str,
+    time_slot: str,
+    reason: Optional[str] = None,
+    db = Depends(get_db)
+):
+    """Reschedule delivery for AI Delivery Agent."""
+    try:
+        from datetime import timezone
+        
+        result = await db.offline_invoices.update_one(
+            {"$or": [{"invoice_number": order_id}, {"id": order_id}]},
+            {"$set": {
+                "expected_delivery_date": new_date,
+                "delivery_time_slot": time_slot,
+                "rescheduled": True,
+                "reschedule_reason": reason,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+        
+        if result.modified_count == 0:
+            result = await db.orders.update_one(
+                {"$or": [{"order_number": order_id}, {"id": order_id}]},
+                {"$set": {
+                    "expected_delivery": new_date,
+                    "delivery_time_slot": time_slot,
+                    "rescheduled": True,
+                    "reschedule_reason": reason,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+        
+        if result.modified_count > 0:
+            return {"status": "success", "message": f"Delivery rescheduled to {new_date} ({time_slot})"}
+        else:
+            return {"status": "not_found", "message": "Order not found"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error rescheduling: {str(e)}")
+
+
+@router.post("/service/create-ticket-ai")
+async def create_ticket_from_ai_chat(ticket_data: dict, db = Depends(get_db)):
+    """Create service ticket from AI chat conversation."""
+    try:
+        from datetime import timezone
+        
+        ticket_number = f"SRV-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
+        
+        ticket = {
+            "id": str(uuid.uuid4()),
+            "ticket_number": ticket_number,
+            "customer_name": ticket_data.get("name"),
+            "customer_phone": ticket_data.get("phone"),
+            "customer_email": ticket_data.get("email"),
+            "customer_address": ticket_data.get("address"),
+            "product_name": ticket_data.get("product_name"),
+            "product_model": ticket_data.get("model"),
+            "brand": ticket_data.get("brand", "Bosch"),
+            "issue_type": ticket_data.get("issue_type", "general"),
+            "issue_description": ticket_data.get("issue_description"),
+            "purchase_date": ticket_data.get("purchase_date"),
+            "warranty_status": "under_warranty",
+            "status": "open",
+            "priority": ticket_data.get("priority", "medium"),
+            "source": "ai_chat",
+            "session_id": ticket_data.get("session_id"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await db.service_tickets.insert_one(ticket)
+        
+        return {
+            "status": "success",
+            "ticket_id": ticket["id"],
+            "ticket_number": ticket_number,
+            "message": f"Service ticket {ticket_number} created successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating ticket: {str(e)}")
+
+
+@router.post("/sales/save-lead")
+async def save_lead_from_ai_chat(lead_data: dict, db = Depends(get_db)):
+    """Save lead captured by AI Sales Agent."""
+    try:
+        from datetime import timezone
+        
+        lead = {
+            "id": str(uuid.uuid4()),
+            "name": lead_data.get("name"),
+            "phone": lead_data.get("phone"),
+            "email": lead_data.get("email"),
+            "address": lead_data.get("address"),
+            "interested_in": lead_data.get("product_category"),
+            "budget": lead_data.get("budget"),
+            "specific_products": lead_data.get("products_viewed", []),
+            "source": "ai_chat",
+            "status": "new",
+            "notes": lead_data.get("notes", ""),
+            "session_id": lead_data.get("session_id"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        existing = None
+        if lead["phone"]:
+            existing = await db.leads.find_one({"phone": lead["phone"]})
+        if not existing and lead["email"]:
+            existing = await db.leads.find_one({"email": lead["email"]})
+        
+        if existing:
+            update_data = {k: v for k, v in lead.items() if v and k not in ["id", "created_at"]}
+            update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            await db.leads.update_one({"id": existing["id"]}, {"$set": update_data})
+            return {"status": "updated", "lead_id": existing["id"], "message": "Lead updated"}
+        else:
+            await db.leads.insert_one(lead)
+            return {"status": "created", "lead_id": lead["id"], "message": "Lead captured"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving lead: {str(e)}")

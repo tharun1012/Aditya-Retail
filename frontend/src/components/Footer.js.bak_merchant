@@ -1,0 +1,177 @@
+import React from 'react';
+import { Link } from 'react-router-dom';
+import { MapPin, Phone, Mail, Facebook, Twitter, Instagram, Linkedin, Youtube } from 'lucide-react';
+
+const Footer = () => {
+  return (
+    <footer className="festive-footer bg-gray-900 text-white">
+      {/* Main Footer Content */}
+      <div className="max-w-7xl mx-auto px-4 py-12">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+          {/* Company Info */}
+          <div>
+            <div className="flex items-center space-x-2 mb-6">
+              <img 
+                src="/aditya-logo.png" 
+                alt="Aditya Retail" 
+                className="h-16 w-auto brightness-110"
+              />
+            </div>
+            <p className="text-gray-400 mb-6">
+              Your trusted partner for premium home appliances from Bosch, Siemens & Hindware. 
+              Quality, innovation, and great prices with exceptional service.
+            </p>
+            <div className="flex space-x-4">
+              <a 
+                href="https://www.facebook.com/adityaretailonline1" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="w-10 h-10 bg-gray-800 hover:bg-red-700 rounded-full flex items-center justify-center transition-colors"
+                aria-label="Facebook"
+              >
+                <Facebook className="w-5 h-5" />
+              </a>
+              <a 
+                href="https://x.com/adityaretailon1" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="w-10 h-10 bg-gray-800 hover:bg-red-700 rounded-full flex items-center justify-center transition-colors"
+                aria-label="X (Twitter)"
+              >
+                <Twitter className="w-5 h-5" />
+              </a>
+              <a 
+                href="https://www.instagram.com/adityaretailonline/" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="w-10 h-10 bg-gray-800 hover:bg-red-700 rounded-full flex items-center justify-center transition-colors"
+                aria-label="Instagram"
+              >
+                <Instagram className="w-5 h-5" />
+              </a>
+              <a 
+                href="https://www.linkedin.com/company/adityaretailonline/" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="w-10 h-10 bg-gray-800 hover:bg-red-700 rounded-full flex items-center justify-center transition-colors"
+                aria-label="LinkedIn"
+              >
+                <Linkedin className="w-5 h-5" />
+              </a>
+              <a 
+                href="https://www.youtube.com/@adityaretailonline" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="w-10 h-10 bg-gray-800 hover:bg-red-700 rounded-full flex items-center justify-center transition-colors"
+                aria-label="YouTube"
+              >
+                <Youtube className="w-5 h-5" />
+              </a>
+            </div>
+          </div>
+
+          {/* Product Categories */}
+          <div>
+            <h3 className="text-lg font-semibold mb-6">Product Categories</h3>
+            <ul className="space-y-3">
+              <li><a href="/washing-machine" className="text-gray-400 hover:text-white transition-colors">Washing Machines</a></li>
+              <li><a href="/refrigerator" className="text-gray-400 hover:text-white transition-colors">Refrigerators</a></li>
+              <li><a href="/gas-hob" className="text-gray-400 hover:text-white transition-colors">Cooktops</a></li>
+              <li><a href="/dishwasher" className="text-gray-400 hover:text-white transition-colors">Dishwashers</a></li>
+              <li><a href="/sink" className="text-gray-400 hover:text-white transition-colors">Kitchen Sinks</a></li>
+              <li><a href="/chimney" className="text-gray-400 hover:text-white transition-colors">Chimneys</a></li>
+              <li><a href="/oven" className="text-gray-400 hover:text-white transition-colors">Ovens & Microwaves</a></li>
+            </ul>
+          </div>
+
+          {/* Customer Support */}
+          <div>
+            <h3 className="text-lg font-semibold mb-6">Customer Support</h3>
+            <ul className="space-y-3">
+              <li><Link to="/track-order" className="text-gray-400 hover:text-white transition-colors">Track Your Order</Link></li>
+              <li><Link to="/my-service-tickets" className="text-gray-400 hover:text-white transition-colors">My Service Tickets</Link></li>
+              <li><Link to="/faq" className="text-gray-400 hover:text-white transition-colors">FAQ</Link></li>
+              <li><a href="/blog" className="text-gray-400 hover:text-white transition-colors">Blog</a></li>
+              <li><Link to="/contact" className="text-gray-400 hover:text-white transition-colors">Contact Us</Link></li>
+              <li><Link to="/about" className="text-gray-400 hover:text-white transition-colors">About Us</Link></li>
+            </ul>
+            
+            <h3 className="text-lg font-semibold mb-4 mt-6">Policies</h3>
+            <ul className="space-y-3">
+              <li><Link to="/privacy-policy" className="text-gray-400 hover:text-white transition-colors">Privacy Policy</Link></li>
+              <li><Link to="/terms-and-conditions" className="text-gray-400 hover:text-white transition-colors">Terms & Conditions</Link></li>
+              <li><Link to="/return-policy" className="text-gray-400 hover:text-white transition-colors">Return Policy</Link></li>
+              <li><Link to="/shipping-policy" className="text-gray-400 hover:text-white transition-colors">Shipping Policy</Link></li>
+            </ul>
+          </div>
+
+          {/* Contact Info */}
+          <div>
+            <h3 className="text-lg font-semibold mb-6">Contact Us</h3>
+            <div className="space-y-4">
+              <div className="flex items-start space-x-3">
+                <MapPin className="w-5 h-5 text-red-500 mt-1 flex-shrink-0" />
+                <div>
+                  <div className="font-medium">HRBR Layout Store</div>
+                  <div className="text-gray-400 text-sm">HRBR Layout, Banaswadi, Bengaluru</div>
+                </div>
+              </div>
+              <div className="flex items-start space-x-3">
+                <MapPin className="w-5 h-5 text-red-500 mt-1 flex-shrink-0" />
+                <div>
+                  <div className="font-medium">Malleshwaram Store</div>
+                  <div className="text-gray-400 text-sm">Malleshwaram, Bengaluru</div>
+                </div>
+              </div>
+              <div className="flex items-center space-x-3">
+                <Phone className="w-5 h-5 text-red-500" />
+                <span className="text-gray-400">+91 80 1234 5678</span>
+              </div>
+              <div className="flex items-center space-x-3">
+                <Mail className="w-5 h-5 text-red-500" />
+                <span className="text-gray-400">support@adityaretail.com</span>
+              </div>
+            </div>
+            
+            {/* AI Features Badge */}
+            <div className="mt-6 p-4 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg">
+              <div className="text-sm font-medium mb-1">🤖 AI-Powered Store</div>
+              <div className="text-xs text-blue-100">24/7 intelligent assistance for all your needs</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom Bar */}
+      <div className="border-t border-gray-800">
+        <div className="max-w-7xl mx-auto px-4 py-6">
+          <div className="flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0">
+            <div className="text-gray-400 text-sm">
+              © 2024 Aditya Retail. All rights reserved. | Powered by AI Agents
+            </div>
+            <div className="flex space-x-6">
+              <Link to="/privacy-policy" className="text-gray-400 hover:text-white text-sm transition-colors">Privacy Policy</Link>
+              <Link to="/terms-and-conditions" className="text-gray-400 hover:text-white text-sm transition-colors">Terms of Service</Link>
+              <Link to="/return-policy" className="text-gray-400 hover:text-white text-sm transition-colors">Returns</Link>
+              <Link to="/shipping-policy" className="text-gray-400 hover:text-white text-sm transition-colors">Shipping</Link>
+            </div>
+          </div>
+          
+          {/* Brands */}
+          <div className="mt-6 pt-6 border-t border-gray-800">
+            <div className="text-center">
+              <div className="text-gray-500 text-sm mb-3">Authorized Dealer for Premium Brands</div>
+              <div className="flex justify-center items-center space-x-8">
+                <div className="text-xl font-bold text-green-600">BOSCH</div>
+                <div className="text-xl font-bold text-blue-600">SIEMENS</div>
+                <div className="text-xl font-bold text-orange-600">HINDWARE</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </footer>
+  );
+};
+
+export default Footer;

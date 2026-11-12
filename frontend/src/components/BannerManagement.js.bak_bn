@@ -1,0 +1,647 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { Image as ImageIcon, Plus, Eye, Trash2, Upload, Calendar, BarChart, Sparkles, Wand2, RefreshCw, Loader2 } from 'lucide-react';
+
+
+const BannerManagement = () => {
+  const [banners, setBanners] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [uploadedImage, setUploadedImage] = useState(null);
+  const [imageMode, setImageMode] = useState('upload'); // 'upload' or 'ai'
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiStyle, setAiStyle] = useState('modern');
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiPreviewBase64, setAiPreviewBase64] = useState(null);
+  const [formData, setFormData] = useState({
+    title: '',
+    description: '',
+    image_url: '',
+    link_url: '',
+    display_order: 0,
+    is_active: true,
+    valid_from: new Date().toISOString().split('T')[0],
+    valid_until: '',
+    banner_type: 'promotional'
+  });
+
+  useEffect(() => {
+    fetchBanners();
+  }, []);
+
+  const fetchBanners = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(`${BACKEND_URL}/api/banners/`);
+      const data = await response.json();
+      setBanners(data.banners || []);
+      setLoading(false);
+    } catch (error) {
+      console.error('Error fetching banners:', error);
+      setLoading(false);
+    }
+  };
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formDataUpload = new FormData();
+    formDataUpload.append('file', file);
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/banners/upload`, {
+        method: 'POST',
+        body: formDataUpload
+      });
+
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        setUploadedImage(data.url);
+        setFormData({...formData, image_url: data.url});
+        setAiPreviewBase64(null);
+      }
+    } catch (error) {
+      console.error('Error uploading image:', error);
+      alert('Failed to upload image');
+    }
+  };
+
+  const handleAIGenerate = async () => {
+    if (!aiPrompt.trim()) {
+      alert('Please enter a prompt describing the banner you want');
+      return;
+    }
+    setAiGenerating(true);
+    setAiPreviewBase64(null);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/banners/generate-ai`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: aiPrompt,
+          banner_type: formData.banner_type,
+          style: aiStyle
+        })
+      });
+
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        setAiPreviewBase64(data.image_base64);
+        setUploadedImage(data.image_url);
+        setFormData(prev => ({...prev, image_url: data.image_url}));
+      } else {
+        alert(`AI generation failed: ${data.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error generating AI banner:', error);
+      alert('Failed to generate banner. Please try again.');
+    } finally {
+      setAiGenerating(false);
+    }
+  };
+
+  const resetImageState = () => {
+    setUploadedImage(null);
+    setAiPreviewBase64(null);
+    setFormData(prev => ({...prev, image_url: ''}));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/banners/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData)
+      });
+
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        alert('✅ Banner created successfully!');
+        setShowModal(false);
+        setFormData({
+          title: '',
+          description: '',
+          image_url: '',
+          link_url: '',
+          display_order: 0,
+          is_active: true,
+          valid_from: new Date().toISOString().split('T')[0],
+          valid_until: '',
+          banner_type: 'promotional'
+        });
+        setUploadedImage(null);
+        setAiPreviewBase64(null);
+        setAiPrompt('');
+        setImageMode('upload');
+        fetchBanners();
+      }
+    } catch (error) {
+      console.error('Error creating banner:', error);
+      alert('Failed to create banner');
+    }
+  };
+
+  const handleDelete = async (bannerId) => {
+    if (!window.confirm('Are you sure you want to delete this banner?')) return;
+    
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/banners/${bannerId}`, {
+        method: 'DELETE'
+      });
+
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        alert('Banner deleted!');
+        fetchBanners();
+      }
+    } catch (error) {
+      console.error('Error deleting banner:', error);
+    }
+  };
+
+  const toggleActive = async (bannerId, currentStatus) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/banners/${bannerId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: !currentStatus })
+      });
+
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        fetchBanners();
+      }
+    } catch (error) {
+      console.error('Error updating banner:', error);
+    }
+  };
+
+  const getBannerTypeColor = (type) => {
+    const colors = {
+      promotional: 'bg-blue-100 text-blue-800',
+      sale: 'bg-red-100 text-red-800',
+      new_product: 'bg-green-100 text-green-800',
+      seasonal: 'bg-purple-100 text-purple-800'
+    };
+    return colors[type] || 'bg-gray-100 text-gray-800';
+  };
+
+  if (loading) {
+    return (
+      <div className="p-6 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-700"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 bg-gray-50 min-h-screen">
+      {/* Header */}
+      <div className="mb-6 flex justify-between items-center">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            <ImageIcon className="w-8 h-8 text-amber-700" />
+            Banner Management
+          </h1>
+          <p className="text-gray-600 mt-2">Manage homepage banners and promotional slides</p>
+        </div>
+        <button
+          onClick={() => setShowModal(true)}
+          className="bg-amber-700 text-white px-6 py-3 rounded-lg hover:bg-amber-800 transition-colors flex items-center gap-2"
+        >
+          <Plus className="w-5 h-5" />
+          Create Banner
+        </button>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <div className="bg-white rounded-lg shadow p-4">
+          <div className="text-2xl font-bold text-gray-900">{banners.length}</div>
+          <div className="text-sm text-gray-600">Total Banners</div>
+        </div>
+        <div className="bg-green-50 rounded-lg shadow p-4">
+          <div className="text-2xl font-bold text-green-700">
+            {banners.filter(b => b.is_active).length}
+          </div>
+          <div className="text-sm text-green-600">Active</div>
+        </div>
+        <div className="bg-blue-50 rounded-lg shadow p-4">
+          <div className="text-2xl font-bold text-blue-700">
+            {banners.reduce((sum, b) => sum + (b.views || 0), 0)}
+          </div>
+          <div className="text-sm text-blue-600">Total Views</div>
+        </div>
+        <div className="bg-amber-50 rounded-lg shadow p-4">
+          <div className="text-2xl font-bold text-amber-700">
+            {banners.reduce((sum, b) => sum + (b.clicks || 0), 0)}
+          </div>
+          <div className="text-sm text-amber-600">Total Clicks</div>
+        </div>
+      </div>
+
+      {/* Banners List */}
+      <div className="space-y-4">
+        {banners.map((banner) => (
+          <div key={banner.id} className="bg-white rounded-lg shadow-lg overflow-hidden">
+            <div className="flex flex-col md:flex-row">
+              {/* Banner Preview */}
+              <div className="md:w-1/3 bg-gray-100">
+                {banner.image_url ? (
+                  <img
+                    src={banner.image_url}
+                    alt={banner.title}
+                    className="w-full h-48 object-cover"
+                  />
+                ) : (
+                  <div className="w-full h-48 flex items-center justify-center">
+                    <ImageIcon className="w-16 h-16 text-gray-400" />
+                  </div>
+                )}
+              </div>
+
+              {/* Banner Details */}
+              <div className="md:w-2/3 p-6">
+                <div className="flex justify-between items-start mb-4">
+                  <div>
+                    <h3 className="text-xl font-bold text-gray-900">{banner.title}</h3>
+                    <p className="text-sm text-gray-600 mt-1">{banner.description}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <span className={`px-3 py-1 rounded-full text-xs font-semibold ${getBannerTypeColor(banner.banner_type)}`}>
+                      {banner.banner_type}
+                    </span>
+                    <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                      banner.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                    }`}>
+                      {banner.is_active ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                  <div>
+                    <div className="text-xs text-gray-500">Display Order</div>
+                    <div className="font-semibold">{banner.display_order}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-500">Views</div>
+                    <div className="font-semibold flex items-center gap-1">
+                      <Eye className="w-4 h-4" />
+                      {banner.views || 0}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-500">Clicks</div>
+                    <div className="font-semibold flex items-center gap-1">
+                      <BarChart className="w-4 h-4" />
+                      {banner.clicks || 0}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-500">CTR</div>
+                    <div className="font-semibold">
+                      {banner.views > 0 ? ((banner.clicks / banner.views) * 100).toFixed(2) : 0}%
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs text-gray-600 mb-4">
+                  <Calendar className="w-4 h-4" />
+                  <span>
+                    {new Date(banner.valid_from).toLocaleDateString()} - 
+                    {banner.valid_until ? new Date(banner.valid_until).toLocaleDateString() : ' Ongoing'}
+                  </span>
+                  {banner.link_url && (
+                    <span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs truncate max-w-[200px]" title={banner.link_url}>
+                      Links to: {banner.link_url}
+                    </span>
+                  )}
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => toggleActive(banner.id, banner.is_active)}
+                    className={`px-4 py-2 rounded-lg transition-colors ${
+                      banner.is_active
+                        ? 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                        : 'bg-green-600 text-white hover:bg-green-700'
+                    }`}
+                  >
+                    {banner.is_active ? 'Deactivate' : 'Activate'}
+                  </button>
+                  <button
+                    onClick={() => handleDelete(banner.id)}
+                    className="bg-red-50 text-red-600 px-4 py-2 rounded-lg hover:bg-red-100 transition-colors flex items-center gap-2"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Create Modal */}
+      {showModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full my-8">
+            <div className="p-6">
+              <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
+                <ImageIcon className="w-6 h-6 text-amber-700" />
+                Create Banner
+              </h2>
+
+              <form onSubmit={handleSubmit}>
+                {/* Image Source Tabs */}
+                <div className="mb-6">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Banner Image</label>
+                  
+                  {/* Tab Switcher */}
+                  <div className="flex rounded-lg border border-gray-200 mb-4 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setImageMode('upload')}
+                      className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                        imageMode === 'upload'
+                          ? 'bg-amber-700 text-white'
+                          : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
+                      }`}
+                      data-testid="banner-tab-upload"
+                    >
+                      <Upload className="w-4 h-4" />
+                      Upload Image
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setImageMode('ai')}
+                      className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                        imageMode === 'ai'
+                          ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white'
+                          : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
+                      }`}
+                      data-testid="banner-tab-ai"
+                    >
+                      <Wand2 className="w-4 h-4" />
+                      AI Generate
+                    </button>
+                  </div>
+
+                  {/* Preview (shared between both modes) */}
+                  {uploadedImage ? (
+                    <div className="border-2 border-green-300 bg-green-50 rounded-lg p-4 text-center mb-4">
+                      <img 
+                        src={aiPreviewBase64 ? `data:image/png;base64,${aiPreviewBase64}` : uploadedImage}
+                        alt="Banner Preview" 
+                        className="max-h-52 mx-auto rounded-lg shadow-md mb-3" 
+                      />
+                      <div className="flex items-center justify-center gap-3">
+                        <span className="text-sm text-green-700 font-medium">
+                          {aiPreviewBase64 ? 'AI Generated' : 'Uploaded'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={resetImageState}
+                          className="text-sm text-red-600 hover:text-red-800 underline"
+                        >
+                          Remove
+                        </button>
+                        {imageMode === 'ai' && (
+                          <button
+                            type="button"
+                            onClick={handleAIGenerate}
+                            disabled={aiGenerating}
+                            className="text-sm text-purple-600 hover:text-purple-800 underline flex items-center gap-1"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${aiGenerating ? 'animate-spin' : ''}`} />
+                            Regenerate
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ) : imageMode === 'upload' ? (
+                    /* Upload Mode */
+                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
+                      <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                      <label className="cursor-pointer">
+                        <span className="text-amber-600 hover:text-amber-700 font-medium">Upload a file</span>
+                        <input
+                          type="file"
+                          className="hidden"
+                          accept="image/*"
+                          onChange={handleImageUpload}
+                        />
+                      </label>
+                      <p className="text-xs text-gray-500 mt-2">PNG, JPG, WEBP up to 10MB</p>
+                      <p className="text-xs text-gray-500">Recommended: 1920x600px</p>
+                    </div>
+                  ) : (
+                    /* AI Generate Mode */
+                    <div className="border-2 border-dashed border-purple-300 bg-purple-50/50 rounded-lg p-6" data-testid="ai-banner-generator">
+                      {aiGenerating ? (
+                        <div className="text-center py-8">
+                          <Loader2 className="w-12 h-12 text-purple-600 mx-auto mb-4 animate-spin" />
+                          <p className="text-purple-700 font-medium">Generating your banner...</p>
+                          <p className="text-sm text-purple-500 mt-1">This may take 30-60 seconds</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-2 text-purple-700 mb-2">
+                            <Sparkles className="w-5 h-5" />
+                            <span className="font-semibold text-sm">Describe your banner</span>
+                          </div>
+                          <textarea
+                            value={aiPrompt}
+                            onChange={(e) => setAiPrompt(e.target.value)}
+                            placeholder="e.g., Summer sale on Bosch refrigerators with 40% discount, featuring modern kitchen with stainless steel appliance, cool blue tones..."
+                            className="w-full px-4 py-3 border border-purple-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 text-sm resize-none"
+                            rows="3"
+                            data-testid="ai-banner-prompt"
+                          />
+                          <div className="flex gap-3">
+                            <div className="flex-1">
+                              <label className="block text-xs font-medium text-purple-700 mb-1">Style</label>
+                              <select
+                                value={aiStyle}
+                                onChange={(e) => setAiStyle(e.target.value)}
+                                className="w-full px-3 py-2 border border-purple-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500"
+                                data-testid="ai-banner-style"
+                              >
+                                <option value="modern">Modern & Clean</option>
+                                <option value="bold">Bold & Vibrant</option>
+                                <option value="minimal">Minimal & Elegant</option>
+                                <option value="elegant">Luxury & Premium</option>
+                              </select>
+                            </div>
+                            <div className="flex items-end">
+                              <button
+                                type="button"
+                                onClick={handleAIGenerate}
+                                disabled={!aiPrompt.trim()}
+                                className="flex items-center gap-2 px-6 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-all"
+                                data-testid="ai-banner-generate-btn"
+                              >
+                                <Wand2 className="w-4 h-4" />
+                                Generate
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-xs text-purple-500">Tip: Be specific about products, colors, mood, and style for best results</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Banner Title</label>
+                    <input
+                      type="text"
+                      value={formData.title}
+                      onChange={(e) => setFormData({...formData, title: e.target.value})}
+                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-amber-600"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
+                    <textarea
+                      value={formData.description}
+                      onChange={(e) => setFormData({...formData, description: e.target.value})}
+                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-amber-600"
+                      rows="2"
+                    ></textarea>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Banner Type</label>
+                      <select
+                        value={formData.banner_type}
+                        onChange={(e) => setFormData({...formData, banner_type: e.target.value})}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-amber-600"
+                      >
+                        <option value="promotional">Promotional</option>
+                        <option value="sale">Sale</option>
+                        <option value="new_product">New Product</option>
+                        <option value="seasonal">Seasonal</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Display Order</label>
+                      <input
+                        type="number"
+                        value={formData.display_order}
+                        onChange={(e) => setFormData({...formData, display_order: parseInt(e.target.value)})}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-amber-600"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Link URL (where banner clicks go)</label>
+                    <div className="space-y-2">
+                      <select
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            setFormData({...formData, link_url: e.target.value});
+                          }
+                        }}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-amber-600 text-sm"
+                        value=""
+                      >
+                        <option value="">-- Quick Link Picker --</option>
+                        <optgroup label="Categories">
+                          <option value="/washing-machine">Washing Machine</option>
+                          <option value="/refrigerator">Refrigerator</option>
+                          <option value="/gas-hob">Gas Hob</option>
+                          <option value="/induction-hob">Induction Hob</option>
+                          <option value="/dishwasher">Dishwasher</option>
+                          <option value="/sink">Sink</option>
+                          <option value="/chimney">Chimney</option>
+                          <option value="/oven">Oven</option>
+                          <option value="/mixer-grinder">Mixer Grinder</option>
+                          <option value="/air-fryer">Air Fryer</option>
+                          <option value="/coffee-machine">Coffee Machine</option>
+                          <option value="/detergent">Detergent</option>
+                        </optgroup>
+                        <optgroup label="Pages">
+                          <option value="/contact">Contact Us</option>
+                          <option value="/about">About Us</option>
+                          <option value="/blog">Blog</option>
+                          <option value="/faq">FAQ</option>
+                        </optgroup>
+                      </select>
+                      <input
+                        type="text"
+                        value={formData.link_url}
+                        onChange={(e) => setFormData({...formData, link_url: e.target.value})}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-amber-600"
+                        placeholder="/category/refrigerator or https://..."
+                      />
+                      <p className="text-xs text-gray-500">Use relative path for internal links (e.g. /category/refrigerator) or full URL for external links</p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Valid From</label>
+                      <input
+                        type="date"
+                        value={formData.valid_from}
+                        onChange={(e) => setFormData({...formData, valid_from: e.target.value})}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-amber-600"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Valid Until (optional)</label>
+                      <input
+                        type="date"
+                        value={formData.valid_until}
+                        onChange={(e) => setFormData({...formData, valid_until: e.target.value})}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-amber-600"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-3 mt-6">
+                  <button
+                    type="button"
+                    onClick={() => setShowModal(false)}
+                    className="flex-1 px-4 py-2 border rounded-lg hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 bg-amber-700 text-white px-4 py-2 rounded-lg hover:bg-amber-800"
+                    disabled={!uploadedImage}
+                  >
+                    Create Banner
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default BannerManagement;

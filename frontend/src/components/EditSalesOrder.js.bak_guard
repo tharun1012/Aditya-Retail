@@ -1,0 +1,1368 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
+import { 
+  FileText, Save, ArrowLeft, User, MapPin, Package, IndianRupee,
+  Plus, Trash2, AlertCircle, CheckCircle, X, Edit, RefreshCw, Search
+} from 'lucide-react';
+
+const EditSalesOrder = ({ isStoreView = false, returnPath = null }) => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { orderId } = useParams();
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [order, setOrder] = useState(null);
+  const [message, setMessage] = useState({ type: '', text: '' });
+  const [products, setProducts] = useState([]);
+  const [hsnCodes, setHsnCodes] = useState([]);
+  const [productSearch, setProductSearch] = useState({});
+  const [hsnSuggestions, setHsnSuggestions] = useState({});
+  const [showAddProductModal, setShowAddProductModal] = useState(false);
+  const [addProductForIndex, setAddProductForIndex] = useState(null);
+  const [addProductLoading, setAddProductLoading] = useState(false);
+  const [newProductHsnSuggestions, setNewProductHsnSuggestions] = useState([]);
+  const [manualHsnMode, setManualHsnMode] = useState(false);
+  const [manualHsnGstRate, setManualHsnGstRate] = useState(18);
+  const [newProduct, setNewProduct] = useState({
+    name: '', brand: '', model_number: '', price: 0, hsn_code: '',
+    category: '', description: '', current_stock: 0
+  });
+  
+  // Get user info based on view type
+  const adminUser = JSON.parse(localStorage.getItem('adminUser') || '{}');
+  const storeData = JSON.parse(localStorage.getItem('storeData') || '{}');
+  const currentUser = isStoreView ? storeData : adminUser;
+
+  // Editable state
+  const [customerDetails, setCustomerDetails] = useState({});
+  const [items, setItems] = useState([]);
+  const [invoiceDetails, setInvoiceDetails] = useState({});
+  
+  // Back navigation based on view type
+  const handleBack = () => {
+    const target = returnPath || location.state?.returnPath;
+    if (target) {
+      navigate(target, { state: location.state?.returnState });
+    } else if (isStoreView) {
+      navigate('/store/orders');
+    } else {
+      navigate('/admin/sales-orders');
+    }
+  };
+
+  useEffect(() => {
+    fetchOrder();
+    fetchProducts();
+    fetchHsnCodes();
+  }, [orderId]);
+
+  const fetchOrder = async () => {
+    setLoading(true);
+    try {
+      // First try direct fetch by ID
+      let foundOrder = null;
+      
+      const directResponse = await fetch(`${BACKEND_URL}/api/invoices/offline/${orderId}`);
+      if (directResponse.ok) {
+        const directData = await directResponse.json();
+        if (directData.status === 'success' && directData.invoice) {
+          foundOrder = directData.invoice;
+        } else if (directData && directData.id) {
+          foundOrder = directData;
+        }
+      }
+      
+      // Fallback to search if direct fetch fails
+      if (!foundOrder) {
+        const searchResponse = await fetch(`${BACKEND_URL}/api/invoices/offline/?search=${orderId}&limit=100`);
+        const searchData = await searchResponse.json();
+        
+        if (searchData.status === 'success' && searchData.invoices?.length > 0) {
+          foundOrder = searchData.invoices.find(inv => inv.id === orderId || inv.invoice_number === orderId);
+        }
+      }
+      
+      if (foundOrder) {
+        setOrder(foundOrder);
+        setCustomerDetails(foundOrder.customer || {
+          name: foundOrder.customer_name,
+          phone: foundOrder.customer_phone,
+          email: foundOrder.customer_email,
+          address: foundOrder.customer_address,
+          gstin: foundOrder.customer_gst
+        });
+        setItems((foundOrder.items || []).map(it => ({
+          ...it,
+          has_serial_tracking: (it.serial_numbers || []).length > 0,
+          serial_numbers: it.serial_numbers || [],
+          available_serials: [],
+          manual_serials: (it.serial_numbers || []).join(', ')
+        })));
+        setInvoiceDetails({
+          payment_mode: foundOrder.payment_mode,
+          discount: foundOrder.discount_percentage || 0,
+          delivery_charges: foundOrder.delivery_charges || 0,
+          round_off: foundOrder.round_off || 0,
+          notes: foundOrder.notes || '',
+          order_source: foundOrder.order_source || '',
+          document_type: foundOrder.document_type || 'invoice',
+          expected_delivery_date: foundOrder.expected_delivery_date || '',
+          immediate_delivery: foundOrder.immediate_delivery !== undefined ? foundOrder.immediate_delivery : true
+        });
+      } else {
+        setMessage({ type: 'error', text: 'Order not found. It may have been deleted or converted.' });
+      }
+    } catch (error) {
+      console.error('Error fetching order:', error);
+      setMessage({ type: 'error', text: 'Failed to fetch order: ' + error.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchProducts = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products/`);
+      const data = await response.json();
+      setProducts(data.products || data || []);
+    } catch (error) {
+      console.error('Error fetching products:', error);
+    }
+  };
+
+  const fetchHsnCodes = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/hsn/?active_only=true`);
+      const data = await response.json();
+      setHsnCodes(data || []);
+    } catch (error) {
+      console.error('Error fetching HSN codes:', error);
+    }
+  };
+
+  const updateItem = (index, field, value) => {
+    setItems(prev => prev.map((it, i) => i === index ? { ...it, [field]: value } : it));
+  };
+
+  const patchItem = (index, patch) => {
+    setItems(prev => prev.map((it, i) => i === index ? { ...it, ...patch } : it));
+  };
+
+  const addItem = () => {
+    setItems(prev => [...prev, {
+      product_id: '', product_name: '', hsn_code: '', quantity: 1, rate: 0,
+      discount: 0, tax_rate: 18, has_serial_tracking: false,
+      serial_numbers: [], available_serials: [], manual_serials: ''
+    }]);
+  };
+
+  const removeItem = (index) => {
+    if (items.length > 1) {
+      setItems(prev => prev.filter((_, i) => i !== index));
+    }
+  };
+
+  const getFilteredProducts = (term) => {
+    if (!term) return products;
+    const t = term.toLowerCase();
+    return products.filter(p =>
+      p.name?.toLowerCase().includes(t) ||
+      p.brand?.toLowerCase().includes(t) ||
+      p.model_number?.toLowerCase().includes(t)
+    );
+  };
+
+  // GST number state code decides CGST+SGST vs IGST ('29' = Karnataka), same as Create page
+  const isInterStateGst = () => {
+    const gst = ((customerDetails.gst_number || customerDetails.gstin || '') + '').trim();
+    if (!gst) return false;
+    return gst.substring(0, 2) !== '29';
+  };
+
+  const calculateItemTotal = (item) => {
+    const inclusivePrice = (item.rate || 0) * (item.quantity || 1);
+    const discountAmount = (inclusivePrice * (item.discount || 0)) / 100;
+    const finalPrice = inclusivePrice - discountAmount;
+    const taxRate = item.tax_rate || 18;
+    const taxableAmount = finalPrice / (1 + taxRate / 100);
+    const taxAmount = finalPrice - taxableAmount;
+    const interState = isInterStateGst();
+    return {
+      grossAmount: inclusivePrice,
+      discountAmount,
+      taxableAmount,
+      taxAmount,
+      cgst: interState ? 0 : taxAmount / 2,
+      sgst: interState ? 0 : taxAmount / 2,
+      igst: interState ? taxAmount : 0,
+      total: finalPrice
+    };
+  };
+
+  const fetchHsnSuggestion = async (productName, index) => {
+    if (!productName || productName.length < 3) {
+      setHsnSuggestions(prev => ({ ...prev, [index]: [] }));
+      return;
+    }
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/hsn/suggest?product_name=${encodeURIComponent(productName)}`);
+      const data = await response.json();
+      if (data.suggestions && data.suggestions.length > 0) {
+        setHsnSuggestions(prev => ({ ...prev, [index]: data.suggestions }));
+        const top = data.suggestions[0];
+        if (!items[index]?.hsn_code && top.match_score >= 50) {
+          patchItem(index, { hsn_code: top.code, tax_rate: top.gst_rate || 18 });
+        }
+      } else {
+        setHsnSuggestions(prev => ({ ...prev, [index]: [] }));
+      }
+    } catch (error) {
+      console.error('Error fetching HSN suggestions:', error);
+    }
+  };
+
+  const applyHsnSuggestion = (index, suggestion) => {
+    patchItem(index, { hsn_code: suggestion.code, tax_rate: suggestion.gst_rate || 18 });
+    setHsnSuggestions(prev => ({ ...prev, [index]: null }));
+  };
+
+  const fetchNewProductHsnSuggestion = async (productName) => {
+    if (!productName || productName.length < 2) {
+      setNewProductHsnSuggestions([]);
+      return;
+    }
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/hsn/suggest?product_name=${encodeURIComponent(productName)}`);
+      const data = await response.json();
+      if (data.suggestions && data.suggestions.length > 0) {
+        setNewProductHsnSuggestions(data.suggestions);
+        const top = data.suggestions[0];
+        if (!newProduct.hsn_code && top.match_score >= 50) {
+          setNewProduct(prev => ({ ...prev, hsn_code: top.code }));
+        }
+      } else {
+        setNewProductHsnSuggestions([]);
+      }
+    } catch (error) {
+      console.error('Error fetching HSN suggestions for new product:', error);
+    }
+  };
+
+  const handleProductSelect = async (index, productId) => {
+    const product = products.find(p => p.id === productId);
+    if (!product) return;
+    const productHsn = product.hsn_code || '';
+    const hsnData = hsnCodes.find(h => h.code === productHsn);
+    const gstRate = hsnData?.gst_rate || 18;
+
+    let hasSerialTracking = false;
+    let availableSerials = [];
+    const storeCode = order?.store_code;
+    try {
+      const chk = await fetch(`${BACKEND_URL}/api/grn/serial-inventory/check-product/${productId}${storeCode ? `?store_code=${storeCode}` : ''}`);
+      const chkData = await chk.json();
+      if (chkData.status === 'success' && chkData.has_serial_tracking) {
+        hasSerialTracking = true;
+        const sr = await fetch(`${BACKEND_URL}/api/grn/serial-inventory/product/${productId}/available${storeCode ? `?store_code=${storeCode}` : ''}`);
+        const srData = await sr.json();
+        if (srData.status === 'success') availableSerials = srData.serials || [];
+      }
+    } catch (error) {
+      console.error('Error checking serial tracking:', error);
+    }
+
+    patchItem(index, {
+      product_id: product.id,
+      product_name: product.name,
+      rate: product.price || 0,
+      hsn_code: productHsn,
+      tax_rate: gstRate,
+      available_stock: product.current_stock || 0,
+      stock_warning: product.current_stock <= 0 ? 'OUT_OF_STOCK' :
+                     product.current_stock <= (product.reorder_level || 5) ? 'LOW_STOCK' : null,
+      has_serial_tracking: hasSerialTracking,
+      serial_numbers: [],
+      manual_serials: '',
+      available_serials: availableSerials
+    });
+  };
+
+  const toggleSerial = (index, sn) => {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== index) return it;
+      const cur = it.serial_numbers || [];
+      if (cur.includes(sn)) return { ...it, serial_numbers: cur.filter(x => x !== sn) };
+      if (cur.length >= (it.quantity || 1)) return it;
+      return { ...it, serial_numbers: [...cur, sn] };
+    }));
+  };
+
+  const setManualSerials = (index, value) => {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== index) return it;
+      const manualList = value.split(',').map(x => x.trim()).filter(x => x.length > 0);
+      const inventorySelected = (it.serial_numbers || [])
+        .filter(sn => (it.available_serials || []).some(a => a.serial_number === sn));
+      return {
+        ...it,
+        manual_serials: value,
+        serial_numbers: [...new Set([...inventorySelected, ...manualList])]
+      };
+    }));
+  };
+
+  const removeSerial = (index, sn) => {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== index) return it;
+      const manual = (it.manual_serials || '').split(',').map(x => x.trim()).filter(x => x && x !== sn).join(', ');
+      return { ...it, serial_numbers: (it.serial_numbers || []).filter(x => x !== sn), manual_serials: manual };
+    }));
+  };
+
+  const openAddProductModal = (itemIndex) => {
+    setAddProductForIndex(itemIndex);
+    setNewProduct({ name: '', brand: '', model_number: '', price: 0, hsn_code: '', category: '', description: '', current_stock: 0 });
+    setManualHsnMode(false);
+    setManualHsnGstRate(18);
+    setNewProductHsnSuggestions([]);
+    setShowAddProductModal(true);
+  };
+
+  const handleCreateProduct = async () => {
+    if (!newProduct.name || !newProduct.price || !newProduct.hsn_code) {
+      setMessage({ type: 'error', text: 'Please fill in product name, price, and HSN code' });
+      return;
+    }
+    setAddProductLoading(true);
+    try {
+      let gstRate = 18;
+      const existingHsn = hsnCodes.find(h => h.code === newProduct.hsn_code);
+      if (manualHsnMode && !existingHsn) {
+        try {
+          await fetch(`${BACKEND_URL}/api/hsn/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              code: newProduct.hsn_code,
+              description: `HSN ${newProduct.hsn_code} - ${newProduct.category || newProduct.name}`,
+              gst_rate: manualHsnGstRate,
+              category: newProduct.category || 'Uncategorized',
+              is_active: true
+            })
+          });
+          await fetchHsnCodes();
+        } catch (hsnError) {
+          console.log('HSN code might already exist or failed to save:', hsnError);
+        }
+        gstRate = manualHsnGstRate;
+      } else if (existingHsn) {
+        gstRate = existingHsn.gst_rate || 18;
+      }
+
+      const response = await fetch(`${BACKEND_URL}/api/products`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...newProduct,
+          id: `PROD-${Date.now()}`,
+          price: parseFloat(newProduct.price),
+          current_stock: parseInt(newProduct.current_stock) || 0
+        })
+      });
+      const data = await response.json();
+
+      if (response.ok) {
+        await fetchProducts();
+        if (addProductForIndex !== null) {
+          patchItem(addProductForIndex, {
+            product_id: data.product?.id || data.id,
+            product_name: newProduct.name,
+            rate: parseFloat(newProduct.price),
+            hsn_code: newProduct.hsn_code,
+            tax_rate: gstRate,
+            available_stock: parseInt(newProduct.current_stock) || 0
+          });
+        }
+        setMessage({ type: 'success', text: `Product "${newProduct.name}" created successfully!` });
+        setShowAddProductModal(false);
+        setManualHsnMode(false);
+        setManualHsnGstRate(18);
+      } else {
+        setMessage({ type: 'error', text: data.detail || 'Failed to create product' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Error creating product: ' + error.message });
+    } finally {
+      setAddProductLoading(false);
+    }
+  };
+
+  const calculateTotals = () => {
+    let itemsTotal = 0;
+    let taxTotal = 0;
+    let taxableTotal = 0;
+
+    items.forEach(item => {
+      const inclusivePrice = (item.rate || 0) * (item.quantity || 1);
+      const itemDiscount = (inclusivePrice * (item.discount || 0)) / 100;
+      const finalPrice = inclusivePrice - itemDiscount;
+      
+      const taxRate = item.tax_rate || 18;
+      const taxableAmount = finalPrice / (1 + taxRate / 100);
+      const taxAmount = finalPrice - taxableAmount;
+      
+      itemsTotal += finalPrice;
+      taxTotal += taxAmount;
+      taxableTotal += taxableAmount;
+    });
+
+    const discountAmount = (itemsTotal * (invoiceDetails.discount || 0)) / 100;
+    const finalTotal = itemsTotal - discountAmount + (invoiceDetails.delivery_charges || 0) + (invoiceDetails.round_off || 0);
+
+    return {
+      itemsTotal: Math.round(itemsTotal * 100) / 100,
+      taxTotal: Math.round(taxTotal * 100) / 100,
+      taxableTotal: Math.round(taxableTotal * 100) / 100,
+      discountAmount: Math.round(discountAmount * 100) / 100,
+      finalTotal: Math.round(finalTotal * 100) / 100
+    };
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const payload = {
+        customer: customerDetails,
+        items: items.map(item => ({
+          product_id: item.product_id,
+          product_name: item.product_name,
+          hsn_code: item.hsn_code,
+          quantity: parseInt(item.quantity) || 1,
+          rate: parseFloat(item.rate) || 0,
+          discount: parseFloat(item.discount) || 0,
+          tax_rate: parseFloat(item.tax_rate) || 18,
+          has_serial_tracking: !!item.has_serial_tracking,
+          serial_numbers: item.has_serial_tracking ? (item.serial_numbers || []) : []
+        })),
+        payment_mode: invoiceDetails.payment_mode,
+        discount: invoiceDetails.discount,
+        delivery_charges: invoiceDetails.delivery_charges,
+        round_off: invoiceDetails.round_off,
+        notes: invoiceDetails.notes,
+        order_source: invoiceDetails.order_source,
+        expected_delivery_date: invoiceDetails.expected_delivery_date || null,
+        immediate_delivery: invoiceDetails.immediate_delivery,
+        edited_by: adminUser.email || 'admin'
+      };
+
+      const storeToken = localStorage.getItem('storeToken');
+      const response = await fetch(`${BACKEND_URL}/api/invoices/offline/${order.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(storeToken ? { 'Authorization': `Bearer ${storeToken}` } : {})
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+
+      if (data.status === 'success') {
+        setMessage({ type: 'success', text: 'Order updated successfully' });
+        setTimeout(() => handleBack(), 1500);
+      } else {
+        setMessage({ type: 'error', text: data.detail || 'Failed to update order' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Error updating order' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const totals = calculateTotals();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
+      </div>
+    );
+  }
+
+  if (!order) {
+    return (
+      <div className="min-h-screen bg-gray-50 p-6">
+        <div className="text-center py-12">
+          <AlertCircle className="w-16 h-16 text-red-300 mx-auto mb-4" />
+          <h3 className="text-lg font-medium text-gray-900">Order not found</h3>
+          <button onClick={handleBack} className="mt-4 text-blue-600 hover:underline">
+            Back to Orders
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-6" data-testid="edit-sales-order">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={handleBack}
+            className="p-2 text-gray-600 hover:bg-white rounded-lg"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+              <Edit className="w-7 h-7 text-blue-600" />
+              Edit Sales Order
+            </h1>
+            <p className="text-gray-600">{order.invoice_number}</p>
+          </div>
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 disabled:opacity-50"
+          data-testid="save-order-btn"
+        >
+          <Save className="w-4 h-4" />
+          {saving ? 'Saving...' : 'Save Changes'}
+        </button>
+      </div>
+
+      {/* Message */}
+      {message.text && (
+        <div className={`mb-4 p-4 rounded-lg flex items-center gap-2 ${
+          message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+        }`}>
+          {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+          {message.text}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Customer Details */}
+        <div className="lg:col-span-2 space-y-6">
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <User className="w-5 h-5 text-blue-600" />
+              Customer Details
+            </h2>
+
+            {/* B2B / B2C Toggle */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Customer Type</label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCustomerDetails({...customerDetails, customer_type: 'B2C'})}
+                  className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 transition-all ${
+                    customerDetails.customer_type === 'B2C'
+                      ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                >
+                  <span className="font-medium">B2C</span>
+                  <span className="text-xs text-gray-500">(Individual)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCustomerDetails({...customerDetails, customer_type: 'B2B'})}
+                  className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 transition-all ${
+                    customerDetails.customer_type === 'B2B'
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                >
+                  <span className="font-medium">B2B</span>
+                  <span className="text-xs text-gray-500">(Business)</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                <input
+                  type="text"
+                  value={customerDetails.name || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, name: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Phone *</label>
+                <input
+                  type="tel"
+                  value={customerDetails.phone || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, phone: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={customerDetails.email || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, email: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">GST Number</label>
+                <input
+                  type="text"
+                  value={customerDetails.gst_number || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, gst_number: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">MSME/Udyam Number</label>
+                <input
+                  type="text"
+                  value={customerDetails.msme_udyam_number || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, msme_udyam_number: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                  placeholder="e.g., UDYAM-KA-01-0123456"
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                <input
+                  type="text"
+                  value={customerDetails.address || customerDetails.billing_address || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, address: e.target.value, billing_address: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">City</label>
+                <input
+                  type="text"
+                  value={customerDetails.city || customerDetails.billing_city || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, city: e.target.value, billing_city: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">State</label>
+                <input
+                  type="text"
+                  value={customerDetails.state || customerDetails.billing_state || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, state: e.target.value, billing_state: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Pincode</label>
+                <input
+                  type="text"
+                  value={customerDetails.pincode || customerDetails.billing_pincode || ''}
+                  onChange={(e) => setCustomerDetails({...customerDetails, pincode: e.target.value, billing_pincode: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Items */}
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <Package className="w-5 h-5 text-green-600" />
+                Items
+              </h2>
+              <button
+                type="button"
+                onClick={addItem}
+                className="px-3 py-1 text-sm bg-green-100 text-green-700 rounded-lg hover:bg-green-200 flex items-center gap-1"
+              >
+                <Plus className="w-4 h-4" />
+                Add Item
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {items.map((item, index) => (
+                <div key={index} className="border rounded-lg p-4 relative">
+                  {items.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeItem(index)}
+                      className="absolute top-2 right-2 text-red-600 hover:bg-red-50 p-1 rounded"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+
+                  <div className="grid grid-cols-6 gap-3">
+                    <div className="col-span-4">
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Search & Select Product *</label>
+                      <div className="flex gap-2">
+                        <div className="flex-1 relative">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                          <input
+                            type="text"
+                            value={productSearch[index] || ''}
+                            onChange={(e) => setProductSearch({ ...productSearch, [index]: e.target.value })}
+                            className="w-full pl-10 pr-3 py-2 border rounded text-sm"
+                            placeholder="Type model no, brand or product name to search..."
+                          />
+                          {productSearch[index] && productSearch[index].length > 1 && (
+                            <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                              {getFilteredProducts(productSearch[index]).length === 0 ? (
+                                <div className="p-3 text-sm text-gray-500">No products found matching "{productSearch[index]}"</div>
+                              ) : (
+                                getFilteredProducts(productSearch[index]).slice(0, 10).map(product => (
+                                  <div
+                                    key={product.id}
+                                    onClick={() => {
+                                      handleProductSelect(index, product.id);
+                                      setProductSearch({ ...productSearch, [index]: '' });
+                                    }}
+                                    className="p-3 hover:bg-emerald-50 cursor-pointer border-b last:border-b-0"
+                                  >
+                                    <div className="font-medium text-gray-900">{product.name}</div>
+                                    <div className="text-xs text-gray-500 flex gap-2 mt-1">
+                                      <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{product.brand}</span>
+                                      {product.model_number && <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{product.model_number}</span>}
+                                      <span className="text-emerald-600 font-medium">₹{product.price?.toLocaleString()}</span>
+                                      <span className={`px-1.5 py-0.5 rounded ${product.current_stock > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                        Stock: {product.current_stock || 0}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <select
+                          value={item.product_id || ''}
+                          onChange={(e) => { if (e.target.value) handleProductSelect(index, e.target.value); }}
+                          className="w-40 px-3 py-2 border rounded text-sm bg-white"
+                        >
+                          <option value="">All Products ▼</option>
+                          {products.map(product => (
+                            <option key={product.id} value={product.id}>
+                              {product.model_number || product.name?.substring(0, 30)}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => openAddProductModal(index)}
+                          className="px-3 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 flex items-center gap-1 whitespace-nowrap"
+                          title="Add new product to inventory"
+                        >
+                          <Package className="w-4 h-4" />
+                          + New
+                        </button>
+                      </div>
+                      <div className="text-xs mt-1">
+                        {item.product_id ? (
+                          <div>
+                            <span className="text-green-600 font-medium">✓ Selected: {item.product_name}</span>
+                            {item.stock_warning === 'OUT_OF_STOCK' && (
+                              <div className="mt-1 bg-red-50 border border-red-200 rounded px-2 py-1 text-red-700">
+                                ⚠️ <span className="font-semibold">OUT OF STOCK</span> - Available: {item.available_stock || 0} units
+                              </div>
+                            )}
+                            {item.stock_warning === 'LOW_STOCK' && (
+                              <div className="mt-1 bg-orange-50 border border-orange-200 rounded px-2 py-1 text-orange-700">
+                                ⚠️ <span className="font-semibold">LOW STOCK</span> - Available: {item.available_stock || 0} units
+                              </div>
+                            )}
+                            {!item.stock_warning && item.available_stock !== undefined && (
+                              <div className="mt-1 text-gray-600">Stock available: {item.available_stock} units</div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-gray-500">Start typing or select from dropdown</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Product Name (Manual)</label>
+                      <input
+                        type="text"
+                        value={item.product_name || ''}
+                        onChange={(e) => {
+                          updateItem(index, 'product_name', e.target.value);
+                          fetchHsnSuggestion(e.target.value, index);
+                        }}
+                        className="w-full px-3 py-2 border rounded text-sm"
+                        placeholder="Custom product/service name"
+                      />
+                      <div className="text-xs text-gray-500 mt-1">For custom items not in inventory</div>
+                      {hsnSuggestions[index] && hsnSuggestions[index].length > 0 && !item.product_id && (
+                        <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
+                          <div className="text-xs font-medium text-blue-800 mb-1">💡 Suggested HSN Codes:</div>
+                          <div className="space-y-1">
+                            {hsnSuggestions[index].slice(0, 3).map((sg, sIdx) => (
+                              <button
+                                key={sIdx}
+                                type="button"
+                                onClick={() => applyHsnSuggestion(index, sg)}
+                                className={`w-full text-left px-2 py-1 rounded text-xs hover:bg-blue-100 ${item.hsn_code === sg.code ? 'bg-blue-200' : 'bg-white'}`}
+                              >
+                                <span className="font-semibold text-blue-700">{sg.code}</span>
+                                <span className="text-gray-600 ml-2">{sg.category || sg.description?.substring(0, 35)}</span>
+                                <span className="text-green-600 ml-2 font-medium">{sg.gst_rate}% GST</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-5 gap-3 mt-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">HSN Code *</label>
+                      <input
+                        type="text"
+                        list={`hsn-list-${index}`}
+                        value={item.hsn_code || ''}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          const selectedHsn = hsnCodes.find(h => h.code === value);
+                          patchItem(index, selectedHsn && selectedHsn.gst_rate
+                            ? { hsn_code: value, tax_rate: selectedHsn.gst_rate }
+                            : { hsn_code: value });
+                        }}
+                        className="w-full px-3 py-2 border rounded text-sm"
+                        placeholder="Type or select HSN"
+                      />
+                      <datalist id={`hsn-list-${index}`}>
+                        {hsnCodes.map(hsn => (
+                          <option key={hsn.id || hsn.code} value={hsn.code}>
+                            {hsn.description?.substring(0, 40)}
+                          </option>
+                        ))}
+                      </datalist>
+                      {item.hsn_code && hsnCodes.find(h => h.code === item.hsn_code) && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {hsnCodes.find(h => h.code === item.hsn_code)?.description?.substring(0, 35)}...
+                        </div>
+                      )}
+                      {item.hsn_code && !hsnCodes.find(h => h.code === item.hsn_code) && (
+                        <div className="text-xs text-amber-600 mt-1">Custom HSN code</div>
+                      )}
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Quantity *</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={item.quantity || 1}
+                        onChange={(e) => updateItem(index, 'quantity', parseInt(e.target.value) || 1)}
+                        className="w-full px-3 py-2 border rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Rate (₹) * <span className="text-gray-500 font-normal">(incl. GST)</span></label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={item.rate ?? 0}
+                        onChange={(e) => updateItem(index, 'rate', parseFloat(e.target.value) || 0)}
+                        className="w-full px-3 py-2 border rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Tax Rate %</label>
+                      <select
+                        value={item.tax_rate ?? 18}
+                        onChange={(e) => updateItem(index, 'tax_rate', parseFloat(e.target.value) || 0)}
+                        className="w-full px-3 py-2 border rounded text-sm"
+                      >
+                        <option value="0">0%</option>
+                        <option value="5">5%</option>
+                        <option value="12">12%</option>
+                        <option value="18">18%</option>
+                        <option value="28">28%</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Discount %</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="100"
+                        value={item.discount ?? 0}
+                        onChange={(e) => updateItem(index, 'discount', parseFloat(e.target.value) || 0)}
+                        className="w-full px-3 py-2 border rounded text-sm"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Serial numbers */}
+                  <div className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={item.has_serial_tracking || false}
+                          onChange={(e) => patchItem(index, e.target.checked
+                            ? { has_serial_tracking: true }
+                            : { has_serial_tracking: false, serial_numbers: [], manual_serials: '' })}
+                          className="w-4 h-4 text-blue-600 rounded"
+                        />
+                        <span className="text-xs font-medium text-gray-700">This item requires Serial Number</span>
+                      </label>
+                      {item.has_serial_tracking && (item.serial_numbers?.length || 0) !== (item.quantity || 1) && (
+                        <span className="text-xs text-orange-600">⚠️ Enter {item.quantity || 1} serial(s)</span>
+                      )}
+                    </div>
+
+                    {item.has_serial_tracking && (
+                      <div className="space-y-3">
+                        {item.available_serials && item.available_serials.length > 0 && (
+                          <div>
+                            <label className="text-xs font-medium text-blue-800 mb-1 block">
+                              Select from Inventory ({item.available_serials.length} available):
+                            </label>
+                            <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto p-2 bg-blue-50 rounded">
+                              {item.available_serials.map((serial) => {
+                                const isSelected = item.serial_numbers?.includes(serial.serial_number);
+                                const canSelect = isSelected || (item.serial_numbers?.length || 0) < (item.quantity || 1);
+                                return (
+                                  <button
+                                    key={serial.serial_number}
+                                    type="button"
+                                    onClick={() => toggleSerial(index, serial.serial_number)}
+                                    disabled={!canSelect && !isSelected}
+                                    className={`px-2 py-1 text-xs rounded border ${
+                                      isSelected
+                                        ? 'bg-blue-600 text-white border-blue-600'
+                                        : canSelect
+                                          ? 'bg-white text-blue-700 border-blue-300 hover:bg-blue-100'
+                                          : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                                    }`}
+                                    title={serial.warranty_months ? `Warranty: ${serial.warranty_months} months` : ''}
+                                  >
+                                    {serial.serial_number}{isSelected && ' ✓'}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="text-xs font-medium text-gray-700 mb-1 block">
+                            {item.available_serials?.length > 0 ? 'Or enter manually:' : 'Enter Serial Number(s):'}
+                          </label>
+                          <input
+                            type="text"
+                            placeholder={item.quantity > 1 ? 'Enter serial numbers separated by comma' : 'Enter serial number'}
+                            value={item.manual_serials || ''}
+                            onChange={(e) => setManualSerials(index, e.target.value)}
+                            className="w-full px-3 py-1.5 border rounded text-sm"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            {item.quantity > 1
+                              ? 'For multiple units, separate with commas (e.g., SN001, SN002)'
+                              : 'Serial number will be recorded with this sale'}
+                          </p>
+                        </div>
+
+                        {item.serial_numbers?.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-2 border-t">
+                            <span className="text-xs text-gray-500">Selected ({item.serial_numbers.length}/{item.quantity}):</span>
+                            {item.serial_numbers.map((sn, snIdx) => (
+                              <span key={snIdx} className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded flex items-center gap-1">
+                                {sn}
+                                <button type="button" onClick={() => removeSerial(index, sn)} className="text-green-600 hover:text-red-600">×</button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {!item.has_serial_tracking && (
+                      <p className="text-xs text-gray-500">
+                        Enable serial tracking to record individual unit serial numbers for warranty and service tracking.
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Per-line GST breakup */}
+                  <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                    {(() => {
+                      const calc = calculateItemTotal(item);
+                      const interState = isInterStateGst();
+                      return (
+                        <div className="grid grid-cols-6 gap-2 text-xs">
+                          <div className="text-gray-600">
+                            <div className="font-medium">Taxable Amt</div>
+                            <div className="text-gray-900">₹{calc.taxableAmount.toFixed(2)}</div>
+                          </div>
+                          {interState ? (
+                            <div className="text-gray-600">
+                              <div className="font-medium">IGST @{item.tax_rate || 18}%</div>
+                              <div className="text-gray-900">₹{calc.igst.toFixed(2)}</div>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="text-gray-600">
+                                <div className="font-medium">CGST @{(item.tax_rate || 18) / 2}%</div>
+                                <div className="text-gray-900">₹{calc.cgst.toFixed(2)}</div>
+                              </div>
+                              <div className="text-gray-600">
+                                <div className="font-medium">SGST @{(item.tax_rate || 18) / 2}%</div>
+                                <div className="text-gray-900">₹{calc.sgst.toFixed(2)}</div>
+                              </div>
+                            </>
+                          )}
+                          <div className="text-gray-600">
+                            <div className="font-medium">Total Tax</div>
+                            <div className="text-gray-900">₹{calc.taxAmount.toFixed(2)}</div>
+                          </div>
+                          <div className="text-gray-600">
+                            <div className="font-medium">Discount</div>
+                            <div className="text-red-600">-₹{calc.discountAmount.toFixed(2)}</div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-medium text-gray-600">Line Total</div>
+                            <div className="text-lg font-bold text-emerald-700">₹{calc.total.toFixed(2)}</div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Add New Product Modal */}
+          {showAddProductModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+                <div className="bg-blue-600 text-white p-4 rounded-t-lg flex justify-between items-center">
+                  <h3 className="text-lg font-semibold flex items-center gap-2">
+                    <Package className="w-5 h-5" />
+                    Add New Product
+                  </h3>
+                  <button type="button" onClick={() => setShowAddProductModal(false)} className="text-white hover:bg-blue-700 p-1 rounded">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="p-6 space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Product Name *</label>
+                    <input
+                      type="text"
+                      value={newProduct.name}
+                      onChange={(e) => {
+                        setNewProduct({ ...newProduct, name: e.target.value });
+                        fetchNewProductHsnSuggestion(e.target.value);
+                      }}
+                      className="w-full px-3 py-2 border rounded-lg"
+                      placeholder="e.g., Bosch Built-in Oven 60cm"
+                    />
+                    {newProductHsnSuggestions.length > 0 && (
+                      <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
+                        <div className="text-xs font-medium text-blue-800 mb-1">💡 Suggested HSN Codes based on product name:</div>
+                        <div className="space-y-1">
+                          {newProductHsnSuggestions.slice(0, 3).map((sg, sIdx) => (
+                            <button
+                              key={sIdx}
+                              type="button"
+                              onClick={() => {
+                                setNewProduct({ ...newProduct, hsn_code: sg.code });
+                                setNewProductHsnSuggestions([]);
+                              }}
+                              className={`w-full text-left px-2 py-1 rounded text-xs hover:bg-blue-100 ${newProduct.hsn_code === sg.code ? 'bg-blue-200 border border-blue-400' : 'bg-white'}`}
+                            >
+                              <span className="font-semibold text-blue-700">{sg.code}</span>
+                              <span className="text-gray-600 ml-2">{sg.category || sg.description?.substring(0, 30)}</span>
+                              <span className="text-green-600 ml-2 font-medium">{sg.gst_rate}% GST</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Brand</label>
+                      <input type="text" value={newProduct.brand} onChange={(e) => setNewProduct({ ...newProduct, brand: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="e.g., Bosch, Siemens" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Model Number</label>
+                      <input type="text" value={newProduct.model_number} onChange={(e) => setNewProduct({ ...newProduct, model_number: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="e.g., HBA534BS0" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Selling Price (₹) *</label>
+                      <input type="number" step="0.01" min="0" value={newProduct.price} onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="Price incl. GST" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Opening Stock</label>
+                      <input type="number" min="0" value={newProduct.current_stock} onChange={(e) => setNewProduct({ ...newProduct, current_stock: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="Initial stock quantity" />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-sm font-medium text-gray-700">HSN Code *</label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setManualHsnMode(!manualHsnMode);
+                          if (!manualHsnMode) setNewProduct({ ...newProduct, hsn_code: '' });
+                        }}
+                        className="text-xs text-blue-600 hover:text-blue-800 underline"
+                      >
+                        {manualHsnMode ? 'Select from list' : 'Enter manually'}
+                      </button>
+                    </div>
+                    {manualHsnMode ? (
+                      <div className="space-y-2">
+                        <input type="text" maxLength={8} value={newProduct.hsn_code} onChange={(e) => setNewProduct({ ...newProduct, hsn_code: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="Enter HSN code (e.g., 85081100)" />
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs text-gray-600">GST Rate:</label>
+                          <select value={manualHsnGstRate} onChange={(e) => setManualHsnGstRate(parseFloat(e.target.value))} className="px-2 py-1 border rounded text-sm">
+                            <option value={0}>0%</option>
+                            <option value={5}>5%</option>
+                            <option value={12}>12%</option>
+                            <option value={18}>18%</option>
+                            <option value={28}>28%</option>
+                          </select>
+                        </div>
+                        <p className="text-xs text-amber-600">Note: Manually entered HSN codes will be added to the system</p>
+                      </div>
+                    ) : (
+                      <>
+                        <select value={newProduct.hsn_code} onChange={(e) => setNewProduct({ ...newProduct, hsn_code: e.target.value })} className="w-full px-3 py-2 border rounded-lg">
+                          <option value="">-- Select HSN Code --</option>
+                          {hsnCodes.map(hsn => (
+                            <option key={hsn.id || hsn.code} value={hsn.code}>
+                              {hsn.code} - {hsn.description?.substring(0, 40)}{hsn.description?.length > 40 ? '...' : ''} ({hsn.gst_rate}%)
+                            </option>
+                          ))}
+                        </select>
+                        {newProduct.hsn_code && (
+                          <p className="text-xs text-gray-500 mt-1">
+                            GST Rate: {hsnCodes.find(h => h.code === newProduct.hsn_code)?.gst_rate || 18}%
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                    <input type="text" value={newProduct.category} onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="e.g., Built-in Ovens, Refrigerators" />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                    <textarea rows={2} value={newProduct.description} onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="Optional description" />
+                  </div>
+
+                  <div className="flex justify-end gap-3 pt-2">
+                    <button type="button" onClick={() => setShowAddProductModal(false)} className="px-4 py-2 border rounded-lg hover:bg-gray-50">Cancel</button>
+                    <button
+                      type="button"
+                      onClick={handleCreateProduct}
+                      disabled={addProductLoading}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {addProductLoading ? 'Creating...' : 'Create Product'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Summary & Options */}
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <IndianRupee className="w-5 h-5 text-amber-600" />
+              Order Summary
+            </h2>
+            
+            <div className="space-y-3">
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">Taxable Amount</span>
+                <span>₹{totals.taxableTotal.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">{isInterStateGst() ? 'GST (IGST)' : 'GST (CGST + SGST)'}</span>
+                <span>₹{totals.taxTotal.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">Items Total</span>
+                <span>₹{totals.itemsTotal.toLocaleString()}</span>
+              </div>
+              
+              <hr />
+              
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600 w-24">Discount %</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={invoiceDetails.discount || 0}
+                    onChange={(e) => setInvoiceDetails({...invoiceDetails, discount: parseFloat(e.target.value) || 0})}
+                    className="flex-1 px-2 py-1 border rounded text-sm"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600 w-24">Delivery ₹</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={invoiceDetails.delivery_charges || 0}
+                    onChange={(e) => setInvoiceDetails({...invoiceDetails, delivery_charges: parseFloat(e.target.value) || 0})}
+                    className="flex-1 px-2 py-1 border rounded text-sm"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600 w-24">Round Off ₹</span>
+                  <input
+                    type="number"
+                    value={invoiceDetails.round_off || 0}
+                    onChange={(e) => setInvoiceDetails({...invoiceDetails, round_off: parseFloat(e.target.value) || 0})}
+                    className="flex-1 px-2 py-1 border rounded text-sm"
+                  />
+                </div>
+              </div>
+              
+              <hr />
+              
+              <div className="flex justify-between text-lg font-bold">
+                <span>Grand Total</span>
+                <span className="text-green-600">₹{totals.finalTotal.toLocaleString()}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Order Options */}
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h3 className="font-semibold text-gray-900 mb-4">Order Options</h3>
+            
+            <div className="space-y-4">
+              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                <span className="text-xs font-medium text-gray-500 block mb-1">Document Type</span>
+                <span className="font-medium text-gray-900">
+                  {invoiceDetails.document_type === 'sales_order' ? 'Sales Order' : 'Direct Invoice'}
+                </span>
+              </div>
+
+              {invoiceDetails.document_type === 'sales_order' && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-900 mb-2">Expected Delivery Date</label>
+                    <input
+                      type="date"
+                      value={invoiceDetails.expected_delivery_date || ''}
+                      onChange={(e) => {
+                        const selectedDate = e.target.value;
+                        const today = new Date().toISOString().split('T')[0];
+                        const isFutureDate = selectedDate > today;
+                        setInvoiceDetails({
+                          ...invoiceDetails,
+                          expected_delivery_date: selectedDate,
+                          immediate_delivery: isFutureDate ? false : invoiceDetails.immediate_delivery
+                        });
+                      }}
+                      className="w-full px-3 py-2 border rounded-lg"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-3 pt-2 border-t border-blue-200">
+                    <input
+                      type="checkbox"
+                      id="immediate_delivery"
+                      checked={!!invoiceDetails.immediate_delivery}
+                      onChange={(e) => setInvoiceDetails({...invoiceDetails, immediate_delivery: e.target.checked})}
+                      className="w-4 h-4 text-blue-600 rounded"
+                    />
+                    <label htmlFor="immediate_delivery" className="text-sm text-gray-700">
+                      <span className="font-medium">Immediate Delivery</span>
+                      <span className="block text-xs text-gray-500">
+                        {invoiceDetails.immediate_delivery
+                          ? "Will appear in Warehouse's 'SO to Invoice' for quick processing"
+                          : "Will appear in Warehouse's 'Pending SOs' for later processing"}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Payment Mode</label>
+                <select
+                  value={invoiceDetails.payment_mode || 'cash'}
+                  onChange={(e) => setInvoiceDetails({...invoiceDetails, payment_mode: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                >
+                  <option value="cash">Cash</option>
+                  <option value="card">Card</option>
+                  <option value="upi">UPI</option>
+                  <option value="neft">NEFT/RTGS</option>
+                  <option value="cheque">Cheque</option>
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Order Source</label>
+                <select
+                  value={invoiceDetails.order_source || ''}
+                  onChange={(e) => setInvoiceDetails({...invoiceDetails, order_source: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                >
+                  <option value="">-- Select --</option>
+                  <option value="walk_in">Walk-in</option>
+                  <option value="phone_call">Phone Call</option>
+                  <option value="whatsapp">WhatsApp</option>
+                  <option value="website">Website</option>
+                  <option value="google_ads">Google Ads</option>
+                  <option value="facebook_ads">Facebook Ads</option>
+                  <option value="referral">Referral</option>
+                  <option value="repeat_customer">Repeat Customer</option>
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <textarea
+                  value={invoiceDetails.notes || ''}
+                  onChange={(e) => setInvoiceDetails({...invoiceDetails, notes: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                  rows={3}
+                  placeholder="Additional notes..."
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default EditSalesOrder;

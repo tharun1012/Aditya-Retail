@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+Allow: /api/sitemap.xml
+Disallow: /admin/
+Disallow: /checkout/
+Disallow: /cart/
+Disallow: /account/
+Allow: /api/products
+Allow: /api/product/
+Allow: /api/categories
+Allow: /api/brands
+Disallow: /api/
+
+Sitemap: https://adityaretail.com/api/sitemap.xml

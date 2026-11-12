@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 14 verified. Fix confirmed: WhatsApp CTA button now renders UNCONDITIONALLY on every OfferCard regardless of redeem_location. Tested on: (1) Bosch KGN56LB42I PDP — the sole existing no_cost_emi/online offer now shows a green 'Contact Us on WhatsApp to Redeem' button (bg-emerald-600) with MessageCircle icon, data-testid=offer-whatsapp-<uuid>, target=_blank, href starts with https://wa.me/919844577440?text=. (2) /checkout page after adding Bosch KGN56LB42I to cart — the OffersDisplay renders in the right column below the payment method with the same green WhatsApp CTA and correct wa.me deep link. (3) Created 8 test offers (one per offer_type: no_cost_emi, bank_offer, cashback, upi_offer, exchange_offer, extended_warranty, seasonal_offer, partner_offer) all with redeem_location='online' via POST /api/offers/admin/create. Reloaded PDP: 9 offer cards rendered (8 test + 1 existing), ALL 9 cards showed the WhatsApp CTA button — 100% coverage across every offer_type even when redeem_location=online. Backend regression: /api/offers/product/{id} still populates whatsapp_message on every serialized offer (0/9 missing). Footer helper text updated on OffersDisplay: 'To redeem any offer, tap Contact Us on WhatsApp to reach our offline store team.' All 8 test offers deleted; total offers back to 442.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/test_reports/pdp_whatsapp_cta.png",
+    "/app/test_reports/checkout_whatsapp_cta.png",
+    "/app/test_reports/pdp_all_types.png"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "OffersDisplay.js OfferCard now renders WhatsApp CTA unconditionally (line 55-65). Import switched from ExternalLink to MessageCircle. Fallback href='#' when whatsapp_message is missing is defensive but backend always populates it via _serialize_public, so href='#' should never occur in practice.",
+    "The button uses target='_blank' with rel='noopener noreferrer' — good.",
+    "Note (carried from iter 13): OfferUpdate model still does not whitelist offer_type on PUT — any string could be persisted via update. Consider adding whitelist validation.",
+    "Note: POST /api/offers/admin/create is not auth-gated (any client can create/delete offers). Consider adding an admin auth dependency."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (whatsapp_message populated 9/9)", "frontend": "100% (WhatsApp CTA on PDP + checkout + all 8 offer types)"},
+  "test_credentials": "Super admin: rohit.gadiya@gmail.com / Purvi@vriddhi01 (POST body key is 'username' not 'email'). Not required for offer admin endpoints (they are currently unauthenticated).",
+  "seed_data_creation": "Created 8 TEST_WA_* offers (one per offer_type) via POST /api/offers/admin/create with redeem_location=online, verified WhatsApp CTA on each card on Bosch KGN56LB42I PDP, then DELETE all 8 via /api/offers/admin/{id}. Total offers verified back to 442.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "WhatsApp CTA now renders on 100% of offer cards. PDP data-testid pattern: offer-whatsapp-<offer_id>. Bosch KGN56LB42I PDP shows exactly 1 offer card (no_cost_emi, online) with the green CTA. Checkout shows the same card in the right column below payment methods after adding product to cart in the same browser session. Auth for offer admin endpoints uses POST /api/auth/login with 'username' field (not 'email'). DB still at 442 offers.",
+  "verified_metrics": {
+    "pdp_wa_button_count": 1,
+    "checkout_wa_button_count": 1,
+    "all_offer_types_with_wa_button": 8,
+    "wa_href_prefix_valid": true,
+    "wa_button_text_matches": true,
+    "whatsapp_message_populated_backend": "9/9",
+    "total_offers_final": 442,
+    "footer_helper_updated": true
+  }
+}

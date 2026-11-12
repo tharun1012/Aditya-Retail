@@ -1,0 +1,50 @@
+{
+  "summary": "Backend testing of cashback-offers upload flow (Bosch bug fix) and shipping endpoints. All 13 pytest tests passed. Bosch large Excel upload (444 rows) completes in ~0.4s and returns 442 extracted offers with 102 SKU-matched products — Cloudflare timeout bug is fully fixed. LLM fallback for small Excel and PDF still works. Shipping COD & serviceability endpoints working correctly.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_cashback_offers_and_shipping.py",
+    "/app/test_reports/pytest/pytest_cashback_offers.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "cashback_offers_routes.py: `_build_whatsapp_link()` builds `encoded` twice (line 91-92) — the first line's value is immediately overwritten. Minor dead code, no functional impact.",
+    "cashback_offers_routes.py: `_col_index(headers, ' cb', ...)` uses a leading-space keyword which relies on substring match against arbitrary header strings — brittle. Consider matching by exact header token after tokenising to avoid accidental hits on words containing ' cb' (e.g., substrings in labels).",
+    "cashback_offers_routes.py: The `$or` query in `offers_for_product` (line 567-574) has a conditional expression building the OR clauses that will always include the fallback `{'brand': None}` / `{'categories': []}` when brand/category are empty. Those secondary clauses match ALL offers with brand=None / categories=[], which may return unrelated offers for products missing brand/category metadata. Consider skipping the fallback clauses entirely when data is missing.",
+    "cashback_offers_routes.py: `extract_offers_from_file()` references `text` variable in the `except json.JSONDecodeError` handler; if the LLM raises before `text` is assigned, this fails with NameError (protected by `if 'text' in locals()` but the logging path is fragile).",
+    "cashback_offers_routes.py: Bulk `insert_many` (line 479) does not use `ordered=False`; a single bad document will abort the entire insert. For a 442-offer batch this is a real risk. Consider `insert_many(to_insert, ordered=False)`.",
+    "shiprocket_routes.py `cod-charges` (line 215): `SHIPROCKET_PICKUP_LOCATION and '560058' or '560001'` uses truthy-string of the pickup location NAME to select a pincode — the location name (e.g., 'ARP') is not a pincode. Always resolves to '560058' since env is set, which happens to be correct for Bangalore but is misleading code. Should use an explicit pickup pincode env variable.",
+    "shiprocket_routes.py: `check_serviceability()` swallows all exceptions and silently falls back to manual calculation. This masks real Shiprocket API errors from ops. Add structured logging.",
+    "cashback_offers_routes.py at 543 lines — approaching the 700-line threshold but still fine. Consider splitting extraction logic into a helper module if it grows further."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_cashback_offers_and_shipping.py"
+  ],
+  "success_rate": {
+    "backend": "100% (13/13 tests passed)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "None — /api/offers endpoints are unauthenticated",
+  "seed_data_creation": "Created 2 tmp files for tests: /tmp/small_offers.xlsx (4-row) and /tmp/small_offers.pdf (2-3 offer PDF via reportlab). Downloaded real Bosch file to /tmp/bosch_cashback.xlsx.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Cashback-offers backend is fully working. Bosch bug fix verified: 442 offers extracted in ~0.4s (was previously timing out at Cloudflare >60s). Row-based fast path is triggered when Excel has SKU column & >=15 rows. LLM fallback still works for small Excel/PDF (test uses gemini-2.5-flash via EMERGENT_LLM_KEY). Shipping endpoints (Shiprocket) use live credentials from backend/.env and hit real Shiprocket API — tests validated Delhi 110001 COD (~₹75) and Mumbai 400001 serviceability. Test file at /app/backend/tests/test_cashback_offers_and_shipping.py can be re-run as regression.",
+  "verified_metrics": {
+    "bosch_upload_elapsed_seconds": 0.38,
+    "bosch_offers_extracted": 442,
+    "bosch_offers_matched_to_products": 102,
+    "bosch_response_size_kb_under_500": true,
+    "small_excel_llm_offers_extracted": ">=2 with brand=Bosch preserved",
+    "small_pdf_llm_offers_extracted": ">=1",
+    "cod_charges_delhi_110001": ">0 (validated)",
+    "serviceability_mumbai_400001": "serviceable=true with recommended rate>0",
+    "serviceability_invalid_999999": "returns non-serviceable / error / fallback"
+  }
+}

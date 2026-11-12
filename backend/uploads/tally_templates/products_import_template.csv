@@ -1,0 +1,3 @@
+product_id,name,model_number,brand,category,hsn_code,purchase_price,selling_price,mrp,stock_quantity,reorder_level,warranty_months,description,specifications
+PROD-001,Bosch 8kg Washing Machine,WAJ2846SIN,Bosch,washing-machine,84501900,35000,45000,49990,25,5,24,"Front load, inverter motor","Capacity:8kg,Type:Front Load"
+PROD-002,Siemens 500L Refrigerator,KA92NVQ30I,Siemens,refrigerator,84182100,65000,85000,95000,15,3,24,"Side by side, frost free","Capacity:500L,Type:Frost Free"

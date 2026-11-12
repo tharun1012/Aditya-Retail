@@ -1,0 +1,1996 @@
+"""
+Pine Labs (Plural) Payment Gateway Integration
+Handles payment initiation, verification, callbacks, and refunds
+Uses the Plural Online API (by Pine Labs)
+"""
+
+from fastapi import APIRouter, HTTPException, Request, Depends
+from pydantic import BaseModel, EmailStr
+from typing import Optional, List, Dict, Any
+import hashlib
+import hmac
+import json
+import uuid
+import requests
+from datetime import datetime, timezone
+import os
+import logging
+from database import get_db
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/pine-labs", tags=["Pine Labs Payment"])
+
+# Pine Labs (Plural) Configuration
+def _clean_env(name, default=""):
+    """Strip whitespace AND stray quotes — k8s secret values keep literal quotes unlike dotenv"""
+    v = os.environ.get(name)
+    if v is None:
+        v = default
+    return (v or "").strip().strip('"').strip("'").strip()
+
+PINE_LABS_MERCHANT_ID = _clean_env("PINE_LABS_MERCHANT_ID", "111077")
+PINE_LABS_CLIENT_ID = _clean_env("PINE_LABS_CLIENT_ID")
+PINE_LABS_CLIENT_SECRET = _clean_env("PINE_LABS_CLIENT_SECRET")
+PINE_LABS_ENVIRONMENT = _clean_env("PINE_LABS_ENVIRONMENT", "SANDBOX").upper()
+
+# Plural API URLs (Pine Labs Online)
+# UAT: https://pluraluat.v2.pinepg.in/api
+# Production: https://api.pluralpay.in/api
+# PINE_LABS_API_URL (if set) overrides; otherwise derived from PINE_LABS_ENVIRONMENT.
+_api_url_override = _clean_env("PINE_LABS_API_URL").rstrip("/")
+if _api_url_override:
+    PLURAL_API_BASE = _api_url_override
+elif PINE_LABS_ENVIRONMENT == "PRODUCTION":
+    PLURAL_API_BASE = "https://api.pluralpay.in/api"
+else:
+    PLURAL_API_BASE = "https://pluraluat.v2.pinepg.in/api"
+
+logger.info(
+    f"[Pine Labs Config] env={PINE_LABS_ENVIRONMENT} base={PLURAL_API_BASE} "
+    f"merchant={PINE_LABS_MERCHANT_ID} client_id={(PINE_LABS_CLIENT_ID[:8] + '...') if PINE_LABS_CLIENT_ID else 'MISSING'} "
+    f"secret={'set' if PINE_LABS_CLIENT_SECRET else 'MISSING'}"
+)
+
+# App URL for constructing full URLs - read at runtime
+def get_app_url():
+    """Get the app URL from environment, refreshed at runtime"""
+    # Use SITE_URL for the customer-facing domain, fallback to REACT_APP_BACKEND_URL
+    return os.environ.get("SITE_URL", os.environ.get("REACT_APP_BACKEND_URL", "https://www.adityaretail.com"))
+
+def get_redirect_url():
+    """Get redirect URL after payment completion - customer-facing page"""
+    return f"{get_app_url().rstrip('/')}/payment-success"
+
+def get_callback_url():
+    """Get callback URL for payment webhooks - must be the backend API URL"""
+    backend_url = os.environ.get("REACT_APP_BACKEND_URL", get_app_url())
+    return f"{backend_url.rstrip('/')}/api/pine-labs/callback"
+
+def get_failure_url():
+    """Get failure redirect URL"""
+    return f"{get_app_url().rstrip('/')}/payment-failed"
+
+
+# Pydantic Models
+class CustomerData(BaseModel):
+    email: Optional[EmailStr] = None
+    mobile_number: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+class OrderItem(BaseModel):
+    product_code: str
+    product_name: str
+    product_amount: int  # Amount in paisa
+    quantity: int = 1
+
+class CartItem(BaseModel):
+    """Pine Labs cart_details.cart_items entry (required for Brand EMI eligibility)."""
+    item_id: str
+    item_name: str
+    item_description: Optional[str] = ""
+    item_details_url: Optional[str] = ""
+    item_image_url: Optional[str] = ""
+    item_original_unit_price: int  # paisa
+    item_discounted_unit_price: int  # paisa
+    item_quantity: int = 1
+    item_currency: str = "INR"
+
+class BrandEMIProduct(BaseModel):
+    """purchase_details.products entry — required for Brand EMI.
+    product_code must match the brand-EMI SKU enabled on Pine Labs dashboard
+    (e.g. Alpha_1, Alpha_2 in UAT)."""
+    product_code: str
+    product_amount: int  # paisa
+    currency: str = "INR"
+
+class PineLabsPaymentRequest(BaseModel):
+    order_id: str
+    amount: int  # Amount in paisa (₹100 = 10000 paisa)
+    merchant_user_id: str
+    customer_name: Optional[str] = None
+    customer_email: Optional[EmailStr] = None
+    customer_phone: Optional[str] = None
+    items: Optional[List[OrderItem]] = None  # legacy field — kept for backward compatibility
+    description: Optional[str] = None
+    return_origin: Optional[str] = None  # Frontend's window.location.origin — used to build callback_url
+    # Brand EMI fields:
+    brand_emi_products: Optional[List[BrandEMIProduct]] = None  # purchase_details.products
+    cart_items: Optional[List[CartItem]] = None                  # purchase_details.cart_details.cart_items
+    bundle_count: Optional[int] = None                            # merchant_metadata.BUNDLE
+    enable_brand_emi: bool = False                                # convenience flag
+
+class PineLabsPaymentResponse(BaseModel):
+    success: bool
+    message: str
+    payment_url: Optional[str] = None
+    order_id: Optional[str] = None
+    transaction_id: Optional[str] = None
+    merchant_transaction_id: Optional[str] = None
+
+class PineLabsVerifyRequest(BaseModel):
+    transaction_id: str
+    order_id: str
+    amount: int
+
+
+# Token cache
+_token_cache = {
+    "access_token": None,
+    "expires_at": None
+}
+
+
+def get_auth_token() -> Optional[str]:
+    """
+    Get authentication token from Pine Labs Plural API.
+    Uses OAuth2 client credentials flow.
+    Caches the token until it expires.
+    """
+    global _token_cache
+    
+    # Check if we have a valid cached token
+    if _token_cache["access_token"] and _token_cache["expires_at"]:
+        try:
+            expires_at = datetime.fromisoformat(_token_cache["expires_at"].replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) < expires_at:
+                return _token_cache["access_token"]
+        except Exception:
+            pass
+    
+    try:
+        auth_url = f"{PLURAL_API_BASE}/auth/v1/token"
+        
+        payload = {
+            "client_id": PINE_LABS_CLIENT_ID,
+            "client_secret": PINE_LABS_CLIENT_SECRET,
+            "grant_type": "client_credentials"
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Request-ID": str(uuid.uuid4()),
+            "Request-Timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        logger.info(f"[Pine Labs Auth] Requesting token from: {auth_url}")
+        
+        response = requests.post(auth_url, json=payload, headers=headers, timeout=30)
+        
+        logger.info(f"[Pine Labs Auth] Status: {response.status_code}")
+        logger.info(f"[Pine Labs Auth] Response: {response.text[:200] if response.text else 'Empty'}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            _token_cache["access_token"] = data.get("access_token")
+            _token_cache["expires_at"] = data.get("expires_at")
+            return _token_cache["access_token"]
+        else:
+            logger.error(f"[Pine Labs Auth] Failed: {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"[Pine Labs Auth] Error: {str(e)}")
+        return None
+
+
+from admin_data_management_routes import verify_admin as _verify_admin
+
+
+@router.get("/diagnostics", dependencies=[Depends(_verify_admin)])
+async def pine_labs_diagnostics():
+    """Admin-only: shows resolved Pine Labs config (masked) + live token test"""
+    result = {
+        "environment": PINE_LABS_ENVIRONMENT,
+        "api_base": PLURAL_API_BASE,
+        "token_url": f"{PLURAL_API_BASE}/auth/v1/token",
+        "orders_url": f"{PLURAL_API_BASE}/checkout/v1/orders",
+        "merchant_id": PINE_LABS_MERCHANT_ID,
+        "client_id_prefix": (PINE_LABS_CLIENT_ID[:8] + "...") if PINE_LABS_CLIENT_ID else "MISSING",
+        "client_secret": "set" if PINE_LABS_CLIENT_SECRET else "MISSING",
+        "api_url_env_raw": os.environ.get("PINE_LABS_API_URL", "(not set)"),
+        "environment_env_raw": os.environ.get("PINE_LABS_ENVIRONMENT", "(not set)"),
+    }
+    try:
+        resp = requests.post(
+            f"{PLURAL_API_BASE}/auth/v1/token",
+            json={
+                "client_id": PINE_LABS_CLIENT_ID,
+                "client_secret": PINE_LABS_CLIENT_SECRET,
+                "grant_type": "client_credentials",
+            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=15,
+        )
+        body = resp.text or ""
+        result["token_test"] = {
+            "status_code": resp.status_code,
+            "ok": resp.status_code == 200,
+            "body_snippet": (body[:200].replace(PINE_LABS_CLIENT_SECRET, "***") if PINE_LABS_CLIENT_SECRET else body[:200]),
+        }
+    except Exception as e:
+        result["token_test"] = {"status_code": None, "ok": False, "error": str(e)}
+    return result
+
+
+# Routes
+import re as _re_emi
+
+# Brands whose model numbers are sent to Pine Labs as Brand EMI product codes.
+_EMI_BRANDS = [b.strip().lower() for b in os.environ.get("PINE_LABS_EMI_BRANDS", "bosch,siemens").split(",") if b.strip()]
+# Set PINE_LABS_AUTO_EMI_SKUS=false to switch the auto behaviour off.
+_AUTO_EMI = os.environ.get("PINE_LABS_AUTO_EMI_SKUS", "true").strip().lower() != "false"
+_SKU_OK = _re_emi.compile(r"^[A-Za-z0-9][A-Za-z0-9\-/]{2,39}$")
+
+
+async def _derive_brand_emi_products(database, cart_items):
+    """Build purchase_details.products from the DB: brand_emi_sku if set, else model number."""
+    if not _AUTO_EMI:
+        return []
+    ids = [c.item_id for c in cart_items]
+    docs = await database.products.find(
+        {"id": {"$in": ids}},
+        {"_id": 0, "id": 1, "brand": 1, "model_number": 1, "modelNumber": 1, "brand_emi_sku": 1},
+    ).to_list(None)
+    by_id = {d["id"]: d for d in docs if d.get("id")}
+    out = []
+    for c in cart_items:
+        d = by_id.get(c.item_id)
+        if not d:
+            continue
+        explicit = str(d.get("brand_emi_sku") or "").strip()
+        model = str(d.get("model_number") or d.get("modelNumber") or "").strip().upper()
+        code = explicit or model
+        if not code or not _SKU_OK.match(code):
+            continue
+        brand = str(d.get("brand") or "").lower()
+        if not explicit and not any(b in brand for b in _EMI_BRANDS):
+            continue
+        out.append(BrandEMIProduct(
+            product_code=code,
+            product_amount=int(c.item_discounted_unit_price) * int(c.item_quantity),
+            currency=c.item_currency or "INR",
+        ))
+    return out
+
+
+@router.post("/initiate", response_model=PineLabsPaymentResponse)
+async def initiate_payment(payment_request: PineLabsPaymentRequest, database = Depends(get_db)):
+    """
+    Initiate a Pine Labs (Plural) payment transaction.
+    1. Creates an order using the Orders API
+    2. Returns the checkout URL for payment
+    """
+    try:
+        # Generate unique merchant order reference
+        merchant_order_ref = f"PL_{payment_request.order_id}_{uuid.uuid4().hex[:8]}"
+        
+        # Get auth token
+        access_token = get_auth_token()
+        
+        if not access_token:
+            logger.error("[Pine Labs] Authentication failed - credentials may be expired or invalid")
+            return PineLabsPaymentResponse(
+                success=False,
+                message="Pine Labs payment is temporarily unavailable. The API credentials need to be refreshed. Please contact support or try another payment method.",
+                merchant_transaction_id=merchant_order_ref
+            )
+        
+        # Prepare customer data
+        customer_name_parts = (payment_request.customer_name or "Customer User").split(" ", 1)
+        first_name = customer_name_parts[0]
+        last_name = customer_name_parts[1] if len(customer_name_parts) > 1 else ""
+
+        # Resolve callback URLs — prefer the origin the customer is on (so localStorage survives the redirect)
+        if payment_request.return_origin:
+            origin = payment_request.return_origin.rstrip("/")
+            customer_redirect_url = f"{origin}/payment-success"
+            customer_failure_url = f"{origin}/payment-failed"
+        else:
+            customer_redirect_url = get_redirect_url()
+            customer_failure_url = get_failure_url()
+
+        logger.info(f"[Pine Labs] Customer redirect URL: {customer_redirect_url}")
+
+        # Create order payload - Infinity Checkout (Redirect mode)
+        purchase_details: Dict[str, Any] = {
+            "customer": {
+                "email_id": payment_request.customer_email or "",
+                "first_name": first_name,
+                "last_name": last_name,
+                "mobile_number": payment_request.customer_phone or "",
+                "country_code": "91"
+            }
+        }
+
+        # ===== Auto Brand EMI SKUs from DB (model number) =====
+        brand_emi_products = payment_request.brand_emi_products
+        auto_bundle = None
+        if payment_request.cart_items:
+            try:
+                derived = await _derive_brand_emi_products(database, payment_request.cart_items)
+                if derived:
+                    brand_emi_products = derived
+                    auto_bundle = len(derived)
+            except Exception as e:
+                logger.warning(f"[Pine Labs] Auto Brand EMI SKU derivation failed, continuing without it: {e}")
+        logger.info(f"[Pine Labs] Brand EMI product codes sent: {[p.product_code for p in (brand_emi_products or [])]}")
+
+        # ===== Brand EMI support =====
+        # Pine Labs requires three things to enable Brand EMI on a transaction:
+        # 1. purchase_details.products[] — each product_code must match a brand-EMI-enabled SKU
+        # 2. purchase_details.cart_details.cart_items[] — visible cart breakdown
+        # 3. purchase_details.merchant_metadata.BUNDLE — # of bundled items
+        if brand_emi_products:
+            purchase_details["products"] = [
+                {
+                    "product_code": p.product_code,
+                    "product_amount": {
+                        "value": p.product_amount,
+                        "currency": p.currency or "INR"
+                    }
+                }
+                for p in brand_emi_products
+            ]
+
+        if payment_request.cart_items:
+            purchase_details["cart_details"] = {
+                "cart_items": [
+                    {
+                        "item_id": c.item_id,
+                        "item_name": c.item_name,
+                        "item_description": c.item_description or "",
+                        "item_details_url": c.item_details_url or "",
+                        "item_image_url": c.item_image_url or "",
+                        "item_original_unit_price": c.item_original_unit_price,
+                        "item_discounted_unit_price": c.item_discounted_unit_price,
+                        "item_quantity": c.item_quantity,
+                        "item_currency": c.item_currency or "INR"
+                    }
+                    for c in payment_request.cart_items
+                ]
+            }
+
+        bundle_value = payment_request.bundle_count if payment_request.bundle_count is not None else auto_bundle
+        if bundle_value is not None:
+            purchase_details["merchant_metadata"] = {
+                "BUNDLE": str(bundle_value)
+            }
+
+        # Allowed payment methods — include CREDIT_EMI by default (Brand EMI is a sub-type of CREDIT_EMI)
+        allowed_methods = ["CARD", "UPI", "NETBANKING", "WALLET", "CREDIT_EMI", "DEBIT_EMI"]
+
+        order_payload = {
+            "merchant_order_reference": merchant_order_ref,
+            "order_amount": {
+                "value": payment_request.amount,  # Amount in paisa
+                "currency": "INR"
+            },
+            "integration_mode": "REDIRECT",
+            "pre_auth": False,
+            "allowed_payment_methods": allowed_methods,
+            "notes": payment_request.description or f"Order {payment_request.order_id}",
+            "callback_url": customer_redirect_url,
+            "failure_callback_url": customer_failure_url,
+            "purchase_details": purchase_details
+        }
+        
+        # Log request for debugging
+        logger.info(f"[Pine Labs] Creating Hosted Checkout Order:")
+        logger.info(f"  Merchant Order Ref: {merchant_order_ref}")
+        logger.info(f"  Amount: {payment_request.amount} paisa (₹{payment_request.amount/100:.2f})")
+        
+        # Prepare headers
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "Request-ID": str(uuid.uuid4()),
+            "Request-Timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Use /checkout/v1/orders API for Hosted Checkout
+        orders_url = f"{PLURAL_API_BASE}/checkout/v1/orders"
+        
+        logger.info(f"[Pine Labs] POST {orders_url}")
+        
+        response = requests.post(orders_url, json=order_payload, headers=headers, timeout=30)
+        
+        logger.info(f"[Pine Labs] Response Status: {response.status_code}")
+        logger.info(f"[Pine Labs] Response: {response.text[:500] if response.text else 'Empty'}")
+        
+        if response.status_code in [200, 201]:
+            response_data = response.json()
+            
+            # Checkout API returns redirect_url directly in response
+            redirect_url = response_data.get("redirect_url")
+            order_id = response_data.get("order_id")
+            token = response_data.get("token")
+            response_code = response_data.get("response_code")
+            
+            if redirect_url and response_code == 200:
+                logger.info(f"[Pine Labs] Hosted Checkout created successfully!")
+                logger.info(f"  Order ID: {order_id}")
+                logger.info(f"  Redirect URL: {redirect_url}")
+                
+                return PineLabsPaymentResponse(
+                    success=True,
+                    message="Payment order created successfully",
+                    payment_url=redirect_url,
+                    order_id=order_id,
+                    transaction_id=order_id,
+                    merchant_transaction_id=merchant_order_ref
+                )
+            
+            # Fallback: Check for data object (pay API response format)
+            if response_data.get("data"):
+                order_data = response_data.get("data", {})
+                plural_order_id = order_data.get("order_id")
+                order_token = order_data.get("order_token")
+                status = order_data.get("status")
+                
+                if plural_order_id and status == "CREATED":
+                    # Use the order_token for checkout URL
+                    if order_token:
+                        payment_url = f"{PLURAL_API_BASE}/v3/checkout-bff/redirect/checkout?token={order_token}"
+                    else:
+                        payment_url = f"{PLURAL_API_BASE}/v3/checkout-bff/redirect/checkout?order_id={plural_order_id}"
+                    
+                    logger.info(f"[Pine Labs] Order created successfully!")
+                    logger.info(f"  Order ID: {plural_order_id}")
+                    logger.info(f"  Order Token: {order_token}")
+                    logger.info(f"  Payment URL: {payment_url}")
+                    
+                    return PineLabsPaymentResponse(
+                        success=True,
+                        message="Payment order created successfully",
+                        payment_url=payment_url,
+                        order_id=plural_order_id,
+                        transaction_id=plural_order_id,
+                        merchant_transaction_id=merchant_order_ref
+                    )
+            
+            # If we got here, something went wrong
+            error_msg = response_data.get("response_message") or response_data.get("message") or "Order creation failed"
+            logger.error(f"[Pine Labs] Unexpected response: {response_data}")
+            return PineLabsPaymentResponse(
+                success=False,
+                message=error_msg,
+                merchant_transaction_id=merchant_order_ref
+            )
+        else:
+            # Handle error response
+            try:
+                error_data = response.json()
+                error_msg = error_data.get("response_message") or error_data.get("message") or error_data.get("error") or f"API Error: {response.status_code}"
+            except Exception:
+                error_msg = f"API Error: {response.status_code} - {response.text[:100]}"
+            
+            logger.error(f"[Pine Labs] API Error: {error_msg}")
+            return PineLabsPaymentResponse(
+                success=False,
+                message=error_msg,
+                merchant_transaction_id=merchant_order_ref
+            )
+    
+    except requests.exceptions.Timeout:
+        logger.error("[Pine Labs] Request timeout")
+        return PineLabsPaymentResponse(
+            success=False,
+            message="Connection timeout. Please try again."
+        )
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"[Pine Labs] Connection error: {str(e)}")
+        return PineLabsPaymentResponse(
+            success=False,
+            message="Unable to connect to payment gateway. Please try again."
+        )
+    except Exception as e:
+        logger.error(f"[Pine Labs] Error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Payment initiation failed: {str(e)}"
+        )
+
+
+@router.get("/status/{order_id}")
+async def check_payment_status(order_id: str):
+    """
+    Check the status of a Pine Labs payment order.
+    """
+    try:
+        # Get auth token
+        access_token = get_auth_token()
+        
+        if not access_token:
+            return {
+                "success": False,
+                "message": "Failed to authenticate with Pine Labs"
+            }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "Request-ID": str(uuid.uuid4()),
+            "Request-Timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Get order status using Plural API
+        status_url = f"{PLURAL_API_BASE}/pay/v1/orders/{order_id}"
+        
+        logger.info(f"[Pine Labs Status] GET {status_url}")
+        
+        response = requests.get(status_url, headers=headers, timeout=30)
+        
+        logger.info(f"[Pine Labs Status] Response: {response.status_code}")
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            order_data = response_data.get("data", response_data)
+            
+            # Map Plural status to application status
+            plural_status = (order_data.get("status") or order_data.get("order_status") or "").upper()
+            
+            # Also check for payment-level status in nested data
+            payments = order_data.get("payments", [])
+            if payments and isinstance(payments, list) and len(payments) > 0:
+                last_payment = payments[-1]
+                payment_level_status = (last_payment.get("status") or "").upper()
+                if payment_level_status in ["PROCESSED", "AUTHORIZED", "CHARGED", "CAPTURED"]:
+                    plural_status = payment_level_status
+            
+            payment_status = "pending"
+            
+            # Per Pine Labs docs:
+            # PROCESSED = payment received successfully (pre_auth: false)
+            # AUTHORIZED = payment authorized (pre_auth: true)
+            if plural_status in ["PROCESSED", "AUTHORIZED", "CHARGED", "CAPTURED", "COMPLETED", "PAID", "SUCCESS"]:
+                payment_status = "captured"
+            elif plural_status in ["FAILED", "DECLINED", "REJECTED", "ERROR"]:
+                payment_status = "failed"
+            elif plural_status in ["CANCELLED", "CANCELED", "VOIDED"]:
+                payment_status = "cancelled"
+            elif plural_status in ["CREATED", "PENDING", "ATTEMPTED"]:
+                payment_status = "pending"
+            
+            logger.info(f"[Pine Labs Status] Plural status: {plural_status} -> App status: {payment_status}")
+            
+            return {
+                "success": True,
+                "order_id": order_id,
+                "payment_status": payment_status,
+                "plural_status": plural_status,
+                "amount": order_data.get("order_amount", {}).get("value") or order_data.get("amount"),
+                "currency": order_data.get("order_amount", {}).get("currency", "INR"),
+                "merchant_order_reference": order_data.get("merchant_order_reference"),
+                "data": order_data
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Could not retrieve order status: {response.status_code}",
+                "order_id": order_id
+            }
+    
+    except Exception as e:
+        logger.error(f"[Pine Labs Status] Error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Status check failed: {str(e)}"
+        )
+
+
+def verify_pine_labs_signature(webhook_id: str, webhook_timestamp: str, body: str, signature: str) -> bool:
+    """
+    Verify Pine Labs webhook signature using HMAC-SHA256.
+
+    Per Pine Labs clarification (May 2026 support email):
+       "The webhook secret is the client secret base64-encoded form."
+
+    Practical interpretation:
+       1. webhook_secret = base64encode(client_secret_string.encode("utf-8"))
+       2. When the receiver decodes it back, they get the raw UTF-8 bytes of the
+          client_secret hex string (NOT the hex-decoded binary).
+       3. Use those UTF-8 bytes as the HMAC-SHA256 key.
+
+    Webhook signing flow:
+       signed_content = webhook_id + "." + webhook_timestamp + "." + body
+       key            = client_secret_string.encode("utf-8")           [raw bytes of the hex string]
+       computed       = base64encode(HMAC-SHA256(key, signed_content))
+       compare        = computed == received_signature  (after stripping "v1," prefix)
+    """
+    import base64
+    import time
+
+    if not signature or not webhook_id or not webhook_timestamp:
+        logger.warning("[Pine Labs] Missing signature verification parameters")
+        return False
+
+    # Use client_secret directly as the HMAC key (UTF-8 bytes of the string).
+    # PINE_LABS_WEBHOOK_SECRET env var still honoured if set explicitly to a
+    # base64-encoded value (allows future rotation without code changes).
+    explicit_webhook_secret = os.environ.get("PINE_LABS_WEBHOOK_SECRET", "")
+    client_secret = os.environ.get("PINE_LABS_CLIENT_SECRET", "")
+
+    if explicit_webhook_secret:
+        # If admin set this to a base64 string, decode it for the HMAC key.
+        try:
+            secret_bytes = base64.b64decode(explicit_webhook_secret)
+        except Exception:
+            secret_bytes = explicit_webhook_secret.encode("utf-8")
+    elif client_secret:
+        # Pine Labs clarified: HMAC key = raw UTF-8 bytes of the client_secret string
+        secret_bytes = client_secret.encode("utf-8")
+    else:
+        logger.warning("[Pine Labs] No webhook secret configured — skipping verification")
+        return True  # UAT graceful degradation
+
+    # Timestamp sanity check (5-minute drift tolerance — informational only)
+    try:
+        ts = int(webhook_timestamp)
+        if abs(int(time.time()) - ts) > 300:
+            logger.warning(f"[Pine Labs] Webhook timestamp drift > 5min: {ts}")
+    except ValueError:
+        pass
+
+    try:
+        # signed_content = webhook_id.webhook_timestamp.body
+        signed_content = f"{webhook_id}.{webhook_timestamp}.{body}"
+
+        # HMAC-SHA256 → base64
+        computed_hmac = hmac.new(secret_bytes, signed_content.encode("utf-8"), hashlib.sha256).digest()
+        computed_signature = base64.b64encode(computed_hmac).decode()
+
+        # Strip "v1," prefix from received signature if present
+        received_sig = signature
+        if received_sig.startswith("v1,"):
+            received_sig = received_sig[3:]
+
+        is_valid = hmac.compare_digest(computed_signature, received_sig)
+
+        if not is_valid:
+            logger.warning(
+                f"[Pine Labs] Webhook signature mismatch.\n"
+                f"  Computed: {computed_signature}\n"
+                f"  Received: {received_sig}"
+            )
+        else:
+            logger.info("[Pine Labs] Webhook signature verified successfully")
+
+        return is_valid
+
+    except Exception as e:
+        logger.error(f"[Pine Labs] Webhook signature verification error: {e}")
+        return False
+
+
+@router.get("/payment-callback")
+async def payment_callback_get(
+    order_id: str = None,
+    status: str = None,
+    signature: str = None,
+    error_code: str = None,
+    error_message: str = None,
+    database = Depends(get_db)
+):
+    """
+    Handle Pine Labs redirect callback (GET) — customer redirect after payment.
+    Pine Labs redirects customer here with order_id, status, signature as query params.
+    """
+    return await _handle_payment_callback(
+        order_id=order_id, status=status, signature=signature,
+        error_code=error_code, error_message=error_message, database=database
+    )
+
+
+@router.post("/payment-callback")
+async def payment_callback_post(
+    request: Request,
+    database = Depends(get_db)
+):
+    """
+    Handle Pine Labs redirect callback (POST form data).
+    Pine Labs may POST form data with order_id, status, signature.
+    """
+    form_data = await request.form()
+    params = dict(form_data)
+    if not params.get("order_id"):
+        params = dict(request.query_params)
+    
+    return await _handle_payment_callback(
+        order_id=params.get("order_id"),
+        status=params.get("status"),
+        signature=params.get("signature"),
+        error_code=params.get("error_code"),
+        error_message=params.get("error_message"),
+        database=database
+    )
+
+
+@router.post("/webhook")
+async def pine_labs_webhook(
+    request: Request,
+    database = Depends(get_db)
+):
+    """
+    Pine Labs Webhook endpoint — server-to-server notification.
+    Verifies signature from headers: webhook-id, webhook-timestamp, webhook-signature.
+    This is called by Pine Labs servers (not by the customer's browser).
+    """
+    # Extract verification headers
+    webhook_id = request.headers.get("webhook-id", "")
+    webhook_timestamp = request.headers.get("webhook-timestamp", "")
+    webhook_signature = request.headers.get("webhook-signature", "")
+    
+    # Get raw body for signature verification
+    raw_body = await request.body()
+    body_str = raw_body.decode("utf-8")
+    
+    # Verify signature
+    is_valid = verify_pine_labs_signature(webhook_id, webhook_timestamp, body_str, webhook_signature)
+    
+    if not is_valid:
+        logger.warning(f"[Pine Labs Webhook] Invalid signature! webhook_id={webhook_id}")
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    
+    # Parse body
+    try:
+        payload = json.loads(body_str)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    
+    # Extract event data
+    event_type = payload.get("event_type") or payload.get("event") or ""
+    order_data = payload.get("data", payload)
+    order_id = order_data.get("order_id") or order_data.get("id", "")
+    order_status = (order_data.get("status") or "").upper()
+    
+    logger.info(f"[Pine Labs Webhook] Event: {event_type}, Order: {order_id}, Status: {order_status}")
+    
+    # Map status
+    payment_status = "pending"
+    if order_status in ["PROCESSED", "AUTHORIZED", "CHARGED", "CAPTURED"]:
+        payment_status = "captured"
+    elif order_status in ["FAILED", "DECLINED", "REJECTED"]:
+        payment_status = "failed"
+    elif order_status in ["CANCELLED", "VOIDED"]:
+        payment_status = "cancelled"
+    
+    # Store webhook event
+    await database.payment_webhooks.insert_one({
+        "webhook_id": webhook_id,
+        "webhook_timestamp": webhook_timestamp,
+        "event_type": event_type,
+        "order_id": order_id,
+        "status": order_status,
+        "payment_status": payment_status,
+        "payload": payload,
+        "gateway": "pine_labs",
+        "verified": is_valid,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    # Update order payment status in our system if order exists
+    if order_id and payment_status in ["captured", "failed", "cancelled"]:
+        # Find the order by pine labs order reference
+        order = await database.offline_invoices.find_one(
+            {"pine_labs_order_id": order_id},
+            {"_id": 0}
+        )
+        if order:
+            await database.offline_invoices.update_one(
+                {"pine_labs_order_id": order_id},
+                {"$set": {
+                    "payment_status": "paid" if payment_status == "captured" else payment_status,
+                    "payment_verified_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            logger.info(f"[Pine Labs Webhook] Updated order payment status: {payment_status}")
+    
+    return {"status": "ok", "message": "Webhook processed"}
+
+
+async def _post_payment_notify_and_sync(order_doc: dict, database) -> None:
+    """After a Pine Labs / PhonePe / any prepaid payment is captured,
+    fire the CRM email notification and auto-push the order to Shiprocket.
+    Idempotent — safe to call multiple times.
+    """
+    from datetime import datetime, timezone as _tz
+    order_number = order_doc.get("order_number") or order_doc.get("id")
+
+    # 1) CRM email notification (only once per order)
+    if not order_doc.get("crm_notified_at"):
+        try:
+            from crm_lead_notifier import notify_new_lead
+            cust = order_doc.get("customer_details") or {}
+            addr = order_doc.get("shipping_address") or {}
+            notify_new_lead(
+                {
+                    "id": order_doc.get("id"),
+                    "name": cust.get("name") or "Customer",
+                    "email": cust.get("email"),
+                    "phone": cust.get("phone"),
+                    "source": f"🛍️ Online Order (Prepaid) · {order_number}",
+                    "status": "paid",
+                    "notes": (
+                        f"Order Value: ₹{order_doc.get('total_amount', 0):,.2f} · "
+                        f"Payment: {(order_doc.get('payment_method') or 'prepaid').upper()} · "
+                        f"Items: {len(order_doc.get('items', []))}"
+                    ),
+                    "interested_products": [it.get("name", "") for it in (order_doc.get("items") or [])[:5]],
+                },
+                source="sales",
+                extra={
+                    "order_doc": order_doc,
+                    "summary": f"Payment captured for {order_number} — ₹{order_doc.get('total_amount', 0):,.2f}",
+                },
+            )
+            await database.orders.update_one(
+                {"id": order_doc.get("id")},
+                {"$set": {"crm_notified_at": datetime.now(_tz.utc).isoformat()}},
+            )
+        except Exception as _e:
+            logger.warning(f"[Post-Payment] CRM notify failed for {order_number}: {_e}")
+
+    # 2) Shiprocket auto-sync (skip if already synced)
+    if not order_doc.get("shiprocket_order_id"):
+        try:
+            from shiprocket_routes import create_shiprocket_order as _sr_create, CreateShipmentRequest as _SRReq
+            addr = order_doc.get("shipping_address") or order_doc.get("billing_address") or {}
+            cust = order_doc.get("customer_details") or {}
+            sr_items = [
+                {
+                    "name": (it.get("name") or "Product")[:50],
+                    "sku": it.get("sku") or it.get("model_number") or it.get("product_id") or "SKU001",
+                    "quantity": int(it.get("quantity") or 1),
+                    "price": float(it.get("price") or 0),
+                }
+                for it in (order_doc.get("items") or [])
+            ]
+            total_weight = sum(
+                float(it.get("weight") or 1.0) * int(it.get("quantity") or 1)
+                for it in (order_doc.get("items") or [])
+            )
+            total_weight = max(total_weight, 0.5)
+            req = _SRReq(
+                order_id=order_doc.get("id") or order_number,
+                order_number=order_number,
+                customer_name=(cust.get("name") or "Customer")[:100],
+                customer_email=cust.get("email") or "noemail@adityaretail.com",
+                customer_phone=str(cust.get("phone") or ""),
+                address=(addr.get("address") or addr.get("line1") or "Address not provided")[:200],
+                city=addr.get("city") or "Bangalore",
+                state=addr.get("state") or "Karnataka",
+                pincode=str(addr.get("pincode") or addr.get("zipcode") or "560058"),
+                payment_method="Prepaid",
+                items=sr_items,
+                subtotal=float(order_doc.get("subtotal") or order_doc.get("total_amount") or 0),
+                weight=total_weight,
+            )
+            sr_result = await _sr_create(req)
+            if sr_result and sr_result.get("status") == "success":
+                await database.orders.update_one(
+                    {"id": order_doc.get("id")},
+                    {"$set": {
+                        "shiprocket_order_id": sr_result.get("shiprocket_order_id"),
+                        "shiprocket_shipment_id": sr_result.get("shipment_id"),
+                        "shiprocket_synced_at": datetime.now(_tz.utc).isoformat(),
+                        "shiprocket_sync_error": None,
+                    }},
+                )
+                logger.info(f"[Post-Payment] Order {order_number} synced → SR#{sr_result.get('shiprocket_order_id')}")
+            else:
+                reason = (sr_result or {}).get("message") or str(sr_result)
+                await database.orders.update_one(
+                    {"id": order_doc.get("id")},
+                    {"$set": {"shiprocket_sync_error": reason[:500]}},
+                )
+                logger.warning(f"[Post-Payment] Shiprocket sync failed for {order_number}: {reason}")
+        except Exception as _e:
+            logger.warning(f"[Post-Payment] Shiprocket auto-sync error for {order_number}: {_e}")
+
+
+async def _handle_payment_callback(order_id, status, signature, error_code, error_message, database, merchant_order_id=None):
+    """Process Pine Labs payment callback data (redirect from checkout)"""
+    logger.info(f"[Pine Labs Callback] order_id={order_id}, status={status}, error_code={error_code}, merchant={merchant_order_id}")
+    
+    if not order_id:
+        return {"success": False, "payment_status": "failed", "message": "No order_id received"}
+    
+    # Verify callback signature (Section 3.1.1.2 of Pine Labs docs)
+    # Build input: sorted key=value pairs joined by &, excluding empty values
+    # Per Pine Labs clarification (May 2026):
+    #   HMAC key = raw UTF-8 bytes of the client_secret string (NOT hex-decoded)
+    signature_verified = False
+    if signature:
+        params_for_sig = {}
+        if order_id: params_for_sig["order_id"] = order_id
+        if status: params_for_sig["status"] = status
+        if error_code: params_for_sig["error_code"] = error_code
+        if error_message: params_for_sig["error_message"] = error_message
+
+        # Sort by key alphabetically and join with &
+        sorted_pairs = sorted(params_for_sig.items(), key=lambda x: x[0])
+        input_string = "&".join(f"{k}={v}" for k, v in sorted_pairs)
+
+        # HMAC-SHA256 with client_secret as UTF-8 bytes, output as uppercase hex
+        client_secret = os.environ.get("PINE_LABS_CLIENT_SECRET", "")
+        if client_secret:
+            try:
+                secret_bytes = client_secret.encode("utf-8")
+                computed_hash = hmac.new(secret_bytes, input_string.encode("utf-8"), hashlib.sha256).hexdigest().upper()
+
+                if computed_hash != signature.upper():
+                    logger.warning(f"[Pine Labs Callback] Signature mismatch! Computed: {computed_hash}, Received: {signature}")
+                    # Don't block in UAT — just log
+                else:
+                    signature_verified = True
+                    logger.info("[Pine Labs Callback] Signature verified successfully")
+            except Exception as e:
+                logger.error(f"[Pine Labs Callback] Signature verification error: {e}")
+    
+    # Map Pine Labs callback status to our status
+    pine_status = (status or "").upper()
+    payment_status = "pending"
+    
+    if pine_status in ["PROCESSED", "AUTHORIZED", "CHARGED", "CAPTURED", "SUCCESS"]:
+        payment_status = "captured"
+    elif pine_status in ["FAILED", "DECLINED", "REJECTED", "CANCELLED", "ERROR"]:
+        payment_status = "failed"
+    
+    # Store callback result in DB for reference
+    try:
+        await database.payment_callbacks.insert_one({
+            "order_id": order_id,
+            "merchant_order_id": merchant_order_id,
+            "status": status,
+            "payment_status": payment_status,
+            "signature": signature,
+            "signature_verified": signature_verified,
+            "error_code": error_code,
+            "error_message": error_message,
+            "gateway": "pine_labs",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+    except Exception as e:
+        logger.error(f"[Pine Labs Callback] DB save error: {e}")
+    
+    # Update the linked order in `orders` collection (ecommerce)
+    if merchant_order_id and payment_status in ["captured", "failed"]:
+        try:
+            update_result = await database.orders.update_one(
+                {"$or": [
+                    {"order_number": merchant_order_id},
+                    {"id": merchant_order_id},
+                    {"order_id": merchant_order_id},
+                ]},
+                {"$set": {
+                    "payment_status": "completed" if payment_status == "captured" else payment_status,
+                    "payment.status": "completed" if payment_status == "captured" else payment_status,
+                    "payment.transaction_id": order_id,
+                    "payment.gateway": "pine_labs",
+                    "payment.verified_at": datetime.now(timezone.utc).isoformat(),
+                    "pine_labs_order_id": order_id,
+                    "order_status": "confirmed" if payment_status == "captured" else "payment_failed",
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            logger.info(f"[Pine Labs Callback] Updated order {merchant_order_id}: matched={update_result.matched_count}, modified={update_result.modified_count}")
+
+            # ----------------------------------------------------------
+            # On successful payment: fire (a) CRM email notification,
+            # (b) Shiprocket auto-sync. Failures logged but not raised.
+            # ----------------------------------------------------------
+            if payment_status == "captured":
+                order_doc = await database.orders.find_one({"$or": [
+                    {"order_number": merchant_order_id},
+                    {"id": merchant_order_id},
+                    {"order_id": merchant_order_id},
+                ]})
+                if order_doc:
+                    await _post_payment_notify_and_sync(order_doc, database)
+        except Exception as e:
+            logger.error(f"[Pine Labs Callback] Order update error: {e}")
+    
+    # Also update offline_invoices if linked
+    if payment_status == "captured":
+        try:
+            await database.offline_invoices.update_one(
+                {"pine_labs_order_id": order_id},
+                {"$set": {
+                    "payment_status": "paid",
+                    "payment_verified_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+        except Exception:
+            pass
+    
+    return {
+        "success": payment_status == "captured",
+        "order_id": order_id,
+        "merchant_order_id": merchant_order_id,
+        "payment_status": payment_status,
+        "plural_status": pine_status,
+        "signature_verified": signature_verified,
+        "error_code": error_code,
+        "error_message": error_message
+    }
+
+
+@router.post("/confirm-payment")
+async def confirm_payment_from_frontend(request: Request, database = Depends(get_db)):
+    """
+    Called by the frontend PaymentSuccess page after Pine Labs redirects the customer back.
+    Records the callback, verifies signature, and updates the order's payment status.
+    Frontend passes both the Pine Labs order_id (from URL params) and our internal order_number.
+    """
+    try:
+        body = await request.json()
+        return await _handle_payment_callback(
+            order_id=body.get("order_id"),
+            status=body.get("status"),
+            signature=body.get("signature"),
+            error_code=body.get("error_code"),
+            error_message=body.get("error_message"),
+            merchant_order_id=body.get("merchant_order_id") or body.get("our_order_number"),
+            database=database
+        )
+    except Exception as e:
+        logger.error(f"[Pine Labs Confirm] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Confirm payment failed: {e}")
+
+
+
+@router.post("/verify", response_model=dict)
+async def verify_payment(verify_request: PineLabsVerifyRequest):
+    """
+    Verify payment completion and amount.
+    Called after payment redirect to confirm the payment was successful.
+    """
+    try:
+        # Check payment status
+        status_result = await check_payment_status(verify_request.transaction_id)
+        
+        if status_result.get("success"):
+            payment_status = status_result.get("payment_status", "pending")
+            
+            # Verify amount matches
+            returned_amount = status_result.get("amount")
+            if returned_amount and int(returned_amount) != verify_request.amount:
+                return {
+                    "success": False,
+                    "message": "Amount mismatch",
+                    "expected_amount": verify_request.amount,
+                    "actual_amount": returned_amount,
+                    "payment_status": payment_status
+                }
+            
+            return {
+                "success": payment_status == "captured",
+                "payment_status": payment_status,
+                "transaction_id": verify_request.transaction_id,
+                "order_id": verify_request.order_id,
+                "amount": verify_request.amount,
+                "plural_status": status_result.get("plural_status")
+            }
+        else:
+            return {
+                "success": False,
+                "message": status_result.get("message", "Verification failed"),
+                "payment_status": "unknown"
+            }
+    
+    except Exception as e:
+        logger.error(f"[Pine Labs Verify] Error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Payment verification failed: {str(e)}"
+        )
+
+
+@router.post("/callback")
+async def payment_callback(request: Request):
+    """
+    Handle Pine Labs payment callback (webhook).
+    Called by Pine Labs when payment status changes.
+    """
+    try:
+        # Get request body
+        body = await request.json()
+        
+        logger.info(f"[Pine Labs Callback] Received: {json.dumps(body, default=str)[:500]}")
+        
+        # Extract payment details from callback
+        order_id = body.get("order_id")
+        merchant_order_ref = body.get("merchant_order_reference")
+        status = body.get("status", "").upper()
+        amount = body.get("order_amount", {}).get("value")
+        
+        # Determine payment status
+        payment_status = "pending"
+        if status in ["CHARGED", "CAPTURED", "COMPLETED"]:
+            payment_status = "completed"
+        elif status in ["FAILED", "DECLINED", "REJECTED"]:
+            payment_status = "failed"
+        elif status in ["CANCELLED", "CANCELED", "VOIDED"]:
+            payment_status = "cancelled"
+        
+        # Update order in database if payment completed
+        if payment_status == "completed" and merchant_order_ref:
+            try:
+                from database import db
+                
+                # Extract original order ID from merchant order reference
+                # Format: PL_ORDER_ID_xxxx
+                order_id_parts = merchant_order_ref.split("_")
+                if len(order_id_parts) >= 2:
+                    original_order_id = order_id_parts[1]
+                    
+                    # Update order status
+                    order = await db.orders.find_one_and_update(
+                        {"$or": [
+                            {"order_id": original_order_id},
+                            {"id": original_order_id},
+                            {"order_id": {"$regex": original_order_id}}
+                        ]},
+                        {"$set": {
+                            "payment.status": "completed",
+                            "payment.transaction_id": order_id,
+                            "payment.gateway": "pine_labs",
+                            "status": "confirmed",
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        }},
+                        return_document=True
+                    )
+                    
+                    if order:
+                        logger.info(f"[Pine Labs Callback] Updated order {original_order_id}")
+                        
+                        # Send payment success email
+                        customer_email = order.get("customer_details", {}).get("email") or order.get("customer", {}).get("email")
+                        if customer_email:
+                            try:
+                                from sendgrid_email_service import sendgrid_email_service
+                                sendgrid_email_service.send_email(
+                                    to_email=customer_email,
+                                    subject=f"Payment Successful - Order {order.get('order_number', original_order_id)}",
+                                    body=f"""
+                                    <html>
+                                    <body>
+                                    <h2>Payment Successful!</h2>
+                                    <p>Your payment of ₹{int(amount) / 100:.2f} has been successfully processed via Pine Labs.</p>
+                                    <p><strong>Order ID:</strong> {order.get('order_number', original_order_id)}</p>
+                                    <p><strong>Transaction ID:</strong> {order_id}</p>
+                                    <p>Thank you for your purchase!</p>
+                                    </body>
+                                    </html>
+                                    """,
+                                    from_agent="sales",
+                                    html=True
+                                )
+                                logger.info(f"[Pine Labs Callback] Sent email to {customer_email}")
+                            except Exception as email_error:
+                                logger.warning(f"[Pine Labs Callback] Email failed: {email_error}")
+                                
+            except Exception as db_error:
+                logger.error(f"[Pine Labs Callback] Database error: {db_error}")
+        
+        return {
+            "success": True,
+            "message": "Callback processed successfully",
+            "payment_status": payment_status,
+            "order_id": order_id
+        }
+    
+    except Exception as e:
+        logger.error(f"[Pine Labs Callback] Error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Callback processing failed: {str(e)}"
+        )
+
+
+@router.post("/refund")
+async def initiate_refund(
+    order_id: str,
+    refund_amount: int,
+    reason: Optional[str] = "Customer requested refund"
+):
+    """
+    Initiate a refund for a completed Pine Labs payment.
+    """
+    try:
+        # Get auth token
+        access_token = get_auth_token()
+        
+        if not access_token:
+            return {
+                "success": False,
+                "message": "Failed to authenticate with Pine Labs"
+            }
+        
+        # Generate unique refund ID
+        refund_id = f"REFUND_{order_id}_{uuid.uuid4().hex[:8]}"
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "Request-ID": str(uuid.uuid4()),
+            "Request-Timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Prepare refund payload
+        refund_payload = {
+            "merchant_refund_reference": refund_id,
+            "refund_amount": {
+                "value": refund_amount,
+                "currency": "INR"
+            },
+            "refund_reason": reason
+        }
+        
+        # Create refund using Plural API
+        refund_url = f"{PLURAL_API_BASE}/pay/v1/orders/{order_id}/refund"
+        
+        logger.info(f"[Pine Labs Refund] POST {refund_url}")
+        
+        response = requests.post(refund_url, json=refund_payload, headers=headers, timeout=30)
+        
+        logger.info(f"[Pine Labs Refund] Response: {response.status_code}")
+        
+        if response.status_code in [200, 201]:
+            response_data = response.json()
+            
+            return {
+                "success": True,
+                "message": "Refund initiated successfully",
+                "refund_id": refund_id,
+                "data": response_data
+            }
+        else:
+            try:
+                error_data = response.json()
+                error_msg = error_data.get("message") or f"Refund failed: {response.status_code}"
+            except Exception:
+                error_msg = f"Refund failed: {response.status_code}"
+            
+            return {
+                "success": False,
+                "message": error_msg,
+                "refund_id": refund_id
+            }
+    
+    except Exception as e:
+        logger.error(f"[Pine Labs Refund] Error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Refund initiation failed: {str(e)}"
+        )
+
+
+@router.get("/refund/status/{refund_id}")
+async def check_refund_status(refund_id: str):
+    """
+    Check the status of a refund transaction.
+    """
+    try:
+        # Get auth token
+        access_token = get_auth_token()
+        
+        if not access_token:
+            return {
+                "success": False,
+                "message": "Failed to authenticate with Pine Labs"
+            }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "Request-ID": str(uuid.uuid4()),
+            "Request-Timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Get refund status
+        # Note: Actual endpoint may vary - check Plural documentation
+        status_url = f"{PLURAL_API_BASE}/pay/v1/refunds/{refund_id}"
+        
+        response = requests.get(status_url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            return {
+                "success": True,
+                "data": response.json()
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Could not retrieve refund status: {response.status_code}"
+            }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Refund status check failed: {str(e)}"
+        )
+
+
+@router.get("/admin/transactions")
+async def list_transactions(
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+    database = Depends(get_db)
+):
+    """
+    Admin: List all Pine Labs payment transactions (merged from payment_callbacks + payment_webhooks).
+    Supports search by order_id/merchant_ref/customer and filter by status/date.
+    """
+    try:
+        query: Dict[str, Any] = {}
+
+        if status and status != "all":
+            # Map user-friendly status to stored payment_status
+            status_map = {
+                "success": "captured",
+                "completed": "captured",
+                "failed": "failed",
+                "pending": "pending",
+                "cancelled": "cancelled"
+            }
+            query["payment_status"] = status_map.get(status.lower(), status.lower())
+
+        if search:
+            query["$or"] = [
+                {"order_id": {"$regex": search, "$options": "i"}},
+                {"payload.data.merchant_order_reference": {"$regex": search, "$options": "i"}},
+                {"payload.merchant_order_reference": {"$regex": search, "$options": "i"}},
+            ]
+
+        if from_date or to_date:
+            date_q: Dict[str, Any] = {}
+            if from_date:
+                date_q["$gte"] = from_date
+            if to_date:
+                date_q["$lte"] = to_date + "T23:59:59"
+            query["created_at"] = date_q
+
+        # Aggregate from both collections
+        skip = max(0, (page - 1) * page_size)
+
+        callbacks_cursor = database.payment_callbacks.find(query, {"_id": 0}).sort("created_at", -1)
+        webhooks_cursor = database.payment_webhooks.find(query, {"_id": 0}).sort("created_at", -1)
+
+        callbacks = await callbacks_cursor.to_list(length=1000)
+        webhooks = await webhooks_cursor.to_list(length=1000)
+
+        # Merge by order_id — prefer webhook (server-to-server) when available
+        merged: Dict[str, Dict[str, Any]] = {}
+        for cb in callbacks:
+            oid = cb.get("order_id")
+            if oid:
+                merged[oid] = {
+                    "order_id": oid,
+                    "status": cb.get("status"),
+                    "payment_status": cb.get("payment_status"),
+                    "signature_verified": cb.get("signature_verified", False),
+                    "error_code": cb.get("error_code"),
+                    "error_message": cb.get("error_message"),
+                    "source": "callback",
+                    "created_at": cb.get("created_at"),
+                    "webhook_id": None,
+                    "event_type": None,
+                    "payload": None,
+                }
+
+        for wh in webhooks:
+            oid = wh.get("order_id")
+            if not oid:
+                continue
+            existing = merged.get(oid, {})
+            payload = wh.get("payload", {})
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            merchant_ref = data.get("merchant_order_reference") if isinstance(data, dict) else None
+            amount_obj = data.get("order_amount") if isinstance(data, dict) else None
+            amount = amount_obj.get("value") if isinstance(amount_obj, dict) else None
+
+            merged[oid] = {
+                **existing,
+                "order_id": oid,
+                "merchant_order_reference": merchant_ref,
+                "amount": amount,
+                "currency": (amount_obj or {}).get("currency", "INR") if isinstance(amount_obj, dict) else "INR",
+                "status": wh.get("status") or existing.get("status"),
+                "payment_status": wh.get("payment_status") or existing.get("payment_status"),
+                "event_type": wh.get("event_type"),
+                "webhook_id": wh.get("webhook_id"),
+                "signature_verified": wh.get("verified", existing.get("signature_verified", False)),
+                "payload": payload,
+                "source": "webhook" if not existing else "both",
+                "created_at": wh.get("created_at") or existing.get("created_at"),
+            }
+
+        transactions = list(merged.values())
+        transactions.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+
+        total = len(transactions)
+        paginated = transactions[skip: skip + page_size]
+
+        # Enrich with linked order info if available
+        for tx in paginated:
+            oid = tx.get("order_id")
+            if oid:
+                linked = await database.offline_invoices.find_one(
+                    {"pine_labs_order_id": oid},
+                    {"_id": 0, "invoice_number": 1, "customer_name": 1, "customer_email": 1,
+                     "customer_phone": 1, "total_amount": 1, "payment_status": 1, "store_code": 1}
+                )
+                if linked:
+                    tx["linked_invoice"] = linked
+
+        return {
+            "success": True,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "transactions": paginated
+        }
+    except Exception as e:
+        logger.error(f"[Pine Labs Admin] List error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list transactions: {e}")
+
+
+@router.get("/admin/stats")
+async def transaction_stats(
+    days: int = 30,
+    database = Depends(get_db)
+):
+    """Admin: Aggregated Pine Labs transaction stats for the dashboard."""
+    try:
+        from datetime import timedelta as _td
+        cutoff = (datetime.now(timezone.utc) - _td(days=days)).isoformat()
+
+        pipeline = [
+            {"$match": {"created_at": {"$gte": cutoff}}},
+            {"$group": {
+                "_id": "$payment_status",
+                "count": {"$sum": 1},
+            }}
+        ]
+
+        cb_stats = await database.payment_callbacks.aggregate(pipeline).to_list(length=100)
+        wh_stats = await database.payment_webhooks.aggregate(pipeline).to_list(length=100)
+
+        # Merge counts
+        by_status: Dict[str, int] = {}
+        for row in cb_stats + wh_stats:
+            key = row.get("_id") or "unknown"
+            by_status[key] = by_status.get(key, 0) + row.get("count", 0)
+
+        # Total amount processed (sum from webhooks that have amount)
+        amount_pipeline = [
+            {"$match": {"created_at": {"$gte": cutoff}, "payment_status": "captured"}},
+            {"$project": {"amount": "$payload.data.order_amount.value"}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}, "count": {"$sum": 1}}},
+        ]
+        amount_rows = await database.payment_webhooks.aggregate(amount_pipeline).to_list(length=10)
+        total_amount_paisa = amount_rows[0]["total"] if amount_rows else 0
+        captured_count = amount_rows[0]["count"] if amount_rows else 0
+
+        total_tx = sum(by_status.values())
+        success_count = by_status.get("captured", 0)
+        success_rate = round((success_count / total_tx * 100), 1) if total_tx else 0
+
+        return {
+            "success": True,
+            "period_days": days,
+            "total_transactions": total_tx,
+            "by_status": by_status,
+            "total_amount_inr": round((total_amount_paisa or 0) / 100, 2),
+            "captured_count": captured_count,
+            "success_rate": success_rate,
+        }
+    except Exception as e:
+        logger.error(f"[Pine Labs Admin] Stats error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to compute stats: {e}")
+
+
+@router.get("/admin/transaction/{order_id}")
+async def get_transaction_detail(order_id: str, database = Depends(get_db)):
+    """Admin: Full details for a single Pine Labs transaction (callback + webhook + linked order)."""
+    try:
+        callbacks = await database.payment_callbacks.find(
+            {"order_id": order_id}, {"_id": 0}
+        ).sort("created_at", -1).to_list(length=100)
+
+        webhooks = await database.payment_webhooks.find(
+            {"order_id": order_id}, {"_id": 0}
+        ).sort("created_at", -1).to_list(length=100)
+
+        linked_invoice = await database.offline_invoices.find_one(
+            {"pine_labs_order_id": order_id}, {"_id": 0}
+        )
+        linked_order = await database.orders.find_one(
+            {"payment.transaction_id": order_id}, {"_id": 0}
+        )
+
+        return {
+            "success": True,
+            "order_id": order_id,
+            "callbacks": callbacks,
+            "webhooks": webhooks,
+            "linked_invoice": linked_invoice,
+            "linked_order": linked_order,
+        }
+    except Exception as e:
+        logger.error(f"[Pine Labs Admin] Detail error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch transaction: {e}")
+
+
+@router.post("/admin/reconcile/{order_id}")
+async def admin_reconcile_order(order_id: str, database = Depends(get_db)):
+    """
+    Admin: Manually reconcile a Pine Labs transaction.
+    Fetches live status from Pine Labs and updates the linked order (if any).
+    Useful for transactions where the redirect flow failed (e.g., user closed tab).
+    """
+    try:
+        # Get live status
+        status_result = await check_payment_status(order_id)
+        if not status_result.get("success"):
+            return {"success": False, "message": "Could not fetch status from Pine Labs", "data": status_result}
+
+        plural_status = status_result.get("plural_status", "")
+        payment_status = status_result.get("payment_status", "pending")
+        merchant_ref = status_result.get("merchant_order_reference") or ""
+
+        # Extract our internal order_number from merchant_order_reference format: PL_{order_number}_{uuid8}
+        internal_order_number = None
+        if merchant_ref.startswith("PL_"):
+            parts = merchant_ref.split("_")
+            if len(parts) >= 3:
+                # join everything except first ("PL") and last (uuid) to handle slashes/numbers
+                internal_order_number = "_".join(parts[1:-1])
+
+        # Record callback (so it appears in dashboard)
+        await database.payment_callbacks.insert_one({
+            "order_id": order_id,
+            "merchant_order_id": internal_order_number,
+            "status": plural_status,
+            "payment_status": payment_status,
+            "signature": None,
+            "signature_verified": True,  # API-confirmed
+            "reconciled_manually": True,
+            "gateway": "pine_labs",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+
+        # Update the linked order
+        order_updated = False
+        if internal_order_number and payment_status in ["captured", "failed"]:
+            update_result = await database.orders.update_one(
+                {"$or": [
+                    {"order_number": internal_order_number},
+                    {"id": internal_order_number},
+                    {"order_id": internal_order_number},
+                ]},
+                {"$set": {
+                    "payment_status": "completed" if payment_status == "captured" else payment_status,
+                    "payment.status": "completed" if payment_status == "captured" else payment_status,
+                    "payment.transaction_id": order_id,
+                    "payment.gateway": "pine_labs",
+                    "payment.verified_at": datetime.now(timezone.utc).isoformat(),
+                    "pine_labs_order_id": order_id,
+                    "order_status": "confirmed" if payment_status == "captured" else "payment_failed",
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            order_updated = update_result.matched_count > 0
+
+            # On successful reconcile, fire CRM email + Shiprocket sync
+            if payment_status == "captured" and order_updated:
+                order_doc = await database.orders.find_one({"$or": [
+                    {"order_number": internal_order_number},
+                    {"id": internal_order_number},
+                    {"order_id": internal_order_number},
+                ]})
+                if order_doc:
+                    await _post_payment_notify_and_sync(order_doc, database)
+
+        return {
+            "success": True,
+            "order_id": order_id,
+            "merchant_order_reference": merchant_ref,
+            "internal_order_number": internal_order_number,
+            "payment_status": payment_status,
+            "plural_status": plural_status,
+            "order_updated": order_updated,
+            "message": "Reconciled successfully" if order_updated else "Status fetched but no matching internal order found"
+        }
+    except Exception as e:
+        logger.error(f"[Pine Labs Reconcile] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Reconcile failed: {e}")
+
+
+@router.post("/admin/reconcile-all-pending")
+async def admin_reconcile_all_pending(
+    lookback_hours: int = 72,
+    database = Depends(get_db)
+):
+    """Scan all recent orders with payment_status='pending' (or missing) that have a
+    linked pine_labs_order_id and re-check their status against Pine Labs.
+    Updates orders + fires CRM email + Shiprocket sync for newly-captured ones.
+
+    - lookback_hours: how far back to scan (default 72h).
+    """
+    from datetime import datetime, timedelta, timezone as _tz
+    cutoff = (datetime.now(_tz.utc) - timedelta(hours=lookback_hours)).isoformat()
+
+    # Find pending prepaid orders in the lookback window
+    query = {
+        "created_at": {"$gte": cutoff},
+        "$or": [
+            {"payment_status": {"$in": ["pending", "created", None, ""]}},
+            {"payment.status": {"$in": ["pending", "created", None, ""]}},
+        ],
+        "payment_method": {"$ne": "cod"},
+    }
+    orders = await database.orders.find(query).to_list(length=200)
+
+    checked = 0
+    updated = 0
+    still_pending = 0
+    failed_lookup = 0
+    results = []
+
+    for order_doc in orders:
+        pl_id = order_doc.get("pine_labs_order_id")
+        phonepe_txn = order_doc.get("phonepe_merchant_transaction_id")
+        order_number = order_doc.get("order_number") or order_doc.get("id")
+
+        # If neither txn id is stored on the order, try to recover from payment_callbacks
+        if not pl_id and not phonepe_txn:
+            cb = await database.payment_callbacks.find_one(
+                {"merchant_order_id": order_number}, sort=[("created_at", -1)]
+            )
+            if cb:
+                if cb.get("gateway") == "phonepe":
+                    phonepe_txn = cb.get("merchant_transaction_id")
+                    # persist so future runs are faster
+                    if phonepe_txn:
+                        await database.orders.update_one(
+                            {"id": order_doc.get("id")},
+                            {"$set": {"phonepe_merchant_transaction_id": phonepe_txn}},
+                        )
+                else:
+                    pl_id = cb.get("order_id")
+        if not pl_id and not phonepe_txn:
+            continue
+
+        checked += 1
+        try:
+            # ---- Prefer PhonePe check when available ----
+            payment_status = "pending"
+            plural_status = ""
+            provider = "pine_labs"
+
+            if phonepe_txn:
+                try:
+                    from phonepe_routes import check_payment_status as _phonepe_check
+                    pp_res = await _phonepe_check(phonepe_txn)
+                    pp_state = (
+                        ((pp_res.get("data") or {}).get("state") or pp_res.get("code") or "")
+                    ).upper()
+                    if pp_state:
+                        provider = "phonepe"
+                        plural_status = pp_state
+                        if pp_state in ("COMPLETED", "SUCCESS", "PAYMENT_SUCCESS"):
+                            payment_status = "captured"
+                        elif pp_state in (
+                            "FAILED", "FAILURE", "PAYMENT_ERROR", "PAYMENT_DECLINED",
+                            "PAYMENT_CANCELLED", "TIMED_OUT", "EXPIRED", "AUTHORIZATION_FAILED",
+                        ):
+                            payment_status = "failed"
+                        elif pp_state == "TRANSACTION_NOT_FOUND":
+                            # Customer never completed/attempted the payment. If the order
+                            # is older than 60 min, mark it failed (abandoned checkout).
+                            order_age_ok = False
+                            try:
+                                created = order_doc.get("created_at")
+                                created_dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                                if created_dt.tzinfo is None:
+                                    created_dt = created_dt.replace(tzinfo=_tz.utc)
+                                order_age_ok = (datetime.now(_tz.utc) - created_dt).total_seconds() > 3600
+                            except Exception:
+                                pass
+                            if order_age_ok:
+                                payment_status = "failed"
+                                plural_status = "ABANDONED (TRANSACTION_NOT_FOUND)"
+                except Exception as _pp_e:
+                    logger.warning(f"[Reconcile-All] PhonePe lookup failed for {order_number}: {_pp_e}")
+
+            # ---- Fall back to Pine Labs check ----
+            if payment_status == "pending" and pl_id:
+                status_result = await check_payment_status(pl_id)
+                if status_result.get("success"):
+                    provider = "pine_labs"
+                    payment_status = status_result.get("payment_status", "pending")
+                    plural_status = status_result.get("plural_status", "")
+
+            # ---- Gateway-independent safety net (works even if status API is down) ----
+            # 1) If PhonePe already sent a FAILED callback that was never applied, apply it now.
+            # 2) If the order is >24h old with NO success callback and the gateway lookup was
+            #    inconclusive, treat it as abandoned/unpaid and mark it failed.
+            if payment_status == "pending":
+                try:
+                    cbs = await database.payment_callbacks.find(
+                        {"$or": [
+                            {"merchant_transaction_id": phonepe_txn} if phonepe_txn else {"_no_": True},
+                            {"merchant_order_id": order_number},
+                        ]}
+                    ).sort("created_at", -1).to_list(10)
+                    cb_states = [str(cb.get("state") or cb.get("code") or "").upper() for cb in cbs]
+                    if any(s in ("SUCCESS", "COMPLETED", "PAYMENT_SUCCESS") for s in cb_states):
+                        payment_status = "captured"
+                        provider = "phonepe"
+                        plural_status = "CALLBACK_SUCCESS (recovered)"
+                    elif cb_states and cb_states[0] in (
+                        "FAILED", "FAILURE", "PAYMENT_ERROR", "PAYMENT_DECLINED",
+                        "PAYMENT_CANCELLED", "TIMED_OUT", "AUTHORIZATION_FAILED",
+                    ):
+                        payment_status = "failed"
+                        provider = "phonepe"
+                        plural_status = f"CALLBACK_{cb_states[0]}"
+                    elif not any(s in ("SUCCESS", "COMPLETED", "PAYMENT_SUCCESS") for s in cb_states):
+                        try:
+                            created_dt = datetime.fromisoformat(str(order_doc.get("created_at")).replace("Z", "+00:00"))
+                            if created_dt.tzinfo is None:
+                                created_dt = created_dt.replace(tzinfo=_tz.utc)
+                            if (datetime.now(_tz.utc) - created_dt).total_seconds() > 86400:
+                                payment_status = "failed"
+                                plural_status = "EXPIRED_NO_PAYMENT (24h, no confirmation)"
+                        except Exception:
+                            pass
+                except Exception as _cb_e:
+                    logger.warning(f"[Reconcile-All] callback safety-net error for {order_number}: {_cb_e}")
+
+            if payment_status == "captured":
+                update_fields = {
+                    "payment_status": "completed",
+                    "payment.status": "completed",
+                    "payment.gateway": provider,
+                    "payment.verified_at": datetime.now(_tz.utc).isoformat(),
+                    "order_status": "confirmed",
+                    "updated_at": datetime.now(_tz.utc).isoformat(),
+                }
+                if pl_id:
+                    update_fields["payment.transaction_id"] = pl_id
+                await database.orders.update_one(
+                    {"id": order_doc.get("id")},
+                    {"$set": update_fields},
+                )
+                updated += 1
+                refreshed = await database.orders.find_one({"id": order_doc.get("id")})
+                if refreshed:
+                    await _post_payment_notify_and_sync(refreshed, database)
+                results.append({"order": order_number, "state": "captured", "provider": provider, "plural_status": plural_status})
+            elif payment_status == "failed":
+                await database.orders.update_one(
+                    {"id": order_doc.get("id")},
+                    {"$set": {
+                        "payment_status": "failed",
+                        "payment.status": "failed",
+                        "payment.failed_reason": plural_status,
+                        "order_status": "payment_failed",
+                        "updated_at": datetime.now(_tz.utc).isoformat(),
+                    }},
+                )
+                updated += 1
+                results.append({"order": order_number, "state": "failed", "provider": provider, "plural_status": plural_status})
+            else:
+                still_pending += 1
+                results.append({"order": order_number, "state": "still_pending", "provider": provider, "plural_status": plural_status})
+        except Exception as _e:
+            logger.warning(f"[Reconcile-All] Error for {order_number}: {_e}")
+            failed_lookup += 1
+
+    return {
+        "success": True,
+        "lookback_hours": lookback_hours,
+        "scanned": len(orders),
+        "checked_with_gateway": checked,
+        "updated": updated,
+        "still_pending": still_pending,
+        "failed_lookup": failed_lookup,
+        "details": results,
+    }
+
+
+@router.post("/admin/link-order")
+async def admin_manual_link_order(
+    pine_labs_order_id: str,
+    internal_order_number: str,
+    database = Depends(get_db)
+):
+    """
+    Admin: Manually link a Pine Labs order_id to an internal order_number.
+    Useful when reconcile can't auto-extract the merchant reference.
+    Marks the order as paid via Pine Labs.
+    """
+    try:
+        status_result = await check_payment_status(pine_labs_order_id)
+        plural_status = status_result.get("plural_status", "")
+        payment_status = status_result.get("payment_status", "pending")
+
+        update_result = await database.orders.update_one(
+            {"$or": [
+                {"order_number": internal_order_number},
+                {"id": internal_order_number},
+                {"order_id": internal_order_number},
+            ]},
+            {"$set": {
+                "payment_status": "completed" if payment_status == "captured" else payment_status,
+                "payment.status": "completed" if payment_status == "captured" else payment_status,
+                "payment.transaction_id": pine_labs_order_id,
+                "payment.gateway": "pine_labs",
+                "payment.verified_at": datetime.now(timezone.utc).isoformat(),
+                "pine_labs_order_id": pine_labs_order_id,
+                "order_status": "confirmed" if payment_status == "captured" else "payment_failed",
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+
+        return {
+            "success": update_result.matched_count > 0,
+            "matched_count": update_result.matched_count,
+            "payment_status": payment_status,
+            "plural_status": plural_status,
+        }
+    except Exception as e:
+        logger.error(f"[Pine Labs Link] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Link failed: {e}")
+
+
+@router.post("/recover-by-merchant-order")
+async def recover_by_merchant_order(
+    payload: Dict[str, Any],
+    database = Depends(get_db)
+):
+    """
+    Recovery: Given our internal order_number, find the Pine Labs order by querying
+    payment_callbacks/webhooks (if already recorded) OR by listing Pine Labs orders.
+    Updates the order and returns status.
+    """
+    merchant_order_number = payload.get("merchant_order_number") or payload.get("order_number")
+    if not merchant_order_number:
+        raise HTTPException(status_code=400, detail="merchant_order_number required")
+
+    # Try to find via existing payment_callbacks/webhooks (by merchant_order_id field)
+    existing = await database.payment_callbacks.find_one(
+        {"merchant_order_id": merchant_order_number},
+        {"_id": 0},
+        sort=[("created_at", -1)]
+    )
+
+    pine_order_id = None
+    if existing:
+        pine_order_id = existing.get("order_id")
+
+    # If no callback yet, search in webhooks payload for the merchant ref (which is PL_{order_number}_{uuid})
+    if not pine_order_id:
+        wh = await database.payment_webhooks.find_one(
+            {"$or": [
+                {"payload.data.merchant_order_reference": {"$regex": f"_{merchant_order_number}_"}},
+                {"payload.merchant_order_reference": {"$regex": f"_{merchant_order_number}_"}},
+            ]},
+            {"_id": 0},
+            sort=[("created_at", -1)]
+        )
+        if wh:
+            pine_order_id = wh.get("order_id")
+
+    if not pine_order_id:
+        return {
+            "success": False,
+            "message": "Pine Labs order not found yet. Webhook may be delayed. Try Reconcile from Admin Dashboard with the Pine Labs Transaction ID."
+        }
+
+    # Use the existing handler to fetch live status, record, and update order
+    return await _handle_payment_callback(
+        order_id=pine_order_id,
+        status="PROCESSED",  # will be overridden by live status fetch below if needed
+        signature=None,
+        error_code=None,
+        error_message=None,
+        merchant_order_id=merchant_order_number,
+        database=database
+    )
+
+
+@router.get("/recent-pending-order")
+async def recent_pending_pine_labs_order(
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    database = Depends(get_db)
+):
+    """
+    Fallback recovery: returns the most recent pending Pine Labs order for a customer
+    (looked up by email or phone). Used by PaymentSuccess.js when localStorage is empty
+    after a cross-domain redirect.
+    """
+    if not email and not phone:
+        raise HTTPException(status_code=400, detail="email or phone required")
+
+    or_q: List[Dict[str, Any]] = []
+    if email:
+        or_q.append({"customer_details.email": email})
+    if phone:
+        or_q.append({"customer_details.phone": phone})
+
+    # Find most recent pending online order placed in the last 1 hour
+    from datetime import timedelta as _td
+    cutoff = (datetime.now(timezone.utc) - _td(hours=1)).isoformat()
+
+    order = await database.orders.find_one(
+        {
+            "$or": or_q,
+            "payment_method": "pinelabs",
+            "payment_status": "pending",
+            "created_at": {"$gte": cutoff},
+        },
+        {"_id": 0, "order_number": 1, "id": 1, "total_amount": 1, "created_at": 1, "customer_details": 1},
+        sort=[("created_at", -1)]
+    )
+
+    if not order:
+        return {"success": False, "message": "No recent pending Pine Labs order found"}
+
+    return {
+        "success": True,
+        "order_number": order.get("order_number"),
+        "total_amount": order.get("total_amount"),
+        "created_at": order.get("created_at"),
+    }
+
+
+@router.get("/config")
+async def get_pine_labs_config():
+    """
+    Get Pine Labs configuration info (non-sensitive).
+    Useful for frontend to check if Pine Labs is configured.
+    """
+    return {
+        "enabled": bool(PINE_LABS_MERCHANT_ID and PINE_LABS_CLIENT_ID and PINE_LABS_CLIENT_SECRET),
+        "environment": PINE_LABS_ENVIRONMENT,
+        "merchant_id": PINE_LABS_MERCHANT_ID,
+        "api_base": PLURAL_API_BASE,
+        "callback_url": get_callback_url(),
+        "redirect_url": get_redirect_url()
+    }

@@ -1,0 +1,1018 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { 
+  Package, Plus, Check, X, Search, FileText, 
+  AlertCircle, CheckCircle, Truck, Calendar, PlusCircle, Printer
+} from 'lucide-react';
+
+const GoodsReceiptNote = ({ warehouseId }) => {
+  const [grns, setGrns] = useState([]);
+  const [pendingPOs, setPendingPOs] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [vendors, setVendors] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [selectedPO, setSelectedPO] = useState(null);
+  const [poSearchInput, setPoSearchInput] = useState('');
+  const [poFetchError, setPoFetchError] = useState('');
+  const [poFetchLoading, setPoFetchLoading] = useState(false);
+  const [showViewModal, setShowViewModal] = useState(false);
+  const [viewingGRN, setViewingGRN] = useState(null);
+  const [viewLoading, setViewLoading] = useState(false);
+  const [createLoading, setCreateLoading] = useState(false);
+  
+  // New Product Modal state
+  const [showNewProductModal, setShowNewProductModal] = useState(false);
+  const [newProductItemIndex, setNewProductItemIndex] = useState(null);
+  const [newProductData, setNewProductData] = useState({
+    name: '',
+    model_number: '',
+    brand: '',
+    category: '',
+    hsn_code: '',
+    cost_price: 0,
+    selling_price: 0,
+    tax_rate: 18
+  });
+  const [creatingProduct, setCreatingProduct] = useState(false);
+  
+  // Form state
+  const [formData, setFormData] = useState({
+    po_number: '',
+    po_id: '',
+    vendor_name: '',
+    vendor_id: '',
+    vendor_invoice_number: '',
+    vendor_invoice_date: '',
+    vendor_gstin: '',
+    items: [{ product_id: '', product_name: '', model_number: '', ordered_quantity: 0, received_quantity: 0, unit_price: 0 }],
+    notes: ''
+  });
+
+  useEffect(() => {
+    fetchGRNs();
+    fetchPendingPOs();
+    fetchProducts();
+    fetchVendors();
+  }, [warehouseId]);
+
+  const fetchGRNs = async () => {
+    setLoading(true);
+    try {
+      const url = warehouseId 
+        ? `${BACKEND_URL}/api/grn/?warehouse_id=${warehouseId}` 
+        : `${BACKEND_URL}/api/grn/`;
+      const response = await fetch(url);
+      const data = await response.json();
+      if (data.status === 'success') {
+        setGrns(data.grns || []);
+      }
+    } catch (error) {
+      console.error('Error fetching GRNs:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPendingPOs = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/grn/pending-pos`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        setPendingPOs(data.purchase_orders || []);
+      }
+    } catch (error) {
+      console.error('Error fetching pending POs:', error);
+    }
+  };
+
+  const fetchProducts = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products?limit=1000&include_unlisted=true`);
+      const data = await response.json();
+      setProducts(Array.isArray(data) ? data : (data.products || []));
+    } catch (error) {
+      console.error('Error fetching products:', error);
+    }
+  };
+
+  const fetchVendors = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/vendors`);
+      const data = await response.json();
+      setVendors(data.vendors || []);
+    } catch (error) {
+      console.error('Error fetching vendors:', error);
+    }
+  };
+
+  // Open new product modal
+  const openNewProductModal = (itemIndex) => {
+    setNewProductItemIndex(itemIndex);
+    const currentItem = formData.items[itemIndex];
+    setNewProductData({
+      name: currentItem.product_name || '',
+      model_number: currentItem.model_number || '',
+      brand: '',
+      category: 'Appliances',
+      hsn_code: '',
+      cost_price: currentItem.unit_price || 0,
+      selling_price: 0,
+      tax_rate: 18
+    });
+    setShowNewProductModal(true);
+  };
+
+  // Create new product
+  const handleCreateNewProduct = async () => {
+    if (!newProductData.name || !newProductData.model_number) {
+      alert('Product name and model number are required');
+      return;
+    }
+
+    setCreatingProduct(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newProductData.name,
+          model_number: newProductData.model_number,
+          sku: newProductData.model_number,
+          brand: newProductData.brand,
+          category: newProductData.category,
+          hsn_code: newProductData.hsn_code,
+          cost_price: parseFloat(newProductData.cost_price) || 0,
+          price: parseFloat(newProductData.selling_price) || parseFloat(newProductData.cost_price) * 1.2,
+          selling_price: parseFloat(newProductData.selling_price) || parseFloat(newProductData.cost_price) * 1.2,
+          tax_rate: parseFloat(newProductData.tax_rate) || 18,
+          current_stock: 0,
+          status: 'active',
+          created_from: 'grn'
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        // Add to products list
+        const newProduct = data.product || data;
+        setProducts(prev => [...prev, newProduct]);
+
+        // Update the item in form
+        if (newProductItemIndex !== null) {
+          const newItems = [...formData.items];
+          newItems[newProductItemIndex] = {
+            ...newItems[newProductItemIndex],
+            product_id: newProduct.id,
+            product_name: `${newProduct.model_number} - ${newProduct.name}`,
+            model_number: newProduct.model_number,
+            unit_price: newProduct.cost_price || 0
+          };
+          setFormData({ ...formData, items: newItems });
+        }
+
+        setShowNewProductModal(false);
+        setNewProductItemIndex(null);
+        alert(`Product "${newProductData.name}" created successfully!`);
+      } else {
+        alert(data.detail || 'Failed to create product');
+      }
+    } catch (error) {
+      console.error('Error creating product:', error);
+      alert('Error creating product: ' + error.message);
+    } finally {
+      setCreatingProduct(false);
+    }
+  };
+
+  const handleSelectPO = (po) => {
+    setSelectedPO(po);
+    setFormData({
+      ...formData,
+      po_number: po.po_number,
+      po_id: po.id,
+      vendor_name: po.vendor_name || '',
+      vendor_id: po.vendor_id || '',
+      items: (po.items || []).map(item => ({
+        product_id: item.product_id || '',
+        product_name: item.product_name || '',
+        model_number: item.model_number || '',
+        ordered_quantity: item.quantity || 0,
+        received_quantity: item.quantity || 0,
+        unit_price: item.unit_price || 0
+      }))
+    });
+    setPoFetchError('');
+  };
+
+  const handleFetchPO = async () => {
+    const query = poSearchInput.trim();
+    if (!query) return;
+    setPoFetchLoading(true);
+    setPoFetchError('');
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/purchases/${encodeURIComponent(query)}`);
+      const data = await response.json();
+      const purchase = data.purchase || (data.po_number ? data : null);
+      if (response.ok && purchase && (purchase.po_number || purchase.id)) {
+        setSelectedPO(purchase);
+        setFormData({
+          ...formData,
+          po_number: purchase.po_number || '',
+          po_id: purchase.id || '',
+          vendor_name: purchase.vendor?.name || '',
+          vendor_id: '',
+          items: (purchase.items || []).map(item => ({
+            product_id: '',
+            product_name: item.product_name || '',
+            model_number: '',
+            ordered_quantity: item.quantity || 0,
+            received_quantity: item.quantity || 0,
+            unit_price: item.rate || 0
+          }))
+        });
+      } else {
+        setPoFetchError(data.detail || `No Purchase Order found for "${query}"`);
+      }
+    } catch (error) {
+      console.error('Error fetching PO:', error);
+      setPoFetchError('Error fetching Purchase Order. Please try again.');
+    } finally {
+      setPoFetchLoading(false);
+    }
+  };
+
+  const handleAddItem = () => {
+    setFormData({
+      ...formData,
+      items: [...formData.items, { product_id: '', product_name: '', model_number: '', ordered_quantity: 0, received_quantity: 0, unit_price: 0 }]
+    });
+  };
+
+  const handleRemoveItem = (index) => {
+    setFormData({
+      ...formData,
+      items: formData.items.filter((_, i) => i !== index)
+    });
+  };
+
+  const handleItemChange = (index, field, value) => {
+    const newItems = [...formData.items];
+    newItems[index][field] = value;
+    
+    // If product selected, fill details
+    if (field === 'product_id' && value) {
+      const product = products.find(p => p.id === value);
+      if (product) {
+        newItems[index].product_name = product.name || '';
+        newItems[index].model_number = product.model_number || product.sku || '';
+        newItems[index].unit_price = product.price || product.cost_price || 0;
+      }
+    }
+    
+    setFormData({ ...formData, items: newItems });
+  };
+
+  const handleSubmit = async () => {
+    if (!formData.vendor_name || formData.items.length === 0) {
+      alert('Please fill vendor name and add at least one item');
+      return;
+    }
+
+    setCreateLoading(true);
+    try {
+      const storeData = JSON.parse(localStorage.getItem('storeData') || '{}');
+      
+      const payload = {
+        ...formData,
+        warehouse_id: warehouseId || storeData.id,
+        received_by: JSON.parse(localStorage.getItem('storeUser') || '{}').name || 'Warehouse Staff'
+      };
+
+      const response = await fetch(`${BACKEND_URL}/api/grn/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+
+      if (data.status === 'success') {
+        alert(`GRN ${data.grn_number} created successfully!`);
+        setShowCreateModal(false);
+        setSelectedPO(null);
+        setFormData({
+          po_number: '',
+          po_id: '',
+          vendor_name: '',
+          vendor_id: '',
+          vendor_invoice_number: '',
+          vendor_invoice_date: '',
+          vendor_gstin: '',
+          items: [{ product_id: '', product_name: '', model_number: '', ordered_quantity: 0, received_quantity: 0, unit_price: 0 }],
+          notes: ''
+        });
+        fetchGRNs();
+        fetchPendingPOs();
+      } else {
+        alert(data.detail || 'Failed to create GRN');
+      }
+    } catch (error) {
+      console.error('Error creating GRN:', error);
+      alert('Error creating GRN');
+    } finally {
+      setCreateLoading(false);
+    }
+  };
+
+  const formatDate = (dateStr) => {
+    if (!dateStr) return 'N/A';
+    return new Date(dateStr).toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric'
+    });
+  };
+
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      maximumFractionDigits: 0
+    }).format(amount || 0);
+  };
+
+  const handleViewGRN = async (grnId) => {
+    setShowViewModal(true);
+    setViewLoading(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/grn/${grnId}`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        setViewingGRN(data.grn);
+      }
+    } catch (error) {
+      console.error('Error fetching GRN details:', error);
+    } finally {
+      setViewLoading(false);
+    }
+  };
+
+  const handlePrintGRN = (grnId) => {
+    const printWindow = window.open(`${BACKEND_URL}/api/documents/grn/${grnId}/html`, '_blank');
+    if (printWindow) {
+      printWindow.onload = () => {
+        setTimeout(() => {
+          printWindow.print();
+        }, 400);
+      };
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-gray-800">Goods Receipt Notes</h2>
+            <p className="text-sm text-gray-500">Record goods received from suppliers</p>
+          </div>
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
+          >
+            <Plus className="w-4 h-4" />
+            Create GRN
+          </button>
+        </div>
+      </div>
+
+      {/* Pending POs Alert */}
+      {pendingPOs.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <div className="flex items-center gap-2 text-amber-800">
+            <AlertCircle className="w-5 h-5" />
+            <span className="font-medium">{pendingPOs.length} Purchase Orders awaiting receipt</span>
+          </div>
+        </div>
+      )}
+
+      {/* GRN List */}
+      <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+        <div className="p-4 border-b">
+          <h3 className="font-semibold text-gray-800">Recent GRNs</h3>
+        </div>
+        
+        {loading ? (
+          <div className="p-8 text-center text-gray-500">Loading...</div>
+        ) : grns.length === 0 ? (
+          <div className="p-8 text-center text-gray-500">
+            <Package className="w-12 h-12 mx-auto mb-2 opacity-30" />
+            <p>No GRNs found</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">GRN #</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PO #</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vendor</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Items</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {grns.map(grn => (
+                  <tr key={grn.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 font-medium text-purple-600">{grn.grn_number}</td>
+                    <td className="px-4 py-3 text-sm">{grn.po_number || '-'}</td>
+                    <td className="px-4 py-3 text-sm">{grn.vendor_name}</td>
+                    <td className="px-4 py-3 text-sm">{grn.total_items} items</td>
+                    <td className="px-4 py-3 text-sm font-medium">{formatCurrency(grn.total_value)}</td>
+                    <td className="px-4 py-3 text-sm">{formatDate(grn.created_at)}</td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-1 text-xs rounded-full ${
+                        grn.has_discrepancies 
+                          ? 'bg-amber-100 text-amber-700'
+                          : 'bg-green-100 text-green-700'
+                      }`}>
+                        {grn.has_discrepancies ? 'Discrepancy' : 'Complete'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => handleViewGRN(grn.id)}
+                          className="text-purple-600 hover:text-purple-800 text-sm font-medium underline"
+                          data-testid={`view-grn-${grn.grn_number}`}
+                        >
+                          View
+                        </button>
+                        <button
+                          onClick={() => handlePrintGRN(grn.id)}
+                          className="text-gray-500 hover:text-gray-700"
+                          title="Print GRN"
+                        >
+                          <Printer className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Create GRN Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] overflow-hidden">
+            <div className="p-4 border-b bg-purple-600 text-white flex items-center justify-between">
+              <h3 className="text-lg font-bold">Create Goods Receipt Note</h3>
+              <button onClick={() => { setShowCreateModal(false); setSelectedPO(null); }} className="p-1 hover:bg-white/20 rounded">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto max-h-[calc(90vh-180px)]">
+              {/* Select from PO or Manual */}
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Purchase Order Number (Optional)</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={poSearchInput}
+                    onChange={(e) => { setPoSearchInput(e.target.value); setPoFetchError(''); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleFetchPO(); } }}
+                    placeholder="Enter PO number e.g. PO-20260806-0006"
+                    className="flex-1 px-3 py-2 border rounded-lg"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleFetchPO}
+                    disabled={poFetchLoading || !poSearchInput.trim()}
+                    className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                  >
+                    {poFetchLoading ? 'Fetching...' : 'Fetch'}
+                  </button>
+                  {selectedPO && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedPO(null);
+                        setPoSearchInput('');
+                        setPoFetchError('');
+                        setFormData({
+                          ...formData,
+                          po_number: '',
+                          po_id: '',
+                          vendor_name: '',
+                          vendor_id: '',
+                          items: [{ product_id: '', product_name: '', model_number: '', ordered_quantity: 0, received_quantity: 0, unit_price: 0 }]
+                        });
+                      }}
+                      className="px-3 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                {poFetchError && (
+                  <p className="text-sm text-red-600 mt-1 flex items-center gap-1">
+                    <AlertCircle className="w-4 h-4" /> {poFetchError}
+                  </p>
+                )}
+                {selectedPO && (
+                  <p className="text-sm text-green-600 mt-1 flex items-center gap-1">
+                    <CheckCircle className="w-4 h-4" /> Loaded PO {selectedPO.po_number} — {selectedPO.vendor?.name || selectedPO.vendor_name}, {(selectedPO.items || []).length} item(s)
+                  </p>
+                )}
+                <p className="text-xs text-gray-500 mt-2">Or fill details manually below</p>
+              </div>
+
+              {/* Vendor Details */}
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Vendor Name *</label>
+                  <input
+                    type="text"
+                    value={formData.vendor_name}
+                    onChange={(e) => setFormData({...formData, vendor_name: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    placeholder="Enter vendor name"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">PO Number</label>
+                  <input
+                    type="text"
+                    value={formData.po_number}
+                    onChange={(e) => setFormData({...formData, po_number: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    placeholder="PO-XXXX (optional)"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Vendor Invoice #</label>
+                  <input
+                    type="text"
+                    value={formData.vendor_invoice_number}
+                    onChange={(e) => setFormData({...formData, vendor_invoice_number: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    placeholder="Vendor's invoice number"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Invoice Date</label>
+                  <input
+                    type="date"
+                    value={formData.vendor_invoice_date}
+                    onChange={(e) => setFormData({...formData, vendor_invoice_date: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Vendor GST Number</label>
+                  <input
+                    type="text"
+                    value={formData.vendor_gstin}
+                    onChange={(e) => setFormData({...formData, vendor_gstin: e.target.value.toUpperCase()})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    placeholder="e.g. 29AABCB1234C1Z5"
+                    maxLength={15}
+                  />
+                </div>
+              </div>
+
+              {/* Items */}
+              <div className="mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium text-gray-700">Items Received *</label>
+                  <button onClick={handleAddItem} className="text-sm text-purple-600 hover:text-purple-800">
+                    + Add Item
+                  </button>
+                </div>
+                
+                {/* Column Headers */}
+                <div className="grid grid-cols-12 gap-2 px-3 py-2 bg-gray-100 rounded-t-lg text-xs font-medium text-gray-600">
+                  <div className="col-span-4">Product (Type model# to search)</div>
+                  <div className="col-span-1 text-center">New</div>
+                  <div className="col-span-2 text-center">Ordered Qty</div>
+                  <div className="col-span-2 text-center">Received Qty</div>
+                  <div className="col-span-2 text-center">Unit Price</div>
+                  <div className="col-span-1"></div>
+                </div>
+                
+                <div className="space-y-2 border border-t-0 rounded-b-lg p-2">
+                  {formData.items.map((item, idx) => (
+                    <div key={idx} className="grid grid-cols-12 gap-2 items-center p-2 bg-gray-50 rounded-lg">
+                      {/* Product Selection with Search */}
+                      <div className="col-span-4">
+                        <input
+                          type="text"
+                          list={`products-${idx}`}
+                          placeholder="Type model # or name..."
+                          value={item.product_name || ''}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            // Find matching product
+                            const matchedProduct = products.find(p => 
+                              `${p.model_number || p.sku} - ${p.name?.substring(0, 30)}` === value ||
+                              p.model_number === value ||
+                              p.sku === value
+                            );
+                            if (matchedProduct) {
+                              handleItemChange(idx, 'product_id', matchedProduct.id);
+                              handleItemChange(idx, 'product_name', `${matchedProduct.model_number || matchedProduct.sku} - ${matchedProduct.name?.substring(0, 30)}`);
+                              handleItemChange(idx, 'unit_price', matchedProduct.cost_price || matchedProduct.price || 0);
+                            } else {
+                              handleItemChange(idx, 'product_name', value);
+                              handleItemChange(idx, 'product_id', ''); // Clear product_id for new products
+                            }
+                          }}
+                          className="w-full px-2 py-1.5 border rounded text-sm"
+                        />
+                        <datalist id={`products-${idx}`}>
+                          {products.map(p => (
+                            <option key={p.id} value={`${p.model_number || p.sku} - ${p.name?.substring(0, 30)}`}>
+                              {p.brand} | Stock: {p.current_stock || 0}
+                            </option>
+                          ))}
+                        </datalist>
+                      </div>
+                      
+                      {/* Create New Product Button */}
+                      <div className="col-span-1 text-center">
+                        <button
+                          type="button"
+                          onClick={() => openNewProductModal(idx)}
+                          className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg border border-green-200"
+                          title="Create New Product"
+                        >
+                          <PlusCircle className="w-4 h-4" />
+                        </button>
+                      </div>
+                      
+                      {/* Ordered Quantity */}
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        title="Ordered Quantity"
+                        value={item.ordered_quantity}
+                        onChange={(e) => handleItemChange(idx, 'ordered_quantity', parseInt(e.target.value) || 0)}
+                        className="col-span-2 px-2 py-1.5 border rounded text-sm text-center"
+                      />
+                      
+                      {/* Received Quantity */}
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        title="Received Quantity"
+                        value={item.received_quantity}
+                        onChange={(e) => handleItemChange(idx, 'received_quantity', parseInt(e.target.value) || 0)}
+                        className={`col-span-2 px-2 py-1.5 border rounded text-sm text-center ${
+                          item.ordered_quantity && item.received_quantity !== item.ordered_quantity 
+                            ? 'border-amber-400 bg-amber-50' 
+                            : ''
+                        }`}
+                      />
+                      
+                      {/* Unit Price */}
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="₹0"
+                        title="Unit Price"
+                        value={item.unit_price}
+                        onChange={(e) => handleItemChange(idx, 'unit_price', parseFloat(e.target.value) || 0)}
+                        className="col-span-2 px-2 py-1.5 border rounded text-sm text-center"
+                      />
+                      
+                      {/* Remove Button */}
+                      <div className="col-span-1 text-center">
+                        {formData.items.length > 1 && (
+                          <button onClick={() => handleRemoveItem(idx)} className="p-1 text-red-500 hover:bg-red-50 rounded">
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                
+                {/* Discrepancy Warning */}
+                {formData.items.some(item => item.ordered_quantity && item.received_quantity !== item.ordered_quantity) && (
+                  <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2 text-amber-700 text-sm">
+                    <AlertCircle className="w-4 h-4" />
+                    <span>Quantity discrepancy detected. Please verify received quantities.</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Notes */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <textarea
+                  value={formData.notes}
+                  onChange={(e) => setFormData({...formData, notes: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-lg"
+                  rows={2}
+                  placeholder="Any additional notes..."
+                />
+              </div>
+            </div>
+
+            <div className="p-4 border-t bg-gray-50 flex justify-end gap-3">
+              <button
+                onClick={() => { setShowCreateModal(false); setSelectedPO(null); }}
+                className="px-4 py-2 border rounded-lg hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={createLoading}
+                className="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+              >
+                {createLoading ? 'Creating...' : 'Create GRN'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New Product Modal */}
+      {showNewProductModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl w-full max-w-lg shadow-2xl">
+            <div className="p-6 border-b flex items-center justify-between bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-t-xl">
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <PlusCircle className="w-5 h-5" />
+                Create New Product
+              </h3>
+              <button onClick={() => setShowNewProductModal(false)} className="text-white/80 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-6 space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Product Name *</label>
+                  <input
+                    type="text"
+                    value={newProductData.name}
+                    onChange={(e) => setNewProductData({...newProductData, name: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500"
+                    placeholder="e.g., Bosch 8kg Front Load Washing Machine"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Model Number *</label>
+                  <input
+                    type="text"
+                    value={newProductData.model_number}
+                    onChange={(e) => setNewProductData({...newProductData, model_number: e.target.value.toUpperCase()})}
+                    className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500"
+                    placeholder="e.g., WAJ2846SIN"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Brand</label>
+                  <input
+                    type="text"
+                    value={newProductData.brand}
+                    onChange={(e) => setNewProductData({...newProductData, brand: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    placeholder="e.g., Bosch"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                  <select
+                    value={newProductData.category}
+                    onChange={(e) => setNewProductData({...newProductData, category: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  >
+                    <option value="Appliances">Appliances</option>
+                    <option value="Washing Machine">Washing Machine</option>
+                    <option value="Refrigerator">Refrigerator</option>
+                    <option value="Air Conditioner">Air Conditioner</option>
+                    <option value="Dishwasher">Dishwasher</option>
+                    <option value="Water Purifier">Water Purifier</option>
+                    <option value="Microwave">Microwave</option>
+                    <option value="Chimney">Chimney</option>
+                    <option value="Hob">Hob</option>
+                    <option value="Accessories">Accessories</option>
+                    <option value="Spare Parts">Spare Parts</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">HSN Code</label>
+                  <input
+                    type="text"
+                    value={newProductData.hsn_code}
+                    onChange={(e) => setNewProductData({...newProductData, hsn_code: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    placeholder="e.g., 84501900"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Cost Price (₹) *</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={newProductData.cost_price}
+                    onChange={(e) => setNewProductData({...newProductData, cost_price: parseFloat(e.target.value) || 0})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    placeholder="0"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Selling Price (₹)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={newProductData.selling_price}
+                    onChange={(e) => setNewProductData({...newProductData, selling_price: parseFloat(e.target.value) || 0})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    placeholder="Auto-calculated if empty"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">GST Rate (%)</label>
+                  <select
+                    value={newProductData.tax_rate}
+                    onChange={(e) => setNewProductData({...newProductData, tax_rate: parseFloat(e.target.value)})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  >
+                    <option value="0">0%</option>
+                    <option value="5">5%</option>
+                    <option value="12">12%</option>
+                    <option value="18">18%</option>
+                    <option value="28">28%</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            
+            <div className="p-6 border-t flex justify-end gap-3">
+              <button
+                onClick={() => setShowNewProductModal(false)}
+                className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateNewProduct}
+                disabled={creatingProduct || !newProductData.name || !newProductData.model_number}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {creatingProduct ? (
+                  <>Creating...</>
+                ) : (
+                  <>
+                    <PlusCircle className="w-4 h-4" />
+                    Create Product
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* View GRN Modal */}
+      {showViewModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-hidden">
+            <div className="p-4 border-b bg-purple-600 text-white flex items-center justify-between">
+              <h3 className="text-lg font-bold">
+                GRN Details {viewingGRN ? `- ${viewingGRN.grn_number}` : ''}
+              </h3>
+              <div className="flex items-center gap-2">
+                {viewingGRN && (
+                  <button
+                    onClick={() => handlePrintGRN(viewingGRN.id)}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded text-sm font-medium"
+                    title="Print GRN"
+                  >
+                    <Printer className="w-4 h-4" />
+                    Print
+                  </button>
+                )}
+                <button
+                  onClick={() => { setShowViewModal(false); setViewingGRN(null); }}
+                  className="p-1 hover:bg-white/20 rounded"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 overflow-y-auto max-h-[calc(90vh-80px)]">
+              {viewLoading ? (
+                <div className="text-center py-8 text-gray-500">Loading...</div>
+              ) : !viewingGRN ? (
+                <div className="text-center py-8 text-gray-500">GRN not found</div>
+              ) : (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">PO Number</p>
+                      <p className="font-medium">{viewingGRN.po_number || '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">Vendor</p>
+                      <p className="font-medium">{viewingGRN.vendor_name || '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">Vendor Invoice #</p>
+                      <p className="font-medium">{viewingGRN.vendor_invoice_number || '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">Vendor GST Number</p>
+                      <p className="font-medium">{viewingGRN.vendor_gstin || '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">Invoice Date</p>
+                      <p className="font-medium">{viewingGRN.vendor_invoice_date ? formatDate(viewingGRN.vendor_invoice_date) : '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">Received Date</p>
+                      <p className="font-medium">{viewingGRN.created_at ? formatDate(viewingGRN.created_at) : '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">Status</p>
+                      <p className="font-medium">{viewingGRN.has_discrepancies ? 'Discrepancy' : 'Complete'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">Linked Bill</p>
+                      <p className="font-medium">{viewingGRN.linked_bill_id ? (viewingGRN.linked_bill_number || 'Linked') : 'Not linked'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase">Total Value</p>
+                      <p className="font-medium">{formatCurrency(viewingGRN.total_value || 0)}</p>
+                    </div>
+                  </div>
+
+                  {Array.isArray(viewingGRN.items) && viewingGRN.items.length > 0 && (
+                    <div>
+                      <h4 className="font-semibold text-gray-800 mb-2">Items Received</h4>
+                      <div className="overflow-x-auto border rounded-lg">
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Rate</th>
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y">
+                            {viewingGRN.items.map((item, idx) => (
+                              <tr key={idx}>
+                                <td className="px-3 py-2">{item.product_name || item.name || '-'}</td>
+                                <td className="px-3 py-2">{item.received_quantity ?? item.quantity_received ?? item.quantity ?? '-'}</td>
+                                <td className="px-3 py-2">{formatCurrency(item.unit_price ?? item.rate ?? item.cost_price ?? 0)}</td>
+                                <td className="px-3 py-2">{formatCurrency((item.received_quantity ?? item.quantity_received ?? item.quantity ?? 0) * (item.unit_price ?? item.rate ?? item.cost_price ?? 0))}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default GoodsReceiptNote;

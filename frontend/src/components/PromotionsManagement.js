@@ -1,0 +1,904 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import FestiveOverrideCard from './FestiveOverrideCard';
+import {
+  Calendar, Tag, Percent, Clock, Plus, Edit2, Trash2, 
+  Eye, EyeOff, Save, X, Gift, Sparkles, Sun, Snowflake,
+  Cloud, Heart, Flag, Flame, PartyPopper, Package,
+  TrendingUp, DollarSign, ShoppingBag, AlertCircle,
+  CheckCircle, RefreshCw, Search, Filter, ChevronDown
+} from 'lucide-react';
+
+
+const PromotionsManagement = () => {
+  const [activeTab, setActiveTab] = useState('themes');
+  const [themes, setThemes] = useState([]);
+  const [combos, setCombos] = useState([]);
+  const [flashSales, setFlashSales] = useState([]);
+  const [stats, setStats] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [modalType, setModalType] = useState('theme');
+  const [editingItem, setEditingItem] = useState(null);
+  const [products, setProducts] = useState([]);
+  const [activeTheme, setActiveTheme] = useState(null);
+
+  // Form states
+  const [themeForm, setThemeForm] = useState({
+    name: '',
+    title: '',
+    subtitle: '',
+    description: '',
+    theme_type: 'sale',
+    start_date: '',
+    end_date: '',
+    categories: [],
+    gradient_from: 'from-blue-500',
+    gradient_to: 'to-cyan-500',
+    background_color: 'bg-blue-50',
+    icon: 'sparkles',
+    discount_percent: 0,
+    priority: 5,
+    is_active: true
+  });
+
+  const [comboForm, setComboForm] = useState({
+    name: '',
+    model_numbers: '',
+    discount_percent: 10,
+    valid_days: 30
+  });
+
+  const [flashSaleForm, setFlashSaleForm] = useState({
+    name: '',
+    product_ids: [],
+    discount_percent: 20,
+    start_time: '',
+    end_time: '',
+    max_quantity_per_customer: 1,
+    total_quantity: 100
+  });
+
+  const iconOptions = [
+    { value: 'sparkles', label: 'Sparkles ✨', icon: Sparkles },
+    { value: 'gift', label: 'Gift 🎁', icon: Gift },
+    { value: 'sun', label: 'Sun ☀️', icon: Sun },
+    { value: 'snowflake', label: 'Snowflake ❄️', icon: Snowflake },
+    { value: 'cloud', label: 'Cloud 🌧️', icon: Cloud },
+    { value: 'heart', label: 'Heart ❤️', icon: Heart },
+    { value: 'flame', label: 'Flame 🔥', icon: Flame },
+    { value: 'party', label: 'Party 🎉', icon: PartyPopper },
+    { value: 'tag', label: 'Tag 🏷️', icon: Tag },
+    { value: 'flag', label: 'Flag 🚩', icon: Flag }
+  ];
+
+  const gradientOptions = [
+    { from: 'from-blue-500', to: 'to-cyan-500', label: 'Ocean Blue' },
+    { from: 'from-purple-500', to: 'to-pink-500', label: 'Purple Pink' },
+    { from: 'from-yellow-400', to: 'to-orange-500', label: 'Sunset' },
+    { from: 'from-green-400', to: 'to-emerald-500', label: 'Fresh Green' },
+    { from: 'from-red-500', to: 'to-orange-500', label: 'Fire Red' },
+    { from: 'from-pink-400', to: 'to-rose-500', label: 'Rose' },
+    { from: 'from-gray-700', to: 'to-gray-900', label: 'Dark' },
+    { from: 'from-amber-400', to: 'to-yellow-500', label: 'Gold' },
+    { from: 'from-cyan-400', to: 'to-blue-500', label: 'Ice Blue' },
+    { from: 'from-indigo-500', to: 'to-purple-600', label: 'Royal' }
+  ];
+
+  const themeTypes = [
+    { value: 'sale', label: '🏷️ Sale' },
+    { value: 'festival', label: '🎊 Festival' },
+    { value: 'seasonal', label: '🌤️ Seasonal' },
+    { value: 'weekly', label: '📅 Weekly Special' },
+    { value: 'weekend', label: '🎉 Weekend Sale' },
+    { value: 'monthend', label: '📆 Month End' },
+    { value: 'clearance', label: '🧹 Clearance' },
+    { value: 'flash', label: '⚡ Flash Sale' },
+    { value: 'custom', label: '✏️ Custom' }
+  ];
+
+  const categoryOptions = [
+    'All Categories', 'Kitchen Appliances', 'Refrigerator', 'Washing Machine',
+    'Air Conditioner', 'Chimney', 'Oven', 'Microwave', 'Dishwasher',
+    'Coffee Maker', 'Mixer', 'Vacuum Cleaner', 'Air Purifier',
+    'Water Heater', 'Geyser', 'Room Heater', 'Induction', 'Gas Hob'
+  ];
+
+  useEffect(() => {
+    fetchAllData();
+  }, []);
+
+  const fetchAllData = async () => {
+    setLoading(true);
+    try {
+      await Promise.all([
+        fetchThemes(),
+        fetchCombos(),
+        fetchStats(),
+        fetchProducts(),
+        fetchActiveTheme()
+      ]);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    }
+    setLoading(false);
+  };
+
+  const fetchThemes = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/promotions/themes?include_inactive=true`);
+      const data = await res.json();
+      setThemes(data.themes || []);
+    } catch (error) {
+      console.error('Error fetching themes:', error);
+    }
+  };
+
+  const fetchActiveTheme = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/promotions/themes/active`);
+      const data = await res.json();
+      setActiveTheme(data);
+    } catch (error) {
+      console.error('Error fetching active theme:', error);
+    }
+  };
+
+  const fetchCombos = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/combo-offers/`, { cache: 'no-store' });
+      const data = await res.json();
+      setCombos(data.offers || []);
+    } catch (error) {
+      console.error('Error fetching combos:', error);
+    }
+  };
+
+  const fetchStats = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/promotions/stats`);
+      const data = await res.json();
+      setStats(data.stats || {});
+    } catch (error) {
+      console.error('Error fetching stats:', error);
+    }
+  };
+
+  const fetchProducts = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/products?limit=200`);
+      const data = await res.json();
+      setProducts(data.products || data || []);
+    } catch (error) {
+      console.error('Error fetching products:', error);
+    }
+  };
+
+  const handleCreateTheme = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/promotions/themes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(themeForm)
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        alert('Theme created successfully!');
+        setShowCreateModal(false);
+        fetchThemes();
+        fetchActiveTheme();
+        resetForms();
+      } else {
+        alert('Error creating theme: ' + (data.detail || 'Unknown error'));
+      }
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  };
+
+  const handleCreateQuickCombo = async () => {
+    try {
+      const modelNumbers = comboForm.model_numbers.split(',').map(m => m.trim()).filter(m => m);
+      const res = await fetch(
+        `${BACKEND_URL}/api/promotions/quick-combo?name=${encodeURIComponent(comboForm.name)}&discount_percent=${comboForm.discount_percent}&valid_days=${comboForm.valid_days}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(modelNumbers)
+        }
+      );
+      const data = await res.json();
+      if (data.status === 'success') {
+        alert(`Combo created! ${data.message}`);
+        setShowCreateModal(false);
+        fetchCombos();
+        resetForms();
+      } else {
+        alert('Error: ' + (data.detail || data.message || 'Unknown error'));
+      }
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  };
+
+  const handleDeleteTheme = async (themeId) => {
+    if (!window.confirm('Are you sure you want to delete this theme?')) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/promotions/themes/${themeId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        fetchThemes();
+        fetchActiveTheme();
+      }
+    } catch (error) {
+      alert('Error deleting theme');
+    }
+  };
+
+  const handleToggleTheme = async (theme) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/promotions/themes/${theme.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: !theme.is_active })
+      });
+      if (res.ok) {
+        fetchThemes();
+        fetchActiveTheme();
+      }
+    } catch (error) {
+      alert('Error updating theme');
+    }
+  };
+
+  const resetForms = () => {
+    setThemeForm({
+      name: '',
+      title: '',
+      subtitle: '',
+      description: '',
+      theme_type: 'sale',
+      start_date: '',
+      end_date: '',
+      categories: [],
+      gradient_from: 'from-blue-500',
+      gradient_to: 'to-cyan-500',
+      background_color: 'bg-blue-50',
+      icon: 'sparkles',
+      discount_percent: 0,
+      priority: 5,
+      is_active: true
+    });
+    setComboForm({
+      name: '',
+      model_numbers: '',
+      discount_percent: 10,
+      valid_days: 30
+    });
+  };
+
+  const openCreateModal = (type) => {
+    setModalType(type);
+    setShowCreateModal(true);
+    resetForms();
+  };
+
+  const getIconComponent = (iconName) => {
+    const iconMap = {
+      sparkles: Sparkles,
+      gift: Gift,
+      sun: Sun,
+      snowflake: Snowflake,
+      cloud: Cloud,
+      heart: Heart,
+      flame: Flame,
+      party: PartyPopper,
+      tag: Tag,
+      flag: Flag
+    };
+    return iconMap[iconName] || Sparkles;
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 bg-gray-50 min-h-screen">
+      {/* Header */}
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">Promotions Management</h1>
+        <p className="text-gray-600">Manage seasonal themes, combos, flash sales, and promotional campaigns</p>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-500">Active Themes</p>
+              <p className="text-2xl font-bold text-purple-600">{stats.active_themes || 0}</p>
+            </div>
+            <div className="bg-purple-100 p-3 rounded-lg">
+              <Sparkles className="w-6 h-6 text-purple-600" />
+            </div>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-500">Active Combos</p>
+              <p className="text-2xl font-bold text-green-600">{stats.active_combos || 0}</p>
+            </div>
+            <div className="bg-green-100 p-3 rounded-lg">
+              <Package className="w-6 h-6 text-green-600" />
+            </div>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-500">Flash Sales</p>
+              <p className="text-2xl font-bold text-orange-600">{stats.active_flash_sales || 0}</p>
+            </div>
+            <div className="bg-orange-100 p-3 rounded-lg">
+              <Flame className="w-6 h-6 text-orange-600" />
+            </div>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-500">Total Combos</p>
+              <p className="text-2xl font-bold text-blue-600">{stats.total_combos || 0}</p>
+            </div>
+            <div className="bg-blue-100 p-3 rounded-lg">
+              <ShoppingBag className="w-6 h-6 text-blue-600" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Current Active Theme Preview */}
+      {activeTheme && (
+        <div className="mb-8 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+              <Eye className="w-5 h-5" /> Currently Active Theme
+              <span className={`text-xs px-2 py-1 rounded-full ${activeTheme.source === 'admin' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
+                {activeTheme.source === 'admin' ? 'Admin Override' : 'Auto-Detected'}
+              </span>
+            </h2>
+          </div>
+          <div className={`p-6 bg-gradient-to-r ${activeTheme.theme?.gradient_from || 'from-blue-500'} ${activeTheme.theme?.gradient_to || 'to-cyan-500'}`}>
+            <div className="text-center text-white">
+              <h3 className="text-2xl font-bold mb-2">{activeTheme.theme?.title}</h3>
+              <p className="text-white/90">{activeTheme.theme?.subtitle}</p>
+              <div className="mt-4 flex flex-wrap justify-center gap-2">
+                {activeTheme.theme?.categories?.slice(0, 5).map((cat, i) => (
+                  <span key={i} className="bg-white/20 px-3 py-1 rounded-full text-sm">{cat}</span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="border-b border-gray-200">
+          <div className="flex">
+            {[
+              { id: 'themes', label: 'Seasonal Themes', icon: Calendar },
+              { id: 'combos', label: 'Combo Offers', icon: Package },
+              { id: 'quick', label: 'Quick Actions', icon: Flame }
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 px-6 py-4 font-medium transition-colors ${
+                  activeTab === tab.id
+                    ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50'
+                    : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                }`}
+              >
+                <tab.icon className="w-5 h-5" />
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="p-6">
+          {/* Themes Tab */}
+          {activeTab === 'themes' && <FestiveOverrideCard />}
+          {activeTab === 'themes' && (
+            <div>
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-lg font-semibold text-gray-900">All Themes</h3>
+                <button
+                  onClick={() => openCreateModal('theme')}
+                  className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  <Plus className="w-5 h-5" /> Create Theme
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {themes.map((theme) => {
+                  const IconComp = getIconComponent(theme.icon);
+                  return (
+                    <div key={theme.id} className={`border rounded-xl overflow-hidden ${theme.is_active ? 'border-green-300' : 'border-gray-200 opacity-60'}`}>
+                      <div className={`p-4 bg-gradient-to-r ${theme.gradient_from} ${theme.gradient_to} text-white`}>
+                        <div className="flex items-center justify-between mb-2">
+                          <IconComp className="w-8 h-8" />
+                          <span className={`text-xs px-2 py-1 rounded-full ${theme.is_active ? 'bg-white/30' : 'bg-black/30'}`}>
+                            {theme.is_active ? 'Active' : 'Inactive'}
+                          </span>
+                        </div>
+                        <h4 className="text-lg font-bold">{theme.title}</h4>
+                        <p className="text-sm text-white/80">{theme.subtitle}</p>
+                      </div>
+                      <div className="p-4 bg-white">
+                        <div className="flex items-center gap-2 text-sm text-gray-500 mb-2">
+                          <Clock className="w-4 h-4" />
+                          {new Date(theme.start_date).toLocaleDateString()} - {new Date(theme.end_date).toLocaleDateString()}
+                        </div>
+                        <div className="flex items-center gap-2 text-sm text-gray-500 mb-3">
+                          <Tag className="w-4 h-4" />
+                          {theme.theme_type} • Priority: {theme.priority}
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleToggleTheme(theme)}
+                            className={`flex-1 py-2 rounded-lg text-sm font-medium ${
+                              theme.is_active 
+                                ? 'bg-gray-100 text-gray-700 hover:bg-gray-200' 
+                                : 'bg-green-100 text-green-700 hover:bg-green-200'
+                            }`}
+                          >
+                            {theme.is_active ? <EyeOff className="w-4 h-4 inline mr-1" /> : <Eye className="w-4 h-4 inline mr-1" />}
+                            {theme.is_active ? 'Deactivate' : 'Activate'}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteTheme(theme.id)}
+                            className="p-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {themes.length === 0 && (
+                <div className="text-center py-12 text-gray-500">
+                  <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>No custom themes created yet</p>
+                  <p className="text-sm">System is using auto-detected seasonal themes</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Combos Tab */}
+          {activeTab === 'combos' && (
+            <div>
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-lg font-semibold text-gray-900">Combo Offers</h3>
+                <button
+                  onClick={() => openCreateModal('combo')}
+                  className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors"
+                >
+                  <Plus className="w-5 h-5" /> Quick Combo
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                {combos.map((combo) => (
+                  <div key={combo.id} className="border border-gray-200 rounded-xl p-4 hover:shadow-md transition-shadow">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <h4 className="font-semibold text-gray-900">{combo.name}</h4>
+                        <p className="text-sm text-gray-500 mt-1">{combo.description}</p>
+                        <div className="flex items-center gap-4 mt-2">
+                          <span className="text-sm text-gray-500">
+                            <Package className="w-4 h-4 inline mr-1" />
+                            {combo.products?.length || 0} products
+                          </span>
+                          <span className="text-sm text-green-600 font-medium">
+                            <Percent className="w-4 h-4 inline mr-1" />
+                            {combo.discount_percent || combo.discount_value}% off
+                          </span>
+                          <span className="text-sm text-gray-500">
+                            <Clock className="w-4 h-4 inline mr-1" />
+                            Until {new Date(combo.valid_until).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm text-gray-400 line-through">₹{combo.original_price?.toLocaleString()}</p>
+                        <p className="text-xl font-bold text-green-600">₹{combo.final_price?.toLocaleString()}</p>
+                        <p className="text-xs text-green-500">Save ₹{combo.savings?.toLocaleString()}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {combos.length === 0 && (
+                <div className="text-center py-12 text-gray-500">
+                  <Package className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>No combo offers created yet</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Quick Actions Tab */}
+          {activeTab === 'quick' && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {/* Weekend Sale */}
+              <div className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow cursor-pointer" onClick={() => {
+                setThemeForm({
+                  ...themeForm,
+                  name: 'weekend_sale',
+                  title: '🎉 Weekend Special',
+                  subtitle: 'Extra discounts this weekend only!',
+                  theme_type: 'weekend',
+                  gradient_from: 'from-purple-500',
+                  gradient_to: 'to-pink-500',
+                  start_date: new Date().toISOString().split('T')[0],
+                  end_date: new Date(Date.now() + 3*24*60*60*1000).toISOString().split('T')[0]
+                });
+                openCreateModal('theme');
+              }}>
+                <div className="bg-purple-100 w-12 h-12 rounded-lg flex items-center justify-center mb-4">
+                  <PartyPopper className="w-6 h-6 text-purple-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-1">Weekend Sale</h4>
+                <p className="text-sm text-gray-500">Create a quick weekend promotion</p>
+              </div>
+
+              {/* Month End Sale */}
+              <div className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow cursor-pointer" onClick={() => {
+                const lastDay = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0);
+                const startDay = new Date(lastDay);
+                startDay.setDate(lastDay.getDate() - 4);
+                setThemeForm({
+                  ...themeForm,
+                  name: 'month_end_sale',
+                  title: '📆 Month End Clearance',
+                  subtitle: 'Last chance deals before month ends!',
+                  theme_type: 'monthend',
+                  gradient_from: 'from-orange-500',
+                  gradient_to: 'to-red-500',
+                  start_date: startDay.toISOString().split('T')[0],
+                  end_date: lastDay.toISOString().split('T')[0]
+                });
+                openCreateModal('theme');
+              }}>
+                <div className="bg-orange-100 w-12 h-12 rounded-lg flex items-center justify-center mb-4">
+                  <Calendar className="w-6 h-6 text-orange-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-1">Month End Sale</h4>
+                <p className="text-sm text-gray-500">Auto-set for last 5 days of month</p>
+              </div>
+
+              {/* Flash Sale */}
+              <div className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow cursor-pointer" onClick={() => {
+                setThemeForm({
+                  ...themeForm,
+                  name: 'flash_sale',
+                  title: '⚡ Flash Sale',
+                  subtitle: 'Limited time - Hurry!',
+                  theme_type: 'flash',
+                  gradient_from: 'from-yellow-400',
+                  gradient_to: 'to-orange-500',
+                  priority: 100
+                });
+                openCreateModal('theme');
+              }}>
+                <div className="bg-yellow-100 w-12 h-12 rounded-lg flex items-center justify-center mb-4">
+                  <Flame className="w-6 h-6 text-yellow-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-1">Flash Sale</h4>
+                <p className="text-sm text-gray-500">Time-limited high-priority sale</p>
+              </div>
+
+              {/* Clearance Sale */}
+              <div className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow cursor-pointer" onClick={() => {
+                setThemeForm({
+                  ...themeForm,
+                  name: 'clearance',
+                  title: '🧹 Clearance Sale',
+                  subtitle: 'Everything must go!',
+                  theme_type: 'clearance',
+                  gradient_from: 'from-gray-700',
+                  gradient_to: 'to-gray-900'
+                });
+                openCreateModal('theme');
+              }}>
+                <div className="bg-gray-100 w-12 h-12 rounded-lg flex items-center justify-center mb-4">
+                  <Tag className="w-6 h-6 text-gray-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-1">Clearance Sale</h4>
+                <p className="text-sm text-gray-500">Clear old stock with big discounts</p>
+              </div>
+
+              {/* Quick Combo */}
+              <div className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow cursor-pointer" onClick={() => openCreateModal('combo')}>
+                <div className="bg-green-100 w-12 h-12 rounded-lg flex items-center justify-center mb-4">
+                  <Package className="w-6 h-6 text-green-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-1">Quick Combo</h4>
+                <p className="text-sm text-gray-500">Create combo with just model numbers</p>
+              </div>
+
+              {/* Festival Sale */}
+              <div className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow cursor-pointer" onClick={() => {
+                setThemeForm({
+                  ...themeForm,
+                  name: 'festival_sale',
+                  title: '🎊 Festival Special',
+                  subtitle: 'Celebrate with amazing offers!',
+                  theme_type: 'festival',
+                  gradient_from: 'from-yellow-400',
+                  gradient_to: 'to-orange-500'
+                });
+                openCreateModal('theme');
+              }}>
+                <div className="bg-amber-100 w-12 h-12 rounded-lg flex items-center justify-center mb-4">
+                  <Sparkles className="w-6 h-6 text-amber-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-1">Festival Sale</h4>
+                <p className="text-sm text-gray-500">Create custom festival promotions</p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Create/Edit Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="text-xl font-bold text-gray-900">
+                {modalType === 'theme' ? 'Create Promotional Theme' : 'Create Quick Combo'}
+              </h3>
+              <button onClick={() => setShowCreateModal(false)} className="text-gray-400 hover:text-gray-600">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <div className="p-6">
+              {modalType === 'theme' ? (
+                <div className="space-y-4">
+                  {/* Theme Preview */}
+                  <div className={`p-4 rounded-xl bg-gradient-to-r ${themeForm.gradient_from} ${themeForm.gradient_to} text-white mb-6`}>
+                    <h4 className="text-lg font-bold">{themeForm.title || 'Theme Title'}</h4>
+                    <p className="text-sm text-white/80">{themeForm.subtitle || 'Theme subtitle'}</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Theme Name (ID)</label>
+                      <input
+                        type="text"
+                        value={themeForm.name}
+                        onChange={(e) => setThemeForm({...themeForm, name: e.target.value.toLowerCase().replace(/\s/g, '_')})}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                        placeholder="weekend_sale"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                      <select
+                        value={themeForm.theme_type}
+                        onChange={(e) => setThemeForm({...themeForm, theme_type: e.target.value})}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                      >
+                        {themeTypes.map(t => (
+                          <option key={t.value} value={t.value}>{t.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Display Title</label>
+                    <input
+                      type="text"
+                      value={themeForm.title}
+                      onChange={(e) => setThemeForm({...themeForm, title: e.target.value})}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                      placeholder="🎉 Weekend Special Sale"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Subtitle</label>
+                    <input
+                      type="text"
+                      value={themeForm.subtitle}
+                      onChange={(e) => setThemeForm({...themeForm, subtitle: e.target.value})}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                      placeholder="Up to 40% off on all appliances"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+                      <input
+                        type="date"
+                        value={themeForm.start_date}
+                        onChange={(e) => setThemeForm({...themeForm, start_date: e.target.value})}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+                      <input
+                        type="date"
+                        value={themeForm.end_date}
+                        onChange={(e) => setThemeForm({...themeForm, end_date: e.target.value})}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Color Theme</label>
+                    <div className="grid grid-cols-5 gap-2">
+                      {gradientOptions.map((g, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => setThemeForm({...themeForm, gradient_from: g.from, gradient_to: g.to})}
+                          className={`h-10 rounded-lg bg-gradient-to-r ${g.from} ${g.to} ${
+                            themeForm.gradient_from === g.from ? 'ring-2 ring-offset-2 ring-blue-500' : ''
+                          }`}
+                          title={g.label}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Categories to Highlight</label>
+                    <div className="flex flex-wrap gap-2">
+                      {categoryOptions.map(cat => (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => {
+                            const cats = themeForm.categories.includes(cat)
+                              ? themeForm.categories.filter(c => c !== cat)
+                              : [...themeForm.categories, cat];
+                            setThemeForm({...themeForm, categories: cats});
+                          }}
+                          className={`px-3 py-1 rounded-full text-sm ${
+                            themeForm.categories.includes(cat)
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                        >
+                          {cat}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Discount % (Optional)</label>
+                      <input
+                        type="number"
+                        value={themeForm.discount_percent}
+                        onChange={(e) => setThemeForm({...themeForm, discount_percent: parseFloat(e.target.value) || 0})}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                        min="0"
+                        max="100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Priority (1-100)</label>
+                      <input
+                        type="number"
+                        value={themeForm.priority}
+                        onChange={(e) => setThemeForm({...themeForm, priority: parseInt(e.target.value) || 1})}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                        min="1"
+                        max="100"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleCreateTheme}
+                    className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 transition-colors"
+                  >
+                    Create Theme
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-4">
+                    <p className="text-sm text-green-800">
+                      <strong>Quick Combo:</strong> Just enter model numbers separated by commas. 
+                      System will auto-fetch product details and calculate prices!
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Combo Name</label>
+                    <input
+                      type="text"
+                      value={comboForm.name}
+                      onChange={(e) => setComboForm({...comboForm, name: e.target.value})}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                      placeholder="Kitchen Starter Pack"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Model Numbers (comma separated)</label>
+                    <textarea
+                      value={comboForm.model_numbers}
+                      onChange={(e) => setComboForm({...comboForm, model_numbers: e.target.value})}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                      rows={3}
+                      placeholder="DIB098G50I, PPP612B80I, CMG633BB1I"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Discount %</label>
+                      <input
+                        type="number"
+                        value={comboForm.discount_percent}
+                        onChange={(e) => setComboForm({...comboForm, discount_percent: parseFloat(e.target.value) || 0})}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                        min="0"
+                        max="100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Valid Days</label>
+                      <input
+                        type="number"
+                        value={comboForm.valid_days}
+                        onChange={(e) => setComboForm({...comboForm, valid_days: parseInt(e.target.value) || 30})}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                        min="1"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleCreateQuickCombo}
+                    className="w-full bg-green-600 text-white py-3 rounded-xl font-semibold hover:bg-green-700 transition-colors"
+                  >
+                    Create Combo
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default PromotionsManagement;

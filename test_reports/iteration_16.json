@@ -1,0 +1,49 @@
+{
+  "summary": "Verified the Lead Management CRM rebuild and Customer CRM 'View Details' fix end-to-end. Backend: 15/15 pytest cases pass (admin login, GET /api/leads/ returns lead_type on every lead with no _id leak, seeded classification Ravi=sales/Sunita=service/Mohan=delivery/Priya=expert, ?lead_type=service filter, funnel by_type sum equals total_leads, full CRUD + follow-up, source-based classification for ai_chat_website/Neural Service Agent/Neural Delivery Agent/Expert Consultation/phone→other, customer detail endpoint). Frontend: /admin/leads loads cleanly (no more 'something went wrong'), team tab counts All 10 / Sales 7 / Expert 1 / Service 1 / Delivery 1 / Other 0 match main-agent smoke, kanban has all 6 stage columns (new/contacted/qualified/negotiation/won/lost), 'Unknown Visitor' fallback renders for null-named leads, search filters null-safely by name ('Ravi'→1) and phone ('9569530464'→1), table-view toggle + View Details drawer opens with contact panel + 6 stage buttons + activity log, drawer stage change (contacted), assignee save, note add, follow-up add all persist to backend (verified via GET /api/leads/{id}: status=contacted, assigned_to=TEST_ui_agent, follow_ups=1, interactions=1), kanban stage-select persists status=qualified after PUT, Add Lead modal creates a manual lead that appears immediately, /admin/customers 'View Details' now correctly opens customer-detail-modal (previously dead button — FIX CONFIRMED) with contact info; order-history section is conditionally rendered (only when orders > 0) which is correct behavior. All TEST_ leads created during tests were cleaned up.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_leads_crm.py",
+    "/app/test_reports/pytest/leads_crm_results.xml",
+    "/app/test_reports/iter16_leadcrm.png",
+    "/app/test_reports/iter16_final.png"
+  ],
+  "action_items": [
+    "Optional: two console 500 errors observed on /admin/customers page load (unrelated to the View Details fix under test — customer stats/segments endpoint). Not blocking, but worth checking /api/admin/customers/stats/summary and /api/admin/customers/segments/breakdown."
+  ],
+  "critical_code_review_comments": [
+    "leads_management_routes.py classify_lead_type uses substring matching on agent_type + source combined; edge case: a lead with source 'sales-consultation' would classify as 'expert' (consultation matched first before sales). Order is delivery→service→expert→sales→other, which matches spec intent, but document this precedence.",
+    "LeadDetailDrawer/CustomerDetailModal handle empty/missing fields defensively (Unknown Visitor, No phone, No orders found). Good.",
+    "CustomerDetailModal.js: order-history data-testid is only in the DOM when orders exist. This is fine for production but callers of Playwright tests should assert on either the testid OR the 'No orders found' text; noted in this iteration and worked around."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_leads_crm.py (new)"
+  ],
+  "success_rate": {"backend": "100% (15/15 pytest)", "frontend": "100% (all criteria in review_request pass)"},
+  "test_credentials": "Admin: rohit.gadiya@gmail.com / Purvi@vriddhi01 (via /api/auth/unified-login — page uses this, NOT /api/auth/admin/login)",
+  "seed_data_creation": "Created 6 TEST_ leads during automation (1 UI TEST_UI_Lead_1 + 5 classification TEST_cls_*) — ALL deleted before finish. Seeded Ravi Kumar / Sunita Sharma / Mohan Das / Priya Nair were NOT touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Admin login flow uses POST /api/auth/unified-login (NOT /api/auth/admin/login). AdminLoginPage.js sets localStorage.adminToken + adminUser after successful login; automation should either drive the login form via UI or fetch the token via evaluate() then seed localStorage — both worked here. Preview browser occasionally throws 'Failed to fetch' on the form-driven login (network flake in headless Chromium), so the localStorage-seed approach is the more reliable path for future tests. Lead Kanban stage-select uses stopPropagation so it does NOT open the drawer — confirmed working. CustomerDetailModal only renders the customer-order-history testid when orders.length > 0; use text 'No orders found' as the negative assertion. Two pre-existing 500s from customer stats/segments endpoints show up in console on /admin/customers but do not affect View Details functionality.",
+  "verified_metrics": {
+    "backend_pytest_passed": 15,
+    "backend_pytest_failed": 0,
+    "team_tab_counts": {"all": 10, "sales": 7, "expert": 1, "service": 1, "delivery": 1, "other": 0},
+    "kanban_stage_columns_present": 6,
+    "unknown_visitor_fallback": true,
+    "search_by_name_ravi_cards": 1,
+    "search_by_phone_cards": 1,
+    "drawer_opens": true,
+    "drawer_stage_change_persisted": true,
+    "drawer_assignee_persisted": true,
+    "drawer_note_persisted_interactions": 1,
+    "drawer_followup_persisted": 1,
+    "kanban_stage_select_persisted": true,
+    "add_lead_modal_creates_lead": true,
+    "customer_view_details_opens_modal": true
+  }
+}

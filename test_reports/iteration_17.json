@@ -1,0 +1,120 @@
+{
+  "summary": "Iteration 17 — Neural AI upgrade + Phase-2 admin tile audit. Backend 5/5 pytest pass (Claude Sonnet 4.6 sales agent recommends multi-brand Bosch+Siemens+Electrolux; delivery agent fetches real order INV-20260430-0001 for Rohit Gadiya from DB and dedupes an outgoing_emails record with tag 'delivery_status_ai'; service agent gives DIY first, no ticket on turn 1, retains context on turn 2; POST /api/products/normalize-categories is fully idempotent — 0 changes on both runs; GET /api/products (168 products) has zero 'Micrwave'/'Refrigerators'/'Hoods' remaining). Phase-2 tile audit: 47/48 admin tiles load cleanly, 1 tile (Service Tickets) is BROKEN with a TypeError. Lead CRM + Customer CRM 'View Details' regression smoke both pass. Applied one fix to backend (sendgrid kwarg typo) — see updated_files.",
+
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "sendgrid_email_service.send_email (called from neural_ai_agents.py L1332 & L1726)",
+        "issue": "Both callers passed keyword `from_account=...` but SendGridEmailService.send_email() signature uses `from_agent=...`. This raised `TypeError: got an unexpected keyword argument 'from_account'` in the try/except, silently swallowing the delivery-status email AND preventing the outgoing_emails DB record from being inserted (the insert line came AFTER the send call). Fixed both call sites to use `from_agent=`. Verified: outgoing_emails record with tag 'delivery_status_ai' is now inserted (status=failed only because SendGrid quota / auth in preview env, but record is written as spec requires)."
+      }
+    ]
+  },
+
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "ServiceTicketManagement.js (route /admin/service-tickets)",
+        "issue": "PAGE CRASHES with 'Something went wrong — Cannot read properties of undefined (reading toLowerCase)'. Root cause: lines 174-182 assume nested shape `ticket.ticket_id`, `ticket.customer_details.name`, `ticket.customer_details.email`, `ticket.product_details.brand` but backend GET /api/service-tickets/ actually returns FLAT fields: `ticket_number`, `customer_name`, `customer_email`, `brand`. All 3 current tickets in DB have `ticket_id === undefined` so `.toLowerCase()` throws inside .filter() and ChunkErrorBoundary shows the fallback. Fix: change filter to use the flat schema (or add `|| ''` guards).",
+        "selector": "/admin/service-tickets",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+
+  "phase2_tile_audit": {
+    "total_tiles_visited": 48,
+    "ok": 47,
+    "broken": 1,
+    "table": [
+      {"route": "/admin", "tile": "Dashboard Home", "status": "OK"},
+      {"route": "/admin/products", "tile": "Products", "status": "OK"},
+      {"route": "/admin/offers", "tile": "Cashback Offers", "status": "OK"},
+      {"route": "/admin/incomplete-products", "tile": "Incomplete Products", "status": "OK"},
+      {"route": "/admin/images", "tile": "Product Images", "status": "OK"},
+      {"route": "/admin/orders", "tile": "Order Management", "status": "OK"},
+      {"route": "/admin/pine-labs", "tile": "Pine Labs Transactions", "status": "OK"},
+      {"route": "/admin/analytics", "tile": "Analytics", "status": "OK", "note": "Non-fatal: 6 x 404 from some analytics sub-endpoints (page still renders)"},
+      {"route": "/admin/leads", "tile": "Lead CRM", "status": "OK"},
+      {"route": "/admin/service-tickets", "tile": "Service Tickets", "status": "BROKEN", "error": "TypeError: Cannot read properties of undefined (reading 'toLowerCase') at ServiceTicketManagement L505 inside Array.filter — schema mismatch (flat vs nested)"},
+      {"route": "/admin/store-team", "tile": "Store Team", "status": "OK"},
+      {"route": "/admin/categories", "tile": "Categories", "status": "OK"},
+      {"route": "/admin/knowledge-base", "tile": "Knowledge Base", "status": "OK"},
+      {"route": "/admin/combo-offers", "tile": "Combo Offers", "status": "OK"},
+      {"route": "/admin/promotions", "tile": "Promotions", "status": "OK"},
+      {"route": "/admin/banners", "tile": "Banners", "status": "OK", "note": "1 non-fatal 404 (banner asset)"},
+      {"route": "/admin/new-products", "tile": "New Products", "status": "OK"},
+      {"route": "/admin/social-media", "tile": "Social Media", "status": "OK"},
+      {"route": "/admin/seo-manager", "tile": "SEO Manager", "status": "OK", "note": "2 x 503 from smart-filters endpoint — matches pre-existing known issue"},
+      {"route": "/admin/customers", "tile": "Customer CRM", "status": "OK"},
+      {"route": "/admin/ai-agents", "tile": "AI Agents", "status": "OK"},
+      {"route": "/admin/inventory", "tile": "Inventory", "status": "OK", "note": "Non-fatal 404s from inventory sub-resource"},
+      {"route": "/admin/delivery", "tile": "Delivery Management", "status": "OK"},
+      {"route": "/admin/campaigns", "tile": "Marketing Campaigns", "status": "OK", "note": "2 x 503 (pre-existing smart-filters)"},
+      {"route": "/admin/ai-marketing", "tile": "AI Marketing", "status": "OK", "note": "MOCKED per spec — out of scope"},
+      {"route": "/admin/marketing-analytics", "tile": "Marketing Analytics", "status": "OK"},
+      {"route": "/admin/customer-journey", "tile": "Customer Journey", "status": "OK"},
+      {"route": "/admin/lead-scraping", "tile": "Lead Scraping", "status": "OK"},
+      {"route": "/admin/consultations", "tile": "Consultations", "status": "OK"},
+      {"route": "/admin/website-analytics", "tile": "Website Analytics", "status": "OK"},
+      {"route": "/admin/blog", "tile": "Blog Management", "status": "OK"},
+      {"route": "/admin/settings", "tile": "Settings", "status": "OK"},
+      {"route": "/admin/reports", "tile": "Reports", "status": "OK"},
+      {"route": "/admin/accounting", "tile": "Accounting Dashboard", "status": "OK"},
+      {"route": "/admin/quotations", "tile": "Quotations", "status": "OK"},
+      {"route": "/admin/tally-import", "tile": "Tally Import", "status": "OK"},
+      {"route": "/admin/roi-calculator", "tile": "ROI Calculator", "status": "OK"},
+      {"route": "/admin/user-management", "tile": "User Management", "status": "OK"},
+      {"route": "/admin/data-management", "tile": "Data Management", "status": "OK"},
+      {"route": "/admin/sales-orders", "tile": "Sales Orders", "status": "OK"},
+      {"route": "/admin/sales-invoices", "tile": "Sales Invoices", "status": "OK"},
+      {"route": "/admin/customer-pos", "tile": "Customer POs", "status": "OK"},
+      {"route": "/admin/document-numbering", "tile": "Document Numbering", "status": "OK"},
+      {"route": "/admin/export-center", "tile": "Export Center", "status": "OK"},
+      {"route": "/admin/pending-receipts", "tile": "Pending Receipts", "status": "OK"},
+      {"route": "/admin/hsn-codes", "tile": "HSN Codes", "status": "OK"},
+      {"route": "/admin/delivery-reports", "tile": "Delivery Reports", "status": "OK"},
+      {"route": "/admin/advanced-reports", "tile": "Advanced Reports", "status": "OK"}
+    ]
+  },
+
+  "test_report_links": [
+    "/app/backend/tests/test_ai_agents_and_normalize.py",
+    "/app/test_reports/pytest/iter17_ai_normalize.xml",
+    "/app/test_reports/iter17_service_tickets_broken.png",
+    "/app/test_reports/iter17_regression.png"
+  ],
+
+  "action_items": [
+    "FIX (HIGH) /app/frontend/src/components/ServiceTicketManagement.js lines 174-182 — Service Tickets admin page crashes because it reads ticket.ticket_id / ticket.customer_details.name / .customer_details.email / .product_details.brand but backend returns flat ticket_number / customer_name / customer_email / brand. Simplest fix: change filter to `(ticket.ticket_number||'').toLowerCase().includes(...) || (ticket.customer_name||'').toLowerCase().includes(...) || (ticket.customer_email||'').toLowerCase().includes(...) || (ticket.brand||'').toLowerCase().includes(...)`, and audit the rest of the component (lines that render ticket_id / customer_details / product_details) for the same schema drift so the list, filters, and modal all use the flat fields.",
+    "OPTIONAL Investigate the non-fatal 404s on /admin/analytics (6) and /admin/inventory (6) — pages still render, but these dead endpoints are noisy.",
+    "OPTIONAL /admin/seo-manager and /admin/campaigns both hit smart-filters 503 (out-of-scope per review request note, but persistent)."
+  ],
+
+  "critical_code_review_comments": [
+    "neural_ai_agents.py: `_send_delivery_status_email` calls sendgrid with wrong kwarg (`from_account`) — was silently failing before this iteration; fixed to `from_agent`. Same typo also existed at line 1726 in `_create_service_ticket_auto` (service team copy) — also fixed. This means the 'service team gets a copy of every AI-created ticket' feature was ALSO broken before this fix.",
+    "ServiceTicketManagement.js: entire component reads a nested schema (ticket_id, customer_details.*, product_details.*) that no longer matches the backend response. Highly likely renderers/detail modal are broken too, not just the filter — recommend a full component pass, not just the .filter().",
+    "outgoing_emails DB record insertion sits AFTER the sendgrid call inside the same try — if sendgrid throws, the audit trail is lost. Consider always inserting the audit record and updating its status separately, so quota/API failures don't hide the dedupe key.",
+    "Delivery status email dedupe key uses (session_id, order_number, tag='delivery_status_ai') — verified working; a new session_id triggers a fresh send attempt, same session_id skips (return False before insert). Good."
+  ],
+
+  "updated_files": [
+    "/app/backend/neural_ai_agents.py (fixed 2 sendgrid kwarg typos: from_account -> from_agent at lines ~1332 and ~1726)",
+    "/app/backend/tests/test_ai_agents_and_normalize.py (new — 5 pytest cases: sales multi-brand, delivery live-order + outgoing_emails audit, service DIY-first, normalize-categories idempotent, no bad categories remain)"
+  ],
+
+  "success_rate": {"backend": "100% (5/5 pytest)", "frontend": "97.9% (47/48 admin tiles load; 1 broken tile: /admin/service-tickets)"},
+
+  "test_credentials": "Admin: rohit.gadiya@gmail.com / Purvi@vriddhi01 via POST /api/auth/unified-login (returns access_token). localStorage-seed approach (adminToken+adminUser+token+user) is the reliable path.",
+
+  "seed_data_creation": "None. AI chat sessions used unique TEST_* session ids. 3 pre-existing service tickets already in DB (SRV-20260401-*) — did NOT touch them. AI conversations kept to 2 turns per agent to conserve LLM credits.",
+
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+
+  "context_for_next_testing_agent": "Service Tickets page is the only broken admin tile. Root cause is a schema mismatch that ALSO likely affects the ticket detail modal / list rendering / status update flow in the same file — main agent should refactor the whole ServiceTicketManagement.js to use flat backend fields (ticket_number, customer_name, customer_email, customer_phone, brand, product_name, product_model, issue_type, issue_description, warranty_status, status, priority, source, session_id, created_at). After fix, retest with a search box query and by opening a ticket. Also — the sendgrid kwarg fix in neural_ai_agents.py now lets emails actually attempt to send; SendGrid may still return non-success in preview env due to API-key/quota; verify by looking at outgoing_emails record insertion, not real delivery.",
+
+  "rca_of_the_issue": "1) DELIVERY EMAIL SILENT FAILURE — neural_ai_agents.py passed `from_account='service'` to sendgrid_email_service.send_email() which expects `from_agent`. Python raised TypeError before the DB audit record was inserted, so outgoing_emails stayed empty and the review-request's assertion 'record with tag delivery_status_ai gets inserted' failed. Reproduction: send POST /api/neural-ai/chat {agent_type:'delivery', message:'phone 9844577440, email rohit.gadiya@gmail.com'} and grep backend logs for 'Delivery status email failed: ...got an unexpected keyword argument from_account'. Mitigation: renamed kwarg at both call sites. Also recommended (not done): decouple audit-insert from send call so audit survives send failures.\n\n2) SERVICE TICKETS PAGE CRASH — ServiceTicketManagement.js filter block accesses ticket.ticket_id.toLowerCase() etc, but backend GET /api/service-tickets/ returns records with keys {ticket_number, customer_name, customer_email, brand, product_name} — no ticket_id, no customer_details.*, no product_details.*. All 3 tickets in DB therefore blow up the filter on any render (searchTerm defaults to ''). ChunkErrorBoundary catches it → 'Something went wrong'. Reproduction: log in as admin, go to /admin/service-tickets → immediate crash. Not fixed by me — flagged for main agent to refactor whole component."
+}

@@ -1,0 +1,1266 @@
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { BACKEND_URL } from '../config/api';
+import { useNavigate } from 'react-router-dom';
+import { useCart } from '../hooks/useCart';
+import { useAuth } from '../contexts/AuthContext';
+import { ShoppingCart, Trash2, Plus, Minus, User, Mail, Lock, Phone, LogIn, UserPlus, ArrowRight, CheckCircle } from 'lucide-react';
+import { getProductImage, handleImageError } from '../utils/imageUtils';
+import PincodeChecker from './PincodeChecker';
+import WhyBuyStrip from './WhyBuyStrip';
+import OffersDisplay from './OffersDisplay';
+
+const Checkout = () => {
+  const { cartItems: cart, removeFromCart, updateQuantity, clearCart } = useCart();
+  const { user, login, isAuthenticated, loading: authLoading } = useAuth();
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState('login'); // 'login' or 'register'
+  const [formAuthLoading, setFormAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('phonepe'); // 'phonepe' or 'cod'
+  const [codCharges, setCodCharges] = useState(0);
+  const [codLoading, setCodLoading] = useState(false);
+  const [processingAuth, setProcessingAuth] = useState(false);
+  
+  // Auth form state
+  const [authForm, setAuthForm] = useState({
+    email: '',
+    password: '',
+    confirmPassword: '',
+    first_name: '',
+    last_name: '',
+    phone: ''
+  });
+  
+  const [customerDetails, setCustomerDetails] = useState({
+    name: '',
+    email: '',
+    phone: '',
+    phone2: '', // Second phone number (optional)
+    address: '',
+    city: '',
+    state: '',
+    pincode: ''
+  });
+
+  
+  // Check for session_id from Google OAuth callback and process user login
+  useEffect(() => {
+    // Skip if auth context is still loading
+    if (authLoading) return;
+    
+    const processGoogleAuth = async () => {
+      // Check for session_id in URL (from Google OAuth redirect)
+      const hash = window.location.hash;
+      const sessionIdMatch = hash.match(/session_id=([^&]+)/);
+      
+      if (sessionIdMatch) {
+        setProcessingAuth(true);
+        const sessionId = sessionIdMatch[1];
+        console.log('[Checkout] Processing Google OAuth session:', sessionId);
+        
+        try {
+          const response = await fetch(`${BACKEND_URL}/api/auth/session?session_id=${sessionId}`, {
+            credentials: 'include'
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            console.log('[Checkout] Google auth successful:', data);
+            
+            // Store user data via AuthContext
+            if (data.user) {
+              login(data.user, data.access_token);
+              setShowAuth(false);
+              
+              // Pre-fill customer details
+              setCustomerDetails(prev => ({
+                ...prev,
+                name: `${data.user.first_name || data.user.name || ''} ${data.user.last_name || ''}`.trim(),
+                email: data.user.email || '',
+                phone: data.user.phone || ''
+              }));
+            }
+            
+            // Clean URL - remove session_id from hash
+            window.history.replaceState({}, document.title, '/#/checkout');
+          } else {
+            console.error('[Checkout] Google auth failed with status:', response.status);
+          }
+        } catch (error) {
+          console.error('[Checkout] Google auth error:', error);
+        } finally {
+          setProcessingAuth(false);
+        }
+        return;
+      }
+      
+      // No session_id, check if user is already logged in via AuthContext
+      if (isAuthenticated && user) {
+        // Pre-fill customer details from user data
+        setCustomerDetails(prev => ({
+          ...prev,
+          name: `${user.first_name || user.name || ''} ${user.last_name || ''}`.trim() || prev.name,
+          email: user.email || prev.email,
+          phone: user.phone || prev.phone
+        }));
+        setShowAuth(false);
+      } else {
+        // Not logged in - show auth modal
+        setShowAuth(true);
+      }
+    };
+    
+    processGoogleAuth();
+  }, [BACKEND_URL, authLoading, isAuthenticated, user, login]);
+
+  // Handle login
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setFormAuthLoading(true);
+    setAuthError('');
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/auth/customer/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: authForm.email,
+          password: authForm.password
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.status === 'success') {
+        // Use AuthContext to store user data
+        login(data.user, data.access_token);
+        setShowAuth(false);
+        
+        // Pre-fill customer details
+        setCustomerDetails(prev => ({
+          ...prev,
+          name: `${data.user.first_name || ''} ${data.user.last_name || ''}`.trim(),
+          email: data.user.email,
+          phone: data.user.phone || ''
+        }));
+      } else {
+        setAuthError(data.detail || 'Login failed. Please check your credentials.');
+      }
+    } catch (error) {
+      setAuthError('Connection error. Please try again.');
+    } finally {
+      setFormAuthLoading(false);
+    }
+  };
+
+  // Handle registration
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setFormAuthLoading(true);
+    setAuthError('');
+
+    if (authForm.password !== authForm.confirmPassword) {
+      setAuthError('Passwords do not match');
+      setFormAuthLoading(false);
+      return;
+    }
+
+    if (authForm.password.length < 6) {
+      setAuthError('Password must be at least 6 characters');
+      setFormAuthLoading(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/auth/customer/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: authForm.email,
+          password: authForm.password,
+          first_name: authForm.first_name,
+          last_name: authForm.last_name,
+          phone: authForm.phone
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.status === 'success') {
+        // Store user data
+        localStorage.setItem('token', data.access_token);
+        localStorage.setItem('userToken', data.access_token);
+        localStorage.setItem('user', JSON.stringify(data.user));
+        localStorage.setItem('userData', JSON.stringify(data.user));
+        
+        setUser(data.user);
+        setShowAuth(false);
+        
+        // Pre-fill customer details
+        setCustomerDetails(prev => ({
+          ...prev,
+          name: `${data.user.first_name || ''} ${data.user.last_name || ''}`.trim(),
+          email: data.user.email,
+          phone: data.user.phone || ''
+        }));
+      } else {
+        setAuthError(data.detail || 'Registration failed. Please try again.');
+      }
+    } catch (error) {
+      setAuthError('Connection error. Please try again.');
+    } finally {
+      setFormAuthLoading(false);
+    }
+  };
+
+  // Handle Google Sign-in
+  const handleGoogleSignIn = () => {
+    localStorage.setItem('authReturnUrl', window.location.href);
+    // Use root origin only — Emergent Auth appends #session_id=xxx
+    // Sub-paths cause hash fragment loss on server redirects
+    const redirectUrl = window.location.origin;
+    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+  };
+
+  // Calculate totals - Prices already include GST (18%)
+  // We extract GST from the price for display purposes (reverse calculation)
+  const subtotal = cart.reduce((sum, item) => {
+    const product = item.product || item;
+    const price = product.price || 0;
+    return sum + (price * item.quantity);
+  }, 0);
+  const shipping = subtotal > 5000 ? 0 : 200; // Free shipping above ₹5000
+  
+  // GST is already included in prices - calculate for display only
+  // If MRP is ₹118 (inclusive of 18% GST), base price = 118/1.18 = ₹100, GST = ₹18
+  const gstRate = 0.18;
+  const baseAmount = subtotal / (1 + gstRate); // Extract base price
+  const gstAmount = subtotal - baseAmount; // GST already in the price
+  
+  // Total is same as subtotal + shipping + COD charges (if applicable)
+  const total = subtotal + shipping + (paymentMethod === 'cod' ? codCharges : 0);
+
+  // Fetch COD charges when COD is selected and pincode is valid
+  useEffect(() => {
+    const pin = customerDetails.pincode;
+    if (paymentMethod !== 'cod' || !pin || pin.length !== 6) {
+      if (paymentMethod !== 'cod') setCodCharges(0);
+      return;
+    }
+    setCodLoading(true);
+    axios.post(`${BACKEND_URL}/api/shipping/cod-charges`, {
+      delivery_pincode: pin,
+      order_value: subtotal,
+      weight: Math.max(1, cart.reduce((s, i) => s + ((i.product?.weight || i.weight || 1) * (i.quantity || 1)), 0)),
+    }).then(r => {
+      const data = r.data || {};
+      setCodCharges(data.cod_charges || 0);
+    }).catch(() => {
+      setCodCharges(Math.max(40, Math.round(subtotal * 0.02))); // fallback
+    }).finally(() => setCodLoading(false));
+  }, [paymentMethod, customerDetails.pincode, subtotal, cart]);
+
+
+  const handleInputChange = (e) => {
+    setCustomerDetails({
+      ...customerDetails,
+      [e.target.name]: e.target.value
+    });
+  };
+
+  const validateForm = () => {
+    // Check all mandatory fields
+    if (!customerDetails.name || !customerDetails.email || !customerDetails.phone || 
+        !customerDetails.address || !customerDetails.city || !customerDetails.state || !customerDetails.pincode) {
+      alert('Please fill in all required fields (Name, Email, Phone, Address, City, State, Pincode)');
+      return false;
+    }
+    
+    // Validate email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(customerDetails.email)) {
+      alert('Please enter a valid email address');
+      return false;
+    }
+    
+    // Validate phone number (primary)
+    const phoneRegex = /^[6-9]\d{9}$/;
+    if (!phoneRegex.test(customerDetails.phone)) {
+      alert('Please enter a valid 10-digit phone number starting with 6-9');
+      return false;
+    }
+    
+    // Validate second phone if provided
+    if (customerDetails.phone2 && !phoneRegex.test(customerDetails.phone2)) {
+      alert('Please enter a valid 10-digit alternate phone number or leave it empty');
+      return false;
+    }
+    
+    // Validate pincode
+    const pincodeRegex = /^\d{6}$/;
+    if (!pincodeRegex.test(customerDetails.pincode)) {
+      alert('Please enter a valid 6-digit pincode');
+      return false;
+    }
+    
+    return true;
+  };
+
+  const handlePayment = async () => {
+    console.log('[Checkout] Starting payment process...');
+    console.log('[Checkout] Cart:', cart);
+    
+    if (cart.length === 0) {
+      alert('Your cart is empty!');
+      return;
+    }
+
+    if (!validateForm()) {
+      return;
+    }
+
+    setLoading(true);
+    console.log('[Checkout] Form validated, creating order...');
+
+    try {
+      // Create order first
+      console.log('[Checkout] Starting order creation...');
+      console.log('[Checkout] Payment method:', paymentMethod);
+      
+      const orderResponse = await fetch(`${BACKEND_URL}/api/orders/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          session_id: localStorage.getItem('session_id') || 'guest',
+          customer_id: user?.id, // Link order to customer account
+          customer_details: {
+            name: customerDetails.name,
+            email: customerDetails.email,
+            phone: customerDetails.phone
+          },
+          billing_address: {
+            address: customerDetails.address,
+            city: customerDetails.city,
+            state: customerDetails.state,
+            pincode: customerDetails.pincode
+          },
+          shipping_address: {
+            address: customerDetails.address,
+            city: customerDetails.city,
+            state: customerDetails.state,
+            pincode: customerDetails.pincode
+          },
+          items: cart.map(item => {
+            const product = item.product || item;
+            const price = product.price || 0;
+            const itemTotal = price * item.quantity;
+            return {
+              product_id: product.id,
+              product_name: product.name,
+              quantity: item.quantity,
+              price: price,
+              total: itemTotal,
+              combo_id: item.combo_id || null
+            };
+          }),
+          subtotal: subtotal,
+          shipping_cost: shipping,
+          tax_amount: gstAmount, // GST already included in prices
+          discount_amount: 0,
+          total_amount: total,
+          payment_method: paymentMethod,
+          gst_inclusive: true // Flag to indicate prices include GST
+        })
+      });
+
+      console.log('[Checkout] Order response status:', orderResponse.status);
+      const orderData = await orderResponse.json();
+      console.log('[Checkout] Order data:', orderData);
+      
+      if (!orderData.order_number) {
+        throw new Error('Failed to create order: ' + (orderData.message || 'Unknown error'));
+      }
+
+      const orderId = orderData.order_number;
+      console.log('[Checkout] Order created successfully:', orderId);
+
+      // Handle COD vs Online Payment
+      if (paymentMethod === 'cod') {
+        // For COD, mark order as confirmed and show success
+        console.log('[Checkout] COD order confirmed');
+        clearCart();
+        navigate('/payment-success', { 
+          state: { 
+            orderNumber: orderId,
+            paymentMethod: 'Cash on Delivery',
+            message: 'Your order has been placed successfully! Please keep cash ready for payment on delivery.'
+          } 
+        });
+        return;
+      }
+
+      // For online payment, choose gateway based on selection
+      if (paymentMethod === 'pinelabs') {
+        // Pine Labs Payment — build cart_items + Brand EMI products for EMI eligibility
+        console.log('[Checkout] Initiating Pine Labs payment...');
+
+        // Build cart_items in paisa for Pine Labs (required for Brand EMI to surface in checkout)
+        const cartItemsPayload = cart.map((cartItem, idx) => {
+          const product = cartItem.product || cartItem;
+          const qty = parseInt(cartItem.quantity, 10) || 1;
+          const unitPricePaisa = Math.round((parseFloat(product.price) || 0) * 100);
+          return {
+            item_id: String(product.id || product._id || product.product_id || `cart_item_${idx + 1}`),
+            item_name: String(product.name || product.title || 'Product'),
+            item_description: String(product.description || product.short_description || product.name || '').slice(0, 200),
+            item_details_url: product.product_url ? String(product.product_url) : '',
+            item_image_url: product.image ? String(product.image) : (product.images?.[0] || ''),
+            item_original_unit_price: unitPricePaisa,
+            item_discounted_unit_price: unitPricePaisa,
+            item_quantity: qty,
+            item_currency: 'INR'
+          };
+        });
+
+        // Brand EMI: if any cart item has a brand_emi_sku attribute, build the products[] array
+        // Also supports a global UAT-test override via localStorage.brand_emi_test_skus = "Alpha_1,Alpha_2"
+        const testSkuOverride = (localStorage.getItem('brand_emi_test_skus') || '').split(',').map(s => s.trim()).filter(Boolean);
+        const brandEmiProducts = [];
+        if (testSkuOverride.length > 0) {
+          // UAT mode — distribute equally across the override SKUs
+          const sharePaisa = Math.floor(Math.round(total * 100) / testSkuOverride.length);
+          testSkuOverride.forEach((sku) => {
+            brandEmiProducts.push({ product_code: sku, product_amount: sharePaisa, currency: 'INR' });
+          });
+        } else {
+          // Re-fetch current brand_emi_sku so older carts (saved before SKU sync) still work
+          const freshSku = {};
+          await Promise.all(cart.map(async (ci) => {
+            const pr = ci.product || ci;
+            try {
+              const r = await fetch(`${BACKEND_URL}/api/products/${pr.id}`);
+              if (r.ok) { const d = await r.json(); freshSku[pr.id] = (d.product || d).brand_emi_sku || ''; }
+            } catch (e) { /* fall back to cart snapshot */ }
+          }));
+          cart.forEach((cartItem) => {
+            const product = cartItem.product || cartItem;
+            const qty = parseInt(cartItem.quantity, 10) || 1;
+            const emiSku = freshSku[product.id] || product.brand_emi_sku;
+            if (emiSku) {
+              brandEmiProducts.push({
+                product_code: String(emiSku),
+                product_amount: Math.round((parseFloat(product.price) || 0) * 100 * qty),
+                currency: 'INR'
+              });
+            }
+          });
+        }
+
+        const pineLabsPayload = {
+          order_id: orderId,
+          amount: Math.round(total * 100),
+          merchant_user_id: customerDetails.email,
+          customer_name: customerDetails.name,
+          customer_email: customerDetails.email,
+          customer_phone: customerDetails.phone,
+          return_origin: window.location.origin,
+          cart_items: cartItemsPayload,
+        };
+        if (brandEmiProducts.length > 0) {
+          pineLabsPayload.brand_emi_products = brandEmiProducts;
+          pineLabsPayload.bundle_count = brandEmiProducts.length;
+          pineLabsPayload.enable_brand_emi = true;
+        }
+
+        const paymentResponse = await fetch(`${BACKEND_URL}/api/pine-labs/initiate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pineLabsPayload)
+        });
+
+        console.log('[Checkout] Pine Labs response status:', paymentResponse.status);
+        const paymentData = await paymentResponse.json();
+        console.log('[Checkout] Pine Labs data:', paymentData);
+
+        if (paymentData.success && paymentData.payment_url) {
+          console.log('[Checkout] Redirecting to Pine Labs payment URL:', paymentData.payment_url);
+          
+          // Store order ID in localStorage for verification
+          localStorage.setItem('pending_order_id', orderId);
+          localStorage.setItem('pending_transaction_id', paymentData.order_id || paymentData.merchant_transaction_id);
+          localStorage.setItem('payment_gateway', 'pinelabs');
+          
+          // Redirect to Pine Labs payment page
+          window.location.href = paymentData.payment_url;
+        } else {
+          console.error('[Checkout] Pine Labs payment initiation failed:', paymentData);
+          alert('Payment initiation failed: ' + (paymentData.message || 'Unknown error'));
+          setLoading(false);
+        }
+      } else {
+        // PhonePe Payment
+        console.log('[Checkout] Initiating PhonePe payment...');
+        
+        const paymentResponse = await fetch(`${BACKEND_URL}/api/phonepe/initiate`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            order_id: orderId,
+            amount: Math.round(total * 100), // Convert to paise
+            merchant_user_id: customerDetails.email,
+            customer_name: customerDetails.name,
+            customer_email: customerDetails.email,
+            customer_phone: customerDetails.phone
+          })
+        });
+
+        console.log('[Checkout] PhonePe response status:', paymentResponse.status);
+        const paymentData = await paymentResponse.json();
+        console.log('[Checkout] PhonePe data:', paymentData);
+
+        if (paymentData.success && paymentData.payment_url) {
+          console.log('[Checkout] Redirecting to PhonePe payment URL:', paymentData.payment_url);
+          
+          // Store order ID in localStorage for verification
+          localStorage.setItem('pending_order_id', orderId);
+          localStorage.setItem('pending_transaction_id', paymentData.merchant_transaction_id);
+          localStorage.setItem('payment_gateway', 'phonepe');
+          
+          // Redirect to PhonePe payment page
+          window.location.href = paymentData.payment_url;
+        } else {
+          console.error('[Checkout] PhonePe payment initiation failed:', paymentData);
+          alert('Payment initiation failed: ' + (paymentData.message || 'Unknown error'));
+          setLoading(false);
+        }
+      }
+    } catch (error) {
+      console.error('[Checkout] Payment error:', error);
+      alert('Payment failed: ' + error.message);
+      setLoading(false);
+    }
+  };
+
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      maximumFractionDigits: 0
+    }).format(amount);
+  };
+
+  // Show loading while processing Google OAuth
+  if (processingAuth || authLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-blue-600 mx-auto"></div>
+          <p className="mt-4 text-gray-700 font-semibold">Completing sign-in...</p>
+          <p className="mt-2 text-gray-500 text-sm">Please wait while we set up your session</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (cart.length === 0) {
+    return (
+      <div className="min-h-screen bg-gray-50 py-12 px-4">
+        <div className="max-w-4xl mx-auto text-center">
+          <ShoppingCart className="h-24 w-24 text-gray-400 mx-auto mb-4" />
+          <h2 className="text-2xl font-bold text-gray-900 mb-4">Your cart is empty</h2>
+          <p className="text-gray-600 mb-8">Add some products to your cart to checkout</p>
+          <button
+            onClick={() => navigate('/')}
+            className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            Continue Shopping
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-6 md:py-12 px-3 md:px-4">
+      <div className="max-w-6xl mx-auto">
+        <h1 className="text-2xl md:text-3xl font-bold text-gray-900 mb-4 md:mb-6">Checkout</h1>
+
+        {/* Logged in indicator */}
+        {user && (
+          <div className="mb-4 md:mb-6 p-3 md:p-4 bg-green-50 border border-green-200 rounded-lg flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle className="w-5 h-5 text-green-600" />
+              <span className="text-sm md:text-base text-green-800">
+                Signed in as <strong>{user.email}</strong>
+              </span>
+            </div>
+            <button
+              onClick={() => navigate('/my-account')}
+              className="text-sm text-green-700 hover:text-green-800 underline"
+            >
+              View My Account
+            </button>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8">
+          {/* Left Column - Cart Items & Customer Details */}
+          <div className="lg:col-span-2 space-y-4 md:space-y-6">
+            {/* Cart Items */}
+            <div className="bg-white rounded-lg shadow p-4 md:p-6">
+              <h2 className="text-lg md:text-xl font-semibold mb-4">Order Items</h2>
+              <div className="space-y-4">
+                {cart.map((item) => {
+                  const product = item.product || item;
+                  return (
+                  <div key={product.id} className="flex flex-col sm:flex-row items-start sm:items-center gap-3 md:gap-4 pb-4 border-b border-gray-200 last:border-0">
+                    <img
+                      src={getProductImage(product, 0)}
+                      alt={product.name}
+                      className="w-16 h-16 md:w-20 md:h-20 object-cover rounded flex-shrink-0"
+                      onError={(e) => handleImageError(e, product)}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-semibold text-gray-900 text-sm md:text-base truncate">{product.name}</h3>
+                      <p className="text-xs md:text-sm text-gray-500">{product.model_number}</p>
+                      <p className="text-base md:text-lg font-bold text-blue-600">{formatCurrency(product.price)}</p>
+                    </div>
+                    <div className="flex items-center justify-between w-full sm:w-auto gap-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => updateQuantity(product.id, Math.max(1, item.quantity - 1))}
+                          className="p-1.5 rounded bg-gray-200 hover:bg-gray-300"
+                        >
+                          <Minus className="h-3 w-3 md:h-4 md:w-4" />
+                        </button>
+                        <span className="w-8 md:w-12 text-center font-semibold text-sm md:text-base">{item.quantity}</span>
+                        <button
+                          onClick={() => updateQuantity(product.id, item.quantity + 1)}
+                          className="p-1.5 rounded bg-gray-200 hover:bg-gray-300"
+                        >
+                          <Plus className="h-3 w-3 md:h-4 md:w-4" />
+                        </button>
+                      </div>
+                      <button
+                        onClick={() => removeFromCart(product.id)}
+                        className="p-2 text-red-600 hover:bg-red-50 rounded"
+                      >
+                        <Trash2 className="h-4 w-4 md:h-5 md:w-5" />
+                      </button>
+                    </div>
+                  </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Customer Details Form */}
+            <div className="bg-white rounded-lg shadow p-4 md:p-6">
+              <h2 className="text-lg md:text-xl font-semibold mb-4">Customer Details</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1 md:mb-2">
+                    Full Name <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="name"
+                    value={customerDetails.name}
+                    onChange={handleInputChange}
+                    className="w-full px-3 md:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm md:text-base"
+                    placeholder="John Doe"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 md:mb-2">
+                    Email <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="email"
+                    name="email"
+                    value={customerDetails.email}
+                    onChange={handleInputChange}
+                    className="w-full px-3 md:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm md:text-base"
+                    placeholder="john@example.com"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 md:mb-2">
+                    Phone Number <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="tel"
+                    name="phone"
+                    value={customerDetails.phone}
+                    onChange={handleInputChange}
+                    className="w-full px-3 md:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm md:text-base"
+                    placeholder="9876543210"
+                    maxLength="10"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 md:mb-2">
+                    Alternate Phone (Optional)
+                  </label>
+                  <input
+                    type="tel"
+                    name="phone2"
+                    value={customerDetails.phone2}
+                    onChange={handleInputChange}
+                    className="w-full px-3 md:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm md:text-base"
+                    placeholder="9876543210"
+                    maxLength="10"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1 md:mb-2">
+                    Address <span className="text-red-600">*</span>
+                  </label>
+                  <textarea
+                    name="address"
+                    value={customerDetails.address}
+                    onChange={handleInputChange}
+                    rows="2"
+                    className="w-full px-3 md:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm md:text-base"
+                    placeholder="Street address, building name, landmark, etc."
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 md:mb-2">
+                    City <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="city"
+                    value={customerDetails.city}
+                    onChange={handleInputChange}
+                    className="w-full px-3 md:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm md:text-base"
+                    placeholder="Mumbai"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 md:mb-2">
+                    State <span className="text-red-600">*</span>
+                  </label>
+                  <select
+                    name="state"
+                    value={customerDetails.state}
+                    onChange={handleInputChange}
+                    className="w-full px-3 md:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm md:text-base"
+                    required
+                  >
+                    <option value="">Select State</option>
+                    <option value="Andhra Pradesh">Andhra Pradesh</option>
+                    <option value="Arunachal Pradesh">Arunachal Pradesh</option>
+                    <option value="Assam">Assam</option>
+                    <option value="Bihar">Bihar</option>
+                    <option value="Chhattisgarh">Chhattisgarh</option>
+                    <option value="Goa">Goa</option>
+                    <option value="Gujarat">Gujarat</option>
+                    <option value="Haryana">Haryana</option>
+                    <option value="Himachal Pradesh">Himachal Pradesh</option>
+                    <option value="Jharkhand">Jharkhand</option>
+                    <option value="Karnataka">Karnataka</option>
+                    <option value="Kerala">Kerala</option>
+                    <option value="Madhya Pradesh">Madhya Pradesh</option>
+                    <option value="Maharashtra">Maharashtra</option>
+                    <option value="Manipur">Manipur</option>
+                    <option value="Meghalaya">Meghalaya</option>
+                    <option value="Mizoram">Mizoram</option>
+                    <option value="Nagaland">Nagaland</option>
+                    <option value="Odisha">Odisha</option>
+                    <option value="Punjab">Punjab</option>
+                    <option value="Rajasthan">Rajasthan</option>
+                    <option value="Sikkim">Sikkim</option>
+                    <option value="Tamil Nadu">Tamil Nadu</option>
+                    <option value="Telangana">Telangana</option>
+                    <option value="Tripura">Tripura</option>
+                    <option value="Uttar Pradesh">Uttar Pradesh</option>
+                    <option value="Uttarakhand">Uttarakhand</option>
+                    <option value="West Bengal">West Bengal</option>
+                    <option value="Delhi">Delhi</option>
+                    <option value="Puducherry">Puducherry</option>
+                    <option value="Jammu and Kashmir">Jammu and Kashmir</option>
+                    <option value="Ladakh">Ladakh</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Pincode <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="pincode"
+                    value={customerDetails.pincode}
+                    onChange={handleInputChange}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="400001"
+                    maxLength="6"
+                    required
+                  />
+                </div>
+              </div>
+
+              {/* Pincode Delivery Checker */}
+              {customerDetails.pincode && customerDetails.pincode.length === 6 && (
+                <div className="mt-4">
+                  <PincodeChecker
+                    initialPincode={customerDetails.pincode}
+                    weight={Math.max(1, cart.reduce((s, i) => s + (i.weight || 1) * (i.quantity || 1), 0))}
+                    compact
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Column - Order Summary */}
+          <div className="lg:col-span-1">
+            <div className="bg-white rounded-lg shadow p-6 sticky top-4">
+              <h2 className="text-xl font-semibold mb-4">Order Summary</h2>
+              
+              <div className="space-y-3 mb-4">
+                <div className="flex justify-between text-gray-600">
+                  <span>Product Total ({cart.length} items)</span>
+                  <span>{formatCurrency(subtotal)}</span>
+                </div>
+                <div className="flex justify-between text-xs text-gray-500 pl-4">
+                  <span>Base Price</span>
+                  <span>{formatCurrency(baseAmount)}</span>
+                </div>
+                <div className="flex justify-between text-xs text-gray-500 pl-4">
+                  <span>GST (18% included)</span>
+                  <span>{formatCurrency(gstAmount)}</span>
+                </div>
+                <div className="flex justify-between text-gray-600">
+                  <span>Shipping</span>
+                  <span>{shipping === 0 ? 'FREE' : formatCurrency(shipping)}</span>
+                </div>
+                {paymentMethod === 'cod' && codCharges > 0 && (
+                  <div className="flex justify-between text-gray-600" data-testid="cod-charge-line">
+                    <span>COD handling fee</span>
+                    <span>{formatCurrency(codCharges)}</span>
+                  </div>
+                )}
+                <div className="border-t border-gray-200 pt-3 flex justify-between text-xl font-bold">
+                  <span>Total</span>
+                  <span className="text-blue-600">{formatCurrency(total)}</span>
+                </div>
+                <p className="text-xs text-green-600 text-center">✓ All prices are inclusive of GST</p>
+              </div>
+
+              {subtotal < 5000 && (
+                <div className="mb-4 p-3 bg-blue-50 text-blue-800 text-sm rounded-lg">
+                  Add {formatCurrency(5000 - subtotal)} more for FREE shipping!
+                </div>
+              )}
+
+              {/* Payment Method Selection */}
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-gray-700 mb-3">Select Payment Method</h3>
+                <div className="space-y-2">
+                  {/* Pine Labs Option - HIDDEN from live site */}
+                  {true && (
+                  <label className={`flex items-center p-4 border-2 rounded-lg cursor-pointer transition-colors ${paymentMethod === 'pinelabs' ? 'border-purple-500 bg-purple-50' : 'hover:border-purple-300'}`}>
+                    <input
+                      type="radio"
+                      name="paymentMethod"
+                      value="pinelabs"
+                      checked={paymentMethod === 'pinelabs'}
+                      onChange={(e) => setPaymentMethod(e.target.value)}
+                      className="w-4 h-4 text-purple-600"
+                    />
+                    <div className="ml-3 flex-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-gray-900">Pine Labs</span>
+                        <span className="text-xs text-green-600 font-semibold bg-green-100 px-2 py-1 rounded">Recommended</span>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">Credit/Debit Card, UPI, Net Banking, Wallets</p>
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">💳 Cards</span>
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">📱 UPI</span>
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">🏦 Net Banking</span>
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">👛 Wallets</span>
+                      </div>
+                    </div>
+                  </label>
+                  )}
+
+                  {/* PhonePe Option */}
+                  <label className={`flex items-center p-4 border-2 rounded-lg cursor-pointer transition-colors ${paymentMethod === 'phonepe' ? 'border-blue-500 bg-blue-50' : 'hover:border-blue-300'}`}>
+                    <input
+                      type="radio"
+                      name="paymentMethod"
+                      value="phonepe"
+                      checked={paymentMethod === 'phonepe'}
+                      onChange={(e) => setPaymentMethod(e.target.value)}
+                      className="w-4 h-4 text-blue-600"
+                    />
+                    <div className="ml-3 flex-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-gray-900">PhonePe</span>
+                        <span className="text-xs text-green-600 font-semibold bg-green-100 px-2 py-1 rounded">Recommended</span>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">Credit/Debit Card, UPI, Net Banking, EMI, Wallets</p>
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">💳 Cards</span>
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">📱 UPI</span>
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">🏦 Net Banking</span>
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">📅 EMI</span>
+                        <span className="text-xs bg-gray-100 px-2 py-1 rounded">👛 Wallets</span>
+                      </div>
+                    </div>
+                  </label>
+
+                  {/* COD Option */}
+                  <label className={`flex items-center p-4 border-2 rounded-lg cursor-pointer transition-colors ${paymentMethod === 'cod' ? 'border-green-500 bg-green-50' : 'hover:border-green-300'}`}>
+                    <input
+                      type="radio"
+                      name="paymentMethod"
+                      value="cod"
+                      checked={paymentMethod === 'cod'}
+                      onChange={(e) => setPaymentMethod(e.target.value)}
+                      className="w-4 h-4 text-green-600"
+                      data-testid="payment-cod-radio"
+                    />
+                    <div className="ml-3 flex-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-gray-900">Cash on Delivery</span>
+                        <span className="text-xs bg-amber-100 text-amber-800 px-2 py-1 rounded">COD</span>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">Pay with cash when your order is delivered</p>
+                      {paymentMethod === 'cod' && (
+                        <p className="text-xs text-amber-700 mt-2" data-testid="cod-charge-note">
+                          {codLoading
+                            ? 'Fetching COD charges…'
+                            : codCharges > 0
+                              ? `+ COD handling fee: ₹${codCharges} (added by courier)`
+                              : 'No extra COD charges for this order'}
+                        </p>
+                      )}
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {/* Available Offers on your Cart (shown below payment methods) */}
+              <div className="mb-4">
+                <OffersDisplay
+                  cartProductIds={cart.map((i) => (i.product?.id || i.id)).filter(Boolean)}
+                  title="Available Offers on your Cart"
+                />
+              </div>
+
+              <button
+                onClick={handlePayment}
+                disabled={loading}
+                className={`w-full py-3 rounded-lg font-semibold text-white transition-colors ${
+                  loading
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : paymentMethod === 'cod' 
+                      ? 'bg-green-600 hover:bg-green-700'
+                      : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {loading ? (
+                  <span className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                    Processing...
+                  </span>
+                ) : paymentMethod === 'cod' ? (
+                  'Place Order (Cash on Delivery)'
+                ) : (
+                  `Pay ${formatCurrency(total)}`
+                )}
+              </button>
+
+              <div className="mt-4 flex items-center justify-center gap-3 text-xs text-gray-500 flex-wrap">
+                <span className="flex items-center gap-1">🔒 Secure Payment</span>
+                <span>•</span>
+                <span>Powered by {paymentMethod === 'pinelabs' ? 'Pine Labs' : paymentMethod === 'phonepe' ? 'PhonePe' : 'Secure Gateway'}</span>
+              </div>
+
+              <div className="mt-3 flex items-center justify-center gap-2 flex-wrap">
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/2a/Mastercard-logo.svg/200px-Mastercard-logo.svg.png" alt="Mastercard" className="h-5" />
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Visa_Inc._logo.svg/200px-Visa_Inc._logo.svg.png" alt="Visa" className="h-4" />
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/UPI-Logo-vector.svg/200px-UPI-Logo-vector.svg.png" alt="UPI" className="h-5" />
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/b/ba/Stripe_Logo%2C_revised_2016.svg/200px-Stripe_Logo%2C_revised_2016.svg.png" alt="Net Banking" className="h-4" />
+              </div>
+
+              <div className="mt-4 text-xs text-gray-500 text-center">
+                By completing this purchase, you agree to our Terms & Conditions
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Auth Modal - Shows when not logged in */}
+      {showAuth && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+            {/* Header */}
+            <div className="p-6 border-b">
+              <div className="flex items-center justify-center gap-3 mb-2">
+                <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                  <User className="w-6 h-6 text-blue-600" />
+                </div>
+              </div>
+              <h2 className="text-xl font-bold text-center text-gray-900">
+                {authMode === 'login' ? 'Sign in to continue' : 'Create your account'}
+              </h2>
+              <p className="text-sm text-gray-500 text-center mt-2">
+                {authMode === 'login' 
+                  ? 'Sign in to track orders, save addresses, and enjoy faster checkout'
+                  : 'Create an account to track orders and manage your purchases'}
+              </p>
+            </div>
+
+            {/* Form */}
+            <div className="p-6">
+              {/* Error Message */}
+              {authError && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
+                  {authError}
+                </div>
+              )}
+
+              {/* Google Sign-in */}
+              <button
+                onClick={handleGoogleSignIn}
+                className="w-full flex items-center justify-center gap-3 px-4 py-3 border-2 border-gray-300 rounded-lg hover:bg-gray-50 transition-colors mb-4"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                </svg>
+                <span className="font-medium text-gray-700">
+                  {authMode === 'login' ? 'Sign in with Google' : 'Sign up with Google'}
+                </span>
+              </button>
+
+              {/* Divider */}
+              <div className="relative my-4">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-gray-300"></div>
+                </div>
+                <div className="relative flex justify-center text-sm">
+                  <span className="px-2 bg-white text-gray-500">or</span>
+                </div>
+              </div>
+
+              {authMode === 'login' ? (
+                /* Login Form */
+                <form onSubmit={handleLogin} className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                    <div className="relative">
+                      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                      <input
+                        type="email"
+                        value={authForm.email}
+                        onChange={(e) => setAuthForm({...authForm, email: e.target.value})}
+                        className="w-full pl-10 pr-4 py-2.5 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="you@example.com"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                      <input
+                        type="password"
+                        value={authForm.password}
+                        onChange={(e) => setAuthForm({...authForm, password: e.target.value})}
+                        className="w-full pl-10 pr-4 py-2.5 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                        placeholder="Enter password"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={formAuthLoading}
+                    className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium flex items-center justify-center gap-2"
+                  >
+                    {formAuthLoading ? (
+                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <LogIn className="w-5 h-5" />
+                        Sign In
+                      </>
+                    )}
+                  </button>
+                </form>
+              ) : (
+                /* Register Form */
+                <form onSubmit={handleRegister} className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">First Name</label>
+                      <input
+                        type="text"
+                        value={authForm.first_name}
+                        onChange={(e) => setAuthForm({...authForm, first_name: e.target.value})}
+                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+                        placeholder="John"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Last Name</label>
+                      <input
+                        type="text"
+                        value={authForm.last_name}
+                        onChange={(e) => setAuthForm({...authForm, last_name: e.target.value})}
+                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+                        placeholder="Doe"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                    <div className="relative">
+                      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="email"
+                        value={authForm.email}
+                        onChange={(e) => setAuthForm({...authForm, email: e.target.value})}
+                        className="w-full pl-9 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+                        placeholder="you@example.com"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+                    <div className="relative">
+                      <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="tel"
+                        value={authForm.phone}
+                        onChange={(e) => setAuthForm({...authForm, phone: e.target.value})}
+                        className="w-full pl-9 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+                        placeholder="9876543210"
+                        maxLength="10"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="password"
+                        value={authForm.password}
+                        onChange={(e) => setAuthForm({...authForm, password: e.target.value})}
+                        className="w-full pl-9 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+                        placeholder="Min 6 characters"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Confirm Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="password"
+                        value={authForm.confirmPassword}
+                        onChange={(e) => setAuthForm({...authForm, confirmPassword: e.target.value})}
+                        className="w-full pl-9 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+                        placeholder="Confirm password"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={formAuthLoading}
+                    className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium flex items-center justify-center gap-2"
+                  >
+                    {formAuthLoading ? (
+                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <UserPlus className="w-5 h-5" />
+                        Create Account
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+
+              {/* Toggle Login/Register */}
+              <div className="mt-4 text-center">
+                {authMode === 'login' ? (
+                  <p className="text-sm text-gray-600">
+                    Don't have an account?{' '}
+                    <button
+                      onClick={() => { setAuthMode('register'); setAuthError(''); }}
+                      className="text-blue-600 hover:text-blue-700 font-medium"
+                    >
+                      Create Account
+                    </button>
+                  </p>
+                ) : (
+                  <p className="text-sm text-gray-600">
+                    Already have an account?{' '}
+                    <button
+                      onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                      className="text-blue-600 hover:text-blue-700 font-medium"
+                    >
+                      Sign In
+                    </button>
+                  </p>
+                )}
+              </div>
+
+              {/* Benefits */}
+              <div className="mt-6 p-4 bg-green-50 rounded-lg">
+                <h4 className="font-medium text-green-800 mb-2 flex items-center gap-2">
+                  <CheckCircle className="w-5 h-5" />
+                  Why create an account?
+                </h4>
+                <ul className="text-sm text-green-700 space-y-1">
+                  <li>• Track your orders in real-time</li>
+                  <li>• Save addresses for faster checkout</li>
+                  <li>• View order history & reorder easily</li>
+                  <li>• Get exclusive offers & discounts</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Checkout;

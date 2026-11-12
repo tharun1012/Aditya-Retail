@@ -1,0 +1,46 @@
+import React, { useEffect, useState } from 'react';
+import { isFestive, decorFor } from '../utils/festive';
+import { trackFestive } from '../utils/trackFestive';
+
+const KEY = 'festive_greeting_seen';
+
+// Shown once per festival day, skipped on admin pages
+const FestiveGreeting = ({ theme }) => {
+  const [open, setOpen] = useState(false);
+  const stamp = theme ? `${theme.name}:${theme.subtitle || ''}` : '';
+
+  useEffect(() => {
+    if (!isFestive(theme)) return undefined;
+    if (window.location.pathname.startsWith('/admin')) return undefined;
+    try { if (localStorage.getItem(KEY) === stamp) return undefined; } catch (e) { /* ignore */ }
+    const t = setTimeout(() => { setOpen(true); trackFestive('popup_open'); }, 1500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stamp]);
+
+  const close = () => {
+    setOpen(false);
+    try { localStorage.setItem(KEY, stamp); } catch (e) { /* ignore */ }
+  };
+
+  if (!open || !theme) return null;
+  const emoji = decorFor(theme)[0] || '🎉';
+  return (
+    <div role="dialog" aria-modal="true" onClick={close}
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 px-4">
+      <div onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-sm rounded-2xl bg-white p-8 text-center shadow-2xl border-t-8"
+        style={{ borderTopColor: 'rgb(var(--brand-600))' }}>
+        <div className="text-6xl mb-3">{emoji}</div>
+        <h2 className="text-2xl font-bold text-gray-900">{theme.title}</h2>
+        {theme.subtitle && <p className="mt-2 text-gray-600">{theme.subtitle}</p>}
+        <button onClick={() => { trackFestive('popup_cta'); close(); }}
+          className="mt-6 w-full rounded-full bg-amber-700 py-3 font-semibold text-white hover:bg-amber-800">
+          Shop the festive deals
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default FestiveGreeting;

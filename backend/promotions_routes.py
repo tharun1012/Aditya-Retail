@@ -1,0 +1,837 @@
+"""
+Promotions & Seasonal Themes Management
+Admin-controlled promotions including:
+- Seasonal themes (Winter Essentials, Summer Sale, etc.)
+- Festival promotions (Diwali, Christmas, etc.)
+- Flash sales
+- Combo/Bundle offers
+"""
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone
+import uuid
+from database import get_db
+
+router = APIRouter(prefix="/promotions", tags=["Promotions"])
+
+# ============ MODELS ============
+
+class SeasonalThemeCreate(BaseModel):
+    name: str  # e.g., "Winter Essentials", "Summer Sale"
+    title: str  # Display title
+    subtitle: Optional[str] = None
+    description: Optional[str] = None
+    theme_type: str  # 'seasonal', 'festival', 'sale', 'custom'
+    start_date: str  # ISO date
+    end_date: str  # ISO date
+    categories: List[str]  # Product categories to highlight
+    gradient_from: str = "from-blue-500"  # Tailwind gradient class
+    gradient_to: str = "to-cyan-500"
+    background_color: str = "bg-blue-50"
+    icon: str = "snowflake"  # Icon name: snowflake, sun, gift, sparkles, etc.
+    banner_image: Optional[str] = None
+    discount_percent: Optional[float] = None  # Optional site-wide discount for this theme
+    is_active: bool = True
+    priority: int = 1  # Higher = shows first when multiple themes active
+
+class SeasonalThemeUpdate(BaseModel):
+    name: Optional[str] = None
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+    description: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    categories: Optional[List[str]] = None
+    gradient_from: Optional[str] = None
+    gradient_to: Optional[str] = None
+    background_color: Optional[str] = None
+    icon: Optional[str] = None
+    banner_image: Optional[str] = None
+    discount_percent: Optional[float] = None
+    is_active: Optional[bool] = None
+    priority: Optional[int] = None
+
+class FlashSaleCreate(BaseModel):
+    name: str
+    product_ids: List[str]
+    discount_percent: float
+    start_time: str  # ISO datetime
+    end_time: str  # ISO datetime
+    max_quantity_per_customer: Optional[int] = 1
+    total_quantity: Optional[int] = None
+    is_active: bool = True
+
+class PromoBannerCreate(BaseModel):
+    title: str
+    subtitle: Optional[str] = None
+    image_url: str
+    link_url: Optional[str] = None
+    link_type: str = "category"  # 'category', 'product', 'combo', 'external'
+    link_value: Optional[str] = None
+    position: str = "home_hero"  # 'home_hero', 'home_mid', 'category_top', 'product_sidebar'
+    start_date: str
+    end_date: str
+    is_active: bool = True
+    priority: int = 1
+
+# ============ SEASONAL THEMES ============
+
+@router.get("/themes")
+async def get_all_themes(include_inactive: bool = False, db=Depends(get_db)):
+    """Get all seasonal themes"""
+    try:
+        query = {} if include_inactive else {"is_active": True}
+        themes = await db.seasonal_themes.find(query, {"_id": 0}).sort("priority", -1).to_list(50)
+        return {"status": "success", "themes": themes, "count": len(themes)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/active-theme")
+@router.get("/active-theme/")
+@router.get("/themes/active")
+async def get_active_theme(db=Depends(get_db)):
+    """Get the currently active theme (highest priority within date range)"""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        
+        # Admin override (auto | off | force:1-9) wins over everything
+        ov = await db.festive_settings.find_one({"_id": "override"})
+        mode = (ov or {}).get("mode", "auto")
+        if mode != "auto":
+            ot = _override_theme(mode)
+            if ot:
+                return {"status": "success", "theme": ot, "source": "override"}
+
+        # First check for admin-configured themes
+        theme = await db.seasonal_themes.find_one(
+            {
+                "is_active": True,
+                "start_date": {"$lte": now},
+                "end_date": {"$gte": now}
+            },
+            {"_id": 0},
+            sort=[("priority", -1)]
+        )
+        
+        if theme:
+            return {"status": "success", "theme": theme, "source": "admin"}
+        
+        # Fall back to auto-detected season
+        month = datetime.now().month
+        day = datetime.now().day
+        
+        auto_theme = _get_auto_theme(month, day)
+        return {"status": "success", "theme": auto_theme, "source": "auto"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Sharad Navratri Day 1 - verify against the calendar and update every year
+NAVRATRI_START = datetime(2026, 10, 11).date()
+NAVRATRI_DAYS = [
+    {"goddess": "Maa Shailputri", "colour": "Orange", "hex": "#f97316", "from": "from-orange-500", "to": "to-amber-500", "bg": "bg-orange-50"},
+    {"goddess": "Maa Brahmacharini", "colour": "White", "hex": "#64748b", "from": "from-slate-400", "to": "to-slate-500", "bg": "bg-gray-50"},
+    {"goddess": "Maa Chandraghanta", "colour": "Red", "hex": "#ef4444", "from": "from-red-500", "to": "to-orange-500", "bg": "bg-red-50"},
+    {"goddess": "Maa Kushmanda", "colour": "Royal Blue", "hex": "#2563eb", "from": "from-blue-600", "to": "to-indigo-500", "bg": "bg-blue-50"},
+    {"goddess": "Maa Skandamata", "colour": "Yellow", "hex": "#eab308", "from": "from-yellow-400", "to": "to-amber-500", "bg": "bg-yellow-50"},
+    {"goddess": "Maa Katyayani", "colour": "Green", "hex": "#16a34a", "from": "from-green-500", "to": "to-emerald-500", "bg": "bg-green-50"},
+    {"goddess": "Maa Kalaratri", "colour": "Grey", "hex": "#6b7280", "from": "from-gray-500", "to": "to-gray-700", "bg": "bg-gray-100"},
+    {"goddess": "Maa Mahagauri", "colour": "Peacock Green", "hex": "#0d9488", "from": "from-teal-500", "to": "to-cyan-500", "bg": "bg-teal-50"},
+    {"goddess": "Maa Siddhidatri", "colour": "Pink", "hex": "#ec4899", "from": "from-pink-500", "to": "to-rose-500", "bg": "bg-pink-50"},
+]
+
+
+def _get_auto_theme(month: int, day: int) -> Dict[str, Any]:
+    """Auto-detect theme based on date - Enhanced with Indian festivals and special days"""
+    
+    # ============ FESTIVALS ============
+    
+    # New Year (Jan 1-7)
+    if month == 1 and day <= 7:
+        return {
+            "name": "new_year",
+            "title": "New Year Sale 🎊",
+            "subtitle": "Start fresh with new appliances",
+            "theme_type": "festival",
+            "categories": ["Kitchen Appliances", "Vacuum Cleaner", "Air Purifier"],
+            "gradient_from": "from-purple-500",
+            "gradient_to": "to-pink-500",
+            "background_color": "bg-purple-50",
+            "icon": "party"
+        }
+    
+    # Makar Sankranti / Pongal (Jan 13-16)
+    if month == 1 and 13 <= day <= 16:
+        return {
+            "name": "pongal",
+            "title": "Pongal / Sankranti Special 🌾",
+            "subtitle": "Celebrate harvest with kitchen upgrades",
+            "theme_type": "festival",
+            "categories": ["Rice Cooker", "Induction", "Gas Hob", "Mixer", "Kitchen Appliances"],
+            "gradient_from": "from-yellow-400",
+            "gradient_to": "to-orange-500",
+            "background_color": "bg-yellow-50",
+            "icon": "sun"
+        }
+    
+    # Republic Day (Jan 24-26)
+    if month == 1 and 24 <= day <= 26:
+        return {
+            "name": "republic_day",
+            "title": "Republic Day Sale 🇮🇳",
+            "subtitle": "Patriotic savings on premium appliances",
+            "theme_type": "festival",
+            "categories": ["All Categories"],
+            "gradient_from": "from-orange-500",
+            "gradient_to": "to-green-500",
+            "background_color": "bg-orange-50",
+            "icon": "flag"
+        }
+    
+    # Valentine's Day (Feb 10-14)
+    if month == 2 and 10 <= day <= 14:
+        return {
+            "name": "valentines",
+            "title": "Valentine's Special 💝",
+            "subtitle": "Perfect gifts for your loved ones",
+            "theme_type": "festival",
+            "categories": ["Coffee Maker", "Microwave", "Kitchen Appliances", "Mixer"],
+            "gradient_from": "from-pink-500",
+            "gradient_to": "to-red-500",
+            "background_color": "bg-pink-50",
+            "icon": "heart"
+        }
+    
+    # Holi (Mar 10-20 - varies each year)
+    if month == 3 and 10 <= day <= 20:
+        return {
+            "name": "holi",
+            "title": "Holi Cleaning Sale 🎨",
+            "subtitle": "Clean up after the colors",
+            "theme_type": "festival",
+            "categories": ["Washing Machine", "Dryer", "Vacuum Cleaner", "Water Purifier"],
+            "gradient_from": "from-pink-400",
+            "gradient_to": "to-purple-500",
+            "background_color": "bg-pink-50",
+            "icon": "party"
+        }
+    
+    # Ugadi / Gudi Padwa (Mar-Apr - Spring New Year)
+    if month == 3 and day >= 20 or month == 4 and day <= 10:
+        return {
+            "name": "ugadi",
+            "title": "Ugadi / Gudi Padwa Sale 🌸",
+            "subtitle": "New beginnings, new appliances",
+            "theme_type": "festival",
+            "categories": ["Kitchen Appliances", "Mixer", "Oven", "Microwave"],
+            "gradient_from": "from-green-400",
+            "gradient_to": "to-yellow-400",
+            "background_color": "bg-green-50",
+            "icon": "flower"
+        }
+    
+    # Akshaya Tritiya (Apr-May)
+    if month == 4 and 20 <= day <= 30 or month == 5 and day <= 5:
+        return {
+            "name": "akshaya_tritiya",
+            "title": "Akshaya Tritiya Offers ✨",
+            "subtitle": "Auspicious day for new purchases",
+            "theme_type": "festival",
+            "categories": ["All Categories"],
+            "gradient_from": "from-yellow-400",
+            "gradient_to": "to-amber-500",
+            "background_color": "bg-yellow-50",
+            "icon": "sparkles"
+        }
+    
+    # Mother's Day (2nd Sunday of May - approx May 8-14)
+    if month == 5 and 8 <= day <= 14:
+        return {
+            "name": "mothers_day",
+            "title": "Mother's Day Special 💐",
+            "subtitle": "Gift something special to Mom",
+            "theme_type": "festival",
+            "categories": ["Kitchen Appliances", "Mixer", "Oven", "Microwave", "Dishwasher"],
+            "gradient_from": "from-pink-400",
+            "gradient_to": "to-rose-500",
+            "background_color": "bg-pink-50",
+            "icon": "heart"
+        }
+    
+    # Father's Day (3rd Sunday of June - approx Jun 15-21)
+    if month == 6 and 15 <= day <= 21:
+        return {
+            "name": "fathers_day",
+            "title": "Father's Day Special 👔",
+            "subtitle": "Perfect gifts for Dad",
+            "theme_type": "festival",
+            "categories": ["Coffee Maker", "Grill", "BBQ", "Electronics"],
+            "gradient_from": "from-blue-500",
+            "gradient_to": "to-indigo-600",
+            "background_color": "bg-blue-50",
+            "icon": "gift"
+        }
+    
+    # Independence Day (Aug 13-15)
+    if month == 8 and 13 <= day <= 15:
+        return {
+            "name": "independence_day",
+            "title": "Independence Day Sale 🇮🇳",
+            "subtitle": "Freedom to save big",
+            "theme_type": "festival",
+            "categories": ["All Categories"],
+            "gradient_from": "from-orange-500",
+            "gradient_to": "to-green-500",
+            "background_color": "bg-orange-50",
+            "icon": "flag"
+        }
+    
+    # Raksha Bandhan (Aug - varies)
+    if month == 8 and 18 <= day <= 25:
+        return {
+            "name": "raksha_bandhan",
+            "title": "Rakhi Special 🎁",
+            "subtitle": "Gift your sister the best",
+            "theme_type": "festival",
+            "categories": ["Kitchen Appliances", "Hair Dryer", "Mixer", "Beauty Appliances"],
+            "gradient_from": "from-purple-400",
+            "gradient_to": "to-pink-500",
+            "background_color": "bg-purple-50",
+            "icon": "gift"
+        }
+    
+    # Ganesh Chaturthi (Aug-Sep - varies)
+    if month == 9 and 1 <= day <= 15:
+        return {
+            "name": "ganesh_chaturthi",
+            "title": "Ganesh Chaturthi Sale 🙏",
+            "subtitle": "Bring prosperity to your home",
+            "theme_type": "festival",
+            "categories": ["Kitchen Appliances", "Modak Maker", "Mixer", "Oven"],
+            "gradient_from": "from-orange-400",
+            "gradient_to": "to-red-500",
+            "background_color": "bg-orange-50",
+            "icon": "sparkles"
+        }
+    
+    # Onam (Aug-Sep - Kerala festival)
+    if month == 8 and 25 <= day <= 31 or month == 9 and day <= 5:
+        return {
+            "name": "onam",
+            "title": "Onam Special 🌼",
+            "subtitle": "Celebrate with new appliances",
+            "theme_type": "festival",
+            "categories": ["Kitchen Appliances", "Rice Cooker", "Mixer", "Utensils"],
+            "gradient_from": "from-yellow-400",
+            "gradient_to": "to-green-500",
+            "background_color": "bg-yellow-50",
+            "icon": "flower"
+        }
+    
+    # Navratri: 9 days, one colour per day (update NAVRATRI_START every year = Day 1)
+    from datetime import timedelta, timezone
+    ist = timezone(timedelta(hours=5, minutes=30))
+    day_no = (datetime.now(ist).date() - NAVRATRI_START).days + 1
+    if 1 <= day_no <= 9:
+        d = NAVRATRI_DAYS[day_no - 1]
+        end = datetime.combine(NAVRATRI_START + timedelta(days=9), datetime.min.time(), tzinfo=ist)
+        return {
+            "name": "navratri",
+            "title": "Navratri Special 🔱",
+            "subtitle": f"Day {day_no} of 9 · {d['goddess']} · Wear {d['colour']}",
+            "theme_type": "festival",
+            "categories": ["All Categories"],
+            "gradient_from": d["from"],
+            "gradient_to": d["to"],
+            "background_color": d["bg"],
+            "brand_hex": d["hex"],
+            "ends_at": end.isoformat(),
+            "icon": "sparkles"
+        }
+
+    # Dussehra (Oct - varies)
+    if month == 10 and 15 <= day <= 25:
+        return {
+            "name": "dussehra",
+            "title": "Dussehra Dhamaka 🏹",
+            "subtitle": "Victory of good deals",
+            "theme_type": "festival",
+            "categories": ["All Categories"],
+            "gradient_from": "from-orange-500",
+            "gradient_to": "to-yellow-500",
+            "background_color": "bg-orange-50",
+            "icon": "flame"
+        }
+    
+    # Diwali (Oct-Nov - varies)
+    if month == 10 and day >= 25 or month == 11 and day <= 15:
+        return {
+            "name": "diwali",
+            "title": "Diwali Dhamaka 🪔",
+            "subtitle": "Light up your home with new appliances",
+            "theme_type": "festival",
+            "categories": ["Kitchen Appliances", "Vacuum Cleaner", "Air Purifier", "Chimney", "Lighting"],
+            "gradient_from": "from-yellow-400",
+            "gradient_to": "to-orange-500",
+            "background_color": "bg-yellow-50",
+            "icon": "sparkles"
+        }
+    
+    # Black Friday (Last Friday of Nov - approx Nov 24-30)
+    if month == 11 and 24 <= day <= 30:
+        return {
+            "name": "black_friday",
+            "title": "Black Friday Sale 🖤",
+            "subtitle": "Biggest discounts of the year",
+            "theme_type": "sale",
+            "categories": ["All Categories"],
+            "gradient_from": "from-gray-800",
+            "gradient_to": "to-gray-900",
+            "background_color": "bg-gray-100",
+            "icon": "tag"
+        }
+    
+    # Christmas (Dec 20-26)
+    if month == 12 and 20 <= day <= 26:
+        return {
+            "name": "christmas",
+            "title": "Christmas Specials 🎄",
+            "subtitle": "Perfect gifts for the festive season",
+            "theme_type": "festival",
+            "categories": ["Oven", "Microwave", "Coffee Maker", "Kitchen Appliances", "Gifts"],
+            "gradient_from": "from-red-500",
+            "gradient_to": "to-green-500",
+            "background_color": "bg-red-50",
+            "icon": "gift"
+        }
+    
+    # Year End Sale (Dec 27-31)
+    if month == 12 and day >= 27:
+        return {
+            "name": "year_end",
+            "title": "Year End Clearance 🎉",
+            "subtitle": "Last chance for 2026 deals",
+            "theme_type": "sale",
+            "categories": ["All Categories"],
+            "gradient_from": "from-purple-500",
+            "gradient_to": "to-blue-500",
+            "background_color": "bg-purple-50",
+            "icon": "party"
+        }
+    
+    # ============ MONTHLY SPECIALS ============
+    
+    # Month End Sale (Last 3 days of every month)
+    if day >= 28:
+        # This can be overridden by festivals above
+        pass  # Will fall through to seasonal
+    
+    # ============ SEASONAL THEMES ============
+    
+    # Summer (March-May)
+    if month in [3, 4, 5]:
+        return {
+            "name": "summer",
+            "title": "Summer Essentials ☀️",
+            "subtitle": "Beat the heat with cool appliances",
+            "theme_type": "seasonal",
+            "categories": ["Air Conditioner", "Cooler", "Refrigerator", "Fan", "Air Purifier", "Water Dispenser"],
+            "gradient_from": "from-yellow-400",
+            "gradient_to": "to-orange-500",
+            "background_color": "bg-yellow-50",
+            "icon": "sun"
+        }
+    
+    # Monsoon (June-September)
+    elif month in [6, 7, 8, 9]:
+        return {
+            "name": "monsoon",
+            "title": "Monsoon Ready 🌧️",
+            "subtitle": "Stay dry and comfortable",
+            "theme_type": "seasonal",
+            "categories": ["Dryer", "Dehumidifier", "Washing Machine", "Geyser", "Water Heater"],
+            "gradient_from": "from-blue-400",
+            "gradient_to": "to-indigo-500",
+            "background_color": "bg-blue-50",
+            "icon": "cloud"
+        }
+    
+    # Winter (October-February)
+    else:
+        return {
+            "name": "winter",
+            "title": "Winter Essentials ❄️",
+            "subtitle": "Warm up your home this winter",
+            "theme_type": "seasonal",
+            "categories": ["Room Heater", "Geyser", "Water Heater", "Coffee Maker", "Induction", "Oven"],
+            "gradient_from": "from-cyan-400",
+            "gradient_to": "to-blue-500",
+            "background_color": "bg-cyan-50",
+            "icon": "snowflake"
+        }
+
+@router.post("/themes")
+async def create_theme(theme: SeasonalThemeCreate, db=Depends(get_db)):
+    """Create a new seasonal theme"""
+    try:
+        theme_doc = {
+            "id": str(uuid.uuid4()),
+            **theme.dict(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await db.seasonal_themes.insert_one(theme_doc)
+        theme_doc.pop('_id', None)
+        
+        return {"status": "success", "message": "Theme created", "theme": theme_doc}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/themes/{theme_id}")
+async def update_theme(theme_id: str, update: SeasonalThemeUpdate, db=Depends(get_db)):
+    """Update a seasonal theme"""
+    try:
+        update_data = {k: v for k, v in update.dict().items() if v is not None}
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No update data provided")
+        
+        update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        
+        result = await db.seasonal_themes.update_one(
+            {"id": theme_id},
+            {"$set": update_data}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Theme not found")
+        
+        theme = await db.seasonal_themes.find_one({"id": theme_id}, {"_id": 0})
+        return {"status": "success", "message": "Theme updated", "theme": theme}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/themes/{theme_id}")
+async def delete_theme(theme_id: str, db=Depends(get_db)):
+    """Delete a seasonal theme"""
+    try:
+        result = await db.seasonal_themes.delete_one({"id": theme_id})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Theme not found")
+        return {"status": "success", "message": "Theme deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============ FLASH SALES ============
+
+@router.post("/flash-sales")
+async def create_flash_sale(sale: FlashSaleCreate, db=Depends(get_db)):
+    """Create a flash sale"""
+    try:
+        # Get product details
+        products = []
+        for pid in sale.product_ids:
+            product = await db.products.find_one({"id": pid}, {"_id": 0})
+            if product:
+                products.append({
+                    "id": product["id"],
+                    "name": product.get("name"),
+                    "original_price": product.get("price", 0),
+                    "sale_price": product.get("price", 0) * (1 - sale.discount_percent / 100),
+                    "image": product.get("images", [None])[0]
+                })
+        
+        sale_doc = {
+            "id": str(uuid.uuid4()),
+            "name": sale.name,
+            "products": products,
+            "discount_percent": sale.discount_percent,
+            "start_time": sale.start_time,
+            "end_time": sale.end_time,
+            "max_quantity_per_customer": sale.max_quantity_per_customer,
+            "total_quantity": sale.total_quantity,
+            "sold_quantity": 0,
+            "is_active": sale.is_active,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await db.flash_sales.insert_one(sale_doc)
+        sale_doc.pop('_id', None)
+        
+        return {"status": "success", "message": "Flash sale created", "sale": sale_doc}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/flash-sales/active")
+async def get_active_flash_sales(db=Depends(get_db)):
+    """Get currently active flash sales"""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        sales = await db.flash_sales.find(
+            {
+                "is_active": True,
+                "start_time": {"$lte": now},
+                "end_time": {"$gte": now}
+            },
+            {"_id": 0}
+        ).to_list(20)
+        
+        return {"status": "success", "sales": sales, "count": len(sales)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============ PROMO BANNERS ============
+
+@router.post("/banners")
+async def create_banner(banner: PromoBannerCreate, db=Depends(get_db)):
+    """Create a promotional banner"""
+    try:
+        banner_doc = {
+            "id": str(uuid.uuid4()),
+            **banner.dict(),
+            "clicks": 0,
+            "impressions": 0,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await db.promo_banners.insert_one(banner_doc)
+        banner_doc.pop('_id', None)
+        
+        return {"status": "success", "message": "Banner created", "banner": banner_doc}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/banners")
+async def get_banners(position: Optional[str] = None, active_only: bool = True, db=Depends(get_db)):
+    """Get promotional banners"""
+    try:
+        query = {}
+        if position:
+            query["position"] = position
+        if active_only:
+            now = datetime.now(timezone.utc).isoformat()
+            query["is_active"] = True
+            query["start_date"] = {"$lte": now}
+            query["end_date"] = {"$gte": now}
+        
+        banners = await db.promo_banners.find(query, {"_id": 0}).sort("priority", -1).to_list(50)
+        return {"status": "success", "banners": banners, "count": len(banners)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============ QUICK COMBO CREATOR ============
+
+@router.post("/quick-combo")
+async def create_quick_combo(
+    name: str,
+    model_numbers: List[str],
+    discount_percent: float,
+    valid_days: int = 30,
+    db=Depends(get_db)
+):
+    """
+    Quick combo creator - just enter model numbers and discount.
+    System fetches all product details automatically.
+    """
+    try:
+        products = []
+        total_price = 0
+        
+        for model in model_numbers:
+            product = await db.products.find_one(
+                {"$or": [
+                    {"model_number": {"$regex": model, "$options": "i"}},
+                    {"sku": {"$regex": model, "$options": "i"}}
+                ]},
+                {"_id": 0}
+            )
+            
+            if product:
+                price = product.get("price", 0)
+                products.append({
+                    "id": product["id"],
+                    "name": product.get("name"),
+                    "brand": product.get("brand"),
+                    "model_number": product.get("model_number") or model,
+                    "price": price,
+                    "image": product.get("images", [None])[0]
+                })
+                total_price += price
+        
+        if not products:
+            raise HTTPException(status_code=400, detail="No products found for given model numbers")
+        
+        final_price = total_price * (1 - discount_percent / 100)
+        now = datetime.now(timezone.utc)
+        
+        combo_doc = {
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "description": f"Special combo: {', '.join(p['name'][:30] for p in products)}",
+            "products": products,
+            "product_count": len(products),
+            "original_price": total_price,
+            "discount_percent": discount_percent,
+            "final_price": round(final_price, 2),
+            "savings": round(total_price - final_price, 2),
+            "valid_from": now.isoformat(),
+            "valid_until": (now + __import__('datetime').timedelta(days=valid_days)).isoformat(),
+            "is_active": True,
+            "orders_count": 0,
+            "created_at": now.isoformat(),
+            "created_via": "quick_combo"
+        }
+        
+        await db.combo_offers.insert_one(combo_doc)
+        combo_doc.pop('_id', None)
+        
+        return {
+            "status": "success",
+            "message": f"Combo created with {len(products)} products",
+            "combo": combo_doc
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============ DASHBOARD STATS ============
+
+@router.get("/stats")
+async def get_promotion_stats(db=Depends(get_db)):
+    """Get promotion statistics for admin dashboard"""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        
+        # Count active promotions
+        active_themes = await db.seasonal_themes.count_documents({
+            "is_active": True,
+            "start_date": {"$lte": now},
+            "end_date": {"$gte": now}
+        })
+        
+        active_combos = await db.combo_offers.count_documents({
+            "is_active": True,
+            "valid_until": {"$gte": now}
+        })
+        
+        active_flash_sales = await db.flash_sales.count_documents({
+            "is_active": True,
+            "start_time": {"$lte": now},
+            "end_time": {"$gte": now}
+        })
+        
+        active_banners = await db.promo_banners.count_documents({
+            "is_active": True,
+            "start_date": {"$lte": now},
+            "end_date": {"$gte": now}
+        })
+        
+        # Total combos
+        total_combos = await db.combo_offers.count_documents({})
+        
+        # Combo performance
+        combo_revenue = 0
+        combos = await db.combo_offers.find({}, {"revenue_generated": 1}).to_list(None)
+        for c in combos:
+            combo_revenue += c.get("revenue_generated", 0)
+        
+        return {
+            "status": "success",
+            "stats": {
+                "active_themes": active_themes,
+                "active_combos": active_combos,
+                "active_flash_sales": active_flash_sales,
+                "active_banners": active_banners,
+                "total_combos": total_combos,
+                "combo_revenue": combo_revenue
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ FESTIVE OVERRIDE + TRACKING ============
+FESTIVE_EVENTS = {"popup_open", "popup_cta", "deal_click"}
+
+
+class FestiveOverride(BaseModel):
+    mode: str = "auto"  # auto | off | force:1..9
+
+
+class FestiveEvent(BaseModel):
+    event: str
+
+
+def _override_theme(mode: str):
+    from datetime import timedelta
+    if mode == "off":
+        return {
+            "name": "season_default", "title": "Featured Picks", "subtitle": "Handpicked for you",
+            "theme_type": "seasonal", "categories": ["All Categories"],
+            "gradient_from": "from-orange-400", "gradient_to": "to-red-500",
+            "background_color": "bg-orange-50", "icon": "sparkles"
+        }
+    if mode.startswith("force:"):
+        try:
+            n = int(mode.split(":")[1])
+        except ValueError:
+            return None
+        if not 1 <= n <= 9:
+            return None
+        d = NAVRATRI_DAYS[n - 1]
+        ist = timezone(timedelta(hours=5, minutes=30))
+        end = datetime.combine(NAVRATRI_START + timedelta(days=9), datetime.min.time(), tzinfo=ist)
+        return {
+            "name": "navratri", "title": "Navratri Special 🔱",
+            "subtitle": f"Day {n} of 9 · {d['goddess']} · Wear {d['colour']}",
+            "theme_type": "festival", "categories": ["All Categories"],
+            "gradient_from": d["from"], "gradient_to": d["to"], "background_color": d["bg"],
+            "brand_hex": d["hex"], "ends_at": end.isoformat(), "icon": "sparkles"
+        }
+    return None
+
+
+@router.get("/festive-override")
+async def get_festive_override(db=Depends(get_db)):
+    ov = await db.festive_settings.find_one({"_id": "override"})
+    return {"status": "success", "mode": (ov or {}).get("mode", "auto")}
+
+
+@router.put("/festive-override")
+async def set_festive_override(body: FestiveOverride, db=Depends(get_db)):
+    m = body.mode.strip()
+    if m not in ("auto", "off") and _override_theme(m) is None:
+        raise HTTPException(status_code=400, detail="mode must be auto, off or force:1-9")
+    await db.festive_settings.update_one({"_id": "override"}, {"$set": {"mode": m}}, upsert=True)
+    return {"status": "success", "mode": m}
+
+
+@router.post("/festive-track")
+async def festive_track(body: FestiveEvent, db=Depends(get_db)):
+    from datetime import timedelta
+    if body.event not in FESTIVE_EVENTS:
+        raise HTTPException(status_code=400, detail="unknown event")
+    ist = timezone(timedelta(hours=5, minutes=30))
+    await db.festive_events.insert_one({
+        "event": body.event,
+        "day": datetime.now(ist).strftime("%Y-%m-%d"),
+        "ts": datetime.now(timezone.utc).isoformat()
+    })
+    return {"status": "success"}
+
+
+@router.get("/festive-stats")
+async def festive_stats(db=Depends(get_db)):
+    rows = await db.festive_events.aggregate(
+        [{"$group": {"_id": {"day": "$day", "event": "$event"}, "n": {"$sum": 1}}}]
+    ).to_list(1000)
+    out = {}
+    for r in rows:
+        out.setdefault(r["_id"]["day"], {})[r["_id"]["event"]] = r["n"]
+    return {"status": "success", "days": out}

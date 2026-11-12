@@ -1,0 +1,535 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { BACKEND_URL as API_URL } from '../config/api';
+import { ArrowRight, Sparkles, Play, ChevronDown, ChevronLeft, ChevronRight, Tag, Percent } from 'lucide-react';
+
+
+const PremiumHero = ({ onConsultation, onExplore, onViewProduct }) => {
+  const [isVisible, setIsVisible] = useState(false);
+  const [carouselItems, setCarouselItems] = useState([]); // Combined products + offers
+  const [currentSlide, setCurrentSlide] = useState(0);
+  const [brands, setBrands] = useState([]);
+  const [loading, setLoading] = useState(true);
+  
+  // Fetch featured products and promotional offers
+  useEffect(() => {
+    const fetchCarouselItems = async () => {
+      try {
+        // Fetch products
+        const productsResponse = await fetch(`${API_URL}/api/products`);
+        const productsData = await productsResponse.json();
+        const products = productsData.products || productsData || [];
+        
+        // Get unique brands
+        const uniqueBrands = [...new Set(products.filter(p => p.is_active !== false).map(p => p.brand))];
+        setBrands(uniqueBrands.filter(b => b && b !== 'Test Brand'));
+        
+        // Start with admin-created banners (highest priority — show first)
+        const featured = [];
+        
+        try {
+          const bannersResponse = await fetch(`${API_URL}/api/banners/active/homepage`);
+          const bannersData = await bannersResponse.json();
+          if (bannersData.status === 'success' && bannersData.banners?.length > 0) {
+            bannersData.banners.forEach(banner => {
+              if (banner.image_url) {
+                featured.push({ type: 'admin_banner', data: banner });
+              }
+            });
+          }
+        } catch (e) {
+          console.log('No admin banners available');
+        }
+        
+        // Get featured product for each brand (highest priced as "premium")
+        uniqueBrands.forEach(brand => {
+          if (brand && brand !== 'Test Brand') {
+            const brandProducts = products
+              .filter(p => p.brand === brand && p.is_active !== false && p.images?.length > 0)
+              .sort((a, b) => (b.price || 0) - (a.price || 0));
+            
+            if (brandProducts.length > 0) {
+              featured.push({ type: 'product', data: brandProducts[0] });
+            }
+          }
+        });
+        
+        // Fetch banner-featured combo offers
+        try {
+          const bannerCombosResponse = await fetch(`${API_URL}/api/combo-offers/banner/featured`);
+          const bannerCombosData = await bannerCombosResponse.json();
+          if (bannerCombosData.status === 'success' && bannerCombosData.banners?.length > 0) {
+            bannerCombosData.banners.forEach(banner => {
+              featured.push({ type: 'banner_combo', data: banner });
+            });
+          }
+        } catch (e) {
+          console.log('No banner combos available');
+        }
+
+        // Fallback: Fetch regular combo offers if no banner combos
+        if (featured.filter(f => f.type === 'banner_combo').length === 0) {
+          try {
+            const combosResponse = await fetch(`${API_URL}/api/combo-offers/`);
+            const combosData = await combosResponse.json();
+            if (combosData.status === 'success' && combosData.combos?.length > 0) {
+              // Add top 2 combos to carousel
+              combosData.combos.slice(0, 2).forEach(combo => {
+                featured.push({ type: 'combo', data: combo });
+              });
+            }
+          } catch (e) {
+            console.log('No combos available');
+          }
+        }
+        
+        // Fetch active promotions (single source of truth: /themes/active)
+        try {
+          if (!navigator.userAgent.includes('ReactSnap')) {
+            const promoResponse = await fetch(`${API_URL}/api/promotions/themes/active`);
+            const promoData = await promoResponse.json();
+            if (promoData.status === 'success' && promoData.theme) {
+              featured.push({ type: 'promo', data: promoData.theme });
+            }
+          }
+        } catch (e) {
+          console.log('No active promotions');
+        }
+        
+        setCarouselItems(featured);
+        setLoading(false);
+      } catch (error) {
+        console.error('Error fetching carousel items:', error);
+        setLoading(false);
+      }
+    };
+    
+    fetchCarouselItems();
+    setIsVisible(true);
+  }, []);
+
+  // Auto-rotate slides
+  useEffect(() => {
+    if (carouselItems.length > 1) {
+      const interval = setInterval(() => {
+        setCurrentSlide(prev => (prev + 1) % carouselItems.length);
+      }, 6000); // Change every 6 seconds
+      return () => clearInterval(interval);
+    }
+  }, [carouselItems.length]);
+
+  const nextSlide = useCallback(() => {
+    setCurrentSlide(prev => (prev + 1) % carouselItems.length);
+  }, [carouselItems.length]);
+
+  const prevSlide = useCallback(() => {
+    setCurrentSlide(prev => (prev - 1 + carouselItems.length) % carouselItems.length);
+  }, [carouselItems.length]);
+
+  const handleViewProduct = (item) => {
+    if (item.type === 'admin_banner') {
+      // Track click
+      try { fetch(`${API_URL}/api/banners/${item.data.id}/track-click`, { method: 'POST' }); } catch (e) {}
+      // Navigate to the banner's link_url
+      if (item.data.link_url) {
+        const url = item.data.link_url;
+        if (url.startsWith('http')) {
+          window.open(url, '_blank');
+        } else {
+          window.location.href = url;
+        }
+      }
+    } else if (item.type === 'product' && onViewProduct) {
+      onViewProduct(item.data);
+    } else if (item.type === 'combo') {
+      const combosSection = document.getElementById('combos-section');
+      if (combosSection) combosSection.scrollIntoView({ behavior: 'smooth' });
+    } else if (item.type === 'banner_combo') {
+      window.location.href = `/combos/${item.data.id}`;
+    }
+  };
+
+  const currentItem = carouselItems[currentSlide];
+
+  const stats = [
+    { value: '10+', label: 'Years' },
+    { value: '10K+', label: 'Customers' },
+    { value: '100%', label: 'Genuine' },
+  ];
+
+  const formatPrice = (price) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      maximumFractionDigits: 0
+    }).format(price);
+  };
+
+  return (
+    <section className="relative min-h-[85vh] md:min-h-[90vh] flex items-center overflow-hidden bg-obsidian">
+      {/* Background Image with Overlay */}
+      <div className="absolute inset-0">
+        <img 
+          src="https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=1920&q=80" 
+          alt="Premium Kitchen"
+          className="w-full h-full object-cover opacity-30 md:opacity-40"
+        />
+        <div className="absolute inset-0 bg-gradient-to-b md:bg-gradient-to-r from-obsidian via-obsidian/90 to-obsidian/70 md:to-transparent" />
+        <div className="hero-tint absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(135deg, rgb(var(--brand-700) / 0.35), transparent 65%)' }} />
+      </div>
+
+      {/* Floating AI Badge - Hidden on mobile, shown on tablet+ */}
+      <div className="hidden md:block absolute top-8 right-8 md:right-16 z-20">
+        <div className="backdrop-blur-xl bg-white/10 border border-white/20 rounded-2xl px-4 py-3 md:px-6 md:py-4">
+          <div className="flex items-center gap-2 md:gap-3">
+            <div className="relative">
+              <div className="w-2 h-2 md:w-3 md:h-3 bg-green-400 rounded-full animate-pulse" />
+              <div className="absolute inset-0 w-2 h-2 md:w-3 md:h-3 bg-green-400 rounded-full animate-ping" />
+            </div>
+            <span className="text-white/90 font-body text-xs md:text-sm">AI Assistants Online</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="relative z-10 w-full max-w-[1400px] mx-auto px-4 sm:px-6 md:px-12 py-16 md:py-24">
+        <div className="grid lg:grid-cols-2 gap-8 lg:gap-16 items-center">
+          {/* Left Column - Text */}
+          <div className={`space-y-5 md:space-y-8 transition-all duration-1000 ease-premium ${isVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'}`}>
+            {/* Eyebrow */}
+            <div className="inline-flex items-center gap-2 bg-copper/20 backdrop-blur-sm border border-copper/30 px-3 py-1.5 md:px-4 md:py-2 rounded-full">
+              <Sparkles className="w-3 h-3 md:w-4 md:h-4 text-copper" />
+              <span className="text-copper font-body text-xs md:text-sm tracking-wide">AI-Powered Shopping</span>
+            </div>
+
+            {/* Headline */}
+            <h1 className="font-display text-3xl sm:text-4xl md:text-5xl lg:text-6xl xl:text-7xl text-white leading-[1.15] tracking-tight">
+              Welcome to World of Brand Store
+              <span className="block text-transparent bg-clip-text bg-gradient-to-r from-platinum via-white to-platinum">
+              Shopping Experience
+              </span>
+            </h1>
+
+            {/* Subheadline */}
+            <p className="font-body text-sm sm:text-base md:text-lg text-white/70 max-w-lg leading-relaxed">
+              Discover premium European appliances from Bosch, Siemens & Electrolux. 
+              Our AI consultants help you find the perfect fit.
+            </p>
+
+            {/* CTA Buttons - Full width on mobile, row on sm+ */}
+            <div className="flex flex-col gap-3 md:gap-4 pt-2 md:pt-4 w-full max-w-md">
+              <button 
+                onClick={onConsultation}
+                className="group flex items-center justify-center gap-2 md:gap-3 bg-white text-obsidian px-6 py-3.5 md:px-8 md:py-4 rounded-xl md:rounded-full font-body font-semibold text-base md:text-lg hover:bg-platinum transition-all duration-500 ease-premium active:scale-[0.98] w-full"
+                data-testid="hero-consultation-btn"
+              >
+                <Sparkles className="w-5 h-5" />
+                <span>Free AI Consultation</span>
+                <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+              </button>
+              
+              <button 
+                onClick={onExplore}
+                className="group flex items-center justify-center gap-2 md:gap-3 bg-white/10 text-white border border-white/30 px-6 py-3.5 md:px-8 md:py-4 rounded-xl md:rounded-full font-body font-semibold text-base md:text-lg hover:bg-white/20 hover:border-white/50 transition-all duration-500 ease-premium active:scale-[0.98] w-full"
+                data-testid="hero-explore-btn"
+              >
+                <Play className="w-5 h-5" />
+                <span>Explore Collection</span>
+              </button>
+            </div>
+
+            {/* Trust Stats - Always horizontal row */}
+            <div className="grid grid-cols-3 gap-4 sm:gap-8 pt-6 md:pt-8 border-t border-white/10 w-full max-w-md">
+              {stats.map((stat, index) => (
+                <div key={index} className="text-center">
+                  <div className="font-display text-xl sm:text-2xl md:text-4xl text-white mb-0.5">{stat.value}</div>
+                  <div className="font-body text-[10px] sm:text-xs md:text-sm text-white/50 whitespace-nowrap">{stat.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Right Column - Featured Product/Offer Card - Hidden on mobile/tablet */}
+          <div className={`hidden lg:block transition-all duration-1000 delay-300 ease-premium ${isVisible ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-10'}`}>
+            {!loading && currentItem ? (
+              <div className="relative">
+                {/* Slide Navigation */}
+                {carouselItems.length > 1 && (
+                  <>
+                    <button 
+                      onClick={prevSlide}
+                      className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-4 z-20 w-10 h-10 bg-white/10 backdrop-blur-md border border-white/20 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
+                    >
+                      <ChevronLeft className="w-5 h-5" />
+                    </button>
+                    <button 
+                      onClick={nextSlide}
+                      className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-4 z-20 w-10 h-10 bg-white/10 backdrop-blur-md border border-white/20 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
+                    >
+                      <ChevronRight className="w-5 h-5" />
+                    </button>
+                  </>
+                )}
+                
+                {/* Card Content - Different layouts for each type */}
+                <div key={currentSlide} className="hero-fade">
+                {currentItem.type === 'admin_banner' ? (
+                  // Admin-Created Marketing Banner — full-bleed image, clickable
+                  <div 
+                    className="relative rounded-3xl overflow-hidden cursor-pointer group hover:scale-[1.02] transition-all duration-500"
+                    onClick={() => handleViewProduct(currentItem)}
+                    data-testid="hero-admin-banner"
+                  >
+                    <div className="aspect-[4/3] bg-obsidian">
+                      <img 
+                        src={currentItem.data.image_url.startsWith('/') ? `${API_URL}${currentItem.data.image_url}` : currentItem.data.image_url}
+                        alt={currentItem.data.title}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700"
+                        onError={(e) => {
+                          e.target.src = 'https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=600&q=80';
+                        }}
+                      />
+                      {/* Gradient overlay at bottom for text */}
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+                    </div>
+                    <div className="absolute bottom-0 left-0 right-0 p-6 xl:p-8">
+                      {currentItem.data.banner_type && (
+                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-bold mb-3 ${
+                          currentItem.data.banner_type === 'sale' ? 'bg-red-500 text-white' :
+                          currentItem.data.banner_type === 'new_product' ? 'bg-green-500 text-white' :
+                          currentItem.data.banner_type === 'seasonal' ? 'bg-purple-500 text-white' :
+                          'bg-copper text-white'
+                        }`}>
+                          {currentItem.data.banner_type === 'sale' ? 'SALE' :
+                           currentItem.data.banner_type === 'new_product' ? 'NEW' :
+                           currentItem.data.banner_type === 'seasonal' ? 'SEASONAL' : 'PROMO'}
+                        </span>
+                      )}
+                      <h3 className="font-display text-xl xl:text-2xl text-white mb-1">{currentItem.data.title}</h3>
+                      {currentItem.data.description && (
+                        <p className="font-body text-white/80 text-sm line-clamp-2">{currentItem.data.description}</p>
+                      )}
+                      {currentItem.data.link_url && (
+                        <div className="mt-4">
+                          <span className="inline-flex items-center gap-2 bg-white text-obsidian px-5 py-2.5 rounded-full font-body font-semibold text-sm group-hover:bg-platinum transition-colors">
+                            Shop Now
+                            <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : currentItem.type === 'product' ? (
+                  // Product Card
+                  <div className="backdrop-blur-xl bg-white/5 border border-white/10 rounded-3xl p-6 xl:p-8 hover:bg-white/10 transition-all duration-500">
+                    <div className="absolute -top-3 -right-3 bg-gradient-to-r from-blue-500 to-purple-500 text-white px-3 py-1.5 rounded-full text-xs font-body font-medium shadow-lg shadow-purple-500/25">
+                      AI Recommended
+                    </div>
+                    
+                    <div className="aspect-square bg-gradient-to-br from-white/10 to-white/5 rounded-2xl mb-4 xl:mb-6 flex items-center justify-center overflow-hidden">
+                      <img 
+                        src={currentItem.data.images?.[0] || currentItem.data.image || currentItem.data.thumbnail} 
+                        alt={currentItem.data.name}
+                        className="w-full h-full object-contain p-4 hover:scale-105 transition-transform duration-700"
+                        onError={(e) => {
+                          e.target.src = 'https://images.unsplash.com/photo-1585771724684-38269d6639fd?w=600&q=80';
+                        }}
+                      />
+                    </div>
+
+                    <div className="space-y-3 xl:space-y-4">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs text-copper bg-copper/10 px-2 py-1 rounded">{currentItem.data.brand}</span>
+                        <span className="font-mono text-xs text-white/40">{currentItem.data.category}</span>
+                      </div>
+                      <h3 className="font-display text-xl xl:text-2xl text-white line-clamp-2">{currentItem.data.name}</h3>
+                      <p className="font-body text-white/60 text-sm line-clamp-2">{currentItem.data.short_description || currentItem.data.description?.substring(0, 80) + '...'}</p>
+                      
+                      <div className="flex items-center justify-between pt-3 xl:pt-4 border-t border-white/10">
+                        <div>
+                          {currentItem.data.original_price && currentItem.data.original_price > currentItem.data.price && (
+                            <span className="font-mono text-xs text-white/40 line-through">{formatPrice(currentItem.data.original_price)}</span>
+                          )}
+                          <span className="font-display text-xl xl:text-2xl text-white ml-2">{formatPrice(currentItem.data.price)}</span>
+                        </div>
+                        <button 
+                          onClick={() => handleViewProduct(currentItem)}
+                          className="bg-white text-obsidian px-4 xl:px-6 py-2 xl:py-3 rounded-full font-body font-semibold text-sm hover:bg-platinum transition-colors"
+                          data-testid="hero-view-product-btn"
+                        >
+                          View Details
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : currentItem.type === 'combo' ? (
+                  // Combo Offer Card
+                  <div className="backdrop-blur-xl bg-gradient-to-br from-purple-500/20 to-indigo-600/20 border border-purple-400/30 rounded-3xl p-6 xl:p-8 hover:from-purple-500/30 hover:to-indigo-600/30 transition-all duration-500">
+                    <div className="absolute -top-3 -right-3 bg-gradient-to-r from-purple-500 to-indigo-600 text-white px-4 py-1.5 rounded-full text-xs font-body font-bold shadow-lg shadow-purple-500/25 flex items-center gap-1">
+                      <Tag className="w-3 h-3" />
+                      COMBO DEAL
+                    </div>
+                    
+                    <div className="aspect-video bg-gradient-to-br from-purple-500/10 to-indigo-600/10 rounded-2xl mb-4 xl:mb-6 flex items-center justify-center overflow-hidden">
+                      <div className="text-center p-4">
+                        <Percent className="w-16 h-16 text-purple-400 mx-auto mb-3" />
+                        <div className="text-3xl font-bold text-white">{currentItem.data.discount_percentage || 20}% OFF</div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 xl:space-y-4">
+                      <h3 className="font-display text-xl xl:text-2xl text-white">{currentItem.data.name}</h3>
+                      <p className="font-body text-white/70 text-sm">{currentItem.data.description || 'Save big with this exclusive combo offer!'}</p>
+                      
+                      <div className="flex items-center justify-between pt-3 xl:pt-4 border-t border-white/10">
+                        <div>
+                          <span className="font-mono text-xs text-white/40 line-through">{formatPrice(currentItem.data.original_price || currentItem.data.total_original_price)}</span>
+                          <span className="font-display text-xl xl:text-2xl text-green-400 ml-2">{formatPrice(currentItem.data.combo_price || currentItem.data.total_combo_price)}</span>
+                        </div>
+                        <button 
+                          onClick={() => handleViewProduct(currentItem)}
+                          className="bg-gradient-to-r from-purple-500 to-indigo-600 text-white px-4 xl:px-6 py-2 xl:py-3 rounded-full font-body font-semibold text-sm hover:from-purple-600 hover:to-indigo-700 transition-colors"
+                        >
+                          View Combo
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : currentItem.type === 'banner_combo' ? (
+                  // Banner Combo Card (Featured from Admin)
+                  <div className={`backdrop-blur-xl bg-gradient-to-br ${currentItem.data.gradient || 'from-purple-600/30 to-pink-600/30'} border border-purple-400/30 rounded-3xl p-6 xl:p-8 hover:scale-[1.02] transition-all duration-500`}>
+                    <div className="absolute -top-3 -right-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white px-4 py-1.5 rounded-full text-xs font-body font-bold shadow-lg shadow-purple-500/25 flex items-center gap-1">
+                      <Tag className="w-3 h-3" />
+                      SAVE ₹{currentItem.data.savings?.toLocaleString('en-IN') || 'BIG'}
+                    </div>
+                    
+                    <div className="aspect-video bg-gradient-to-br from-purple-500/10 to-pink-600/10 rounded-2xl mb-4 xl:mb-6 flex items-center justify-center overflow-hidden">
+                      {currentItem.data.image ? (
+                        <img 
+                          src={currentItem.data.image} 
+                          alt={currentItem.data.title}
+                          className="w-full h-full object-cover rounded-2xl"
+                          onError={(e) => {
+                            e.target.style.display = 'none';
+                            e.target.nextSibling.style.display = 'block';
+                          }}
+                        />
+                      ) : null}
+                      <div className={`text-center p-4 ${currentItem.data.image ? 'hidden' : 'block'}`}>
+                        <Percent className="w-16 h-16 text-purple-400 mx-auto mb-3" />
+                        <div className="text-3xl font-bold text-white">
+                          {currentItem.data.discount_type === 'percentage' 
+                            ? `${currentItem.data.discount}% OFF` 
+                            : `₹${currentItem.data.discount?.toLocaleString('en-IN')} OFF`}
+                        </div>
+                        <div className="text-white/60 text-sm mt-1">{currentItem.data.products_count} Products</div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 xl:space-y-4">
+                      <h3 className="font-display text-xl xl:text-2xl text-white">{currentItem.data.title}</h3>
+                      <p className="font-body text-white/70 text-sm">{currentItem.data.subtitle}</p>
+                      
+                      <div className="flex items-center justify-between pt-3 xl:pt-4 border-t border-white/10">
+                        <div>
+                          <span className="font-mono text-xs text-white/40 line-through">₹{currentItem.data.original_price?.toLocaleString('en-IN')}</span>
+                          <span className="font-display text-xl xl:text-2xl text-green-400 ml-2">₹{currentItem.data.final_price?.toLocaleString('en-IN')}</span>
+                        </div>
+                        <button 
+                          onClick={() => handleViewProduct(currentItem)}
+                          className="bg-gradient-to-r from-purple-500 to-pink-500 text-white px-4 xl:px-6 py-2 xl:py-3 rounded-full font-body font-semibold text-sm hover:from-purple-600 hover:to-pink-600 transition-colors"
+                          data-testid="hero-combo-btn"
+                        >
+                          {currentItem.data.cta_text || 'Shop Bundle'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  // Promotional Banner Card
+                  <div className="backdrop-blur-xl bg-gradient-to-br from-copper/20 to-amber-600/20 border border-copper/30 rounded-3xl p-6 xl:p-8 hover:from-copper/30 hover:to-amber-600/30 transition-all duration-500">
+                    <div className="absolute -top-3 -right-3 bg-gradient-to-r from-copper to-amber-500 text-white px-4 py-1.5 rounded-full text-xs font-body font-bold shadow-lg flex items-center gap-1">
+                      <Sparkles className="w-3 h-3" />
+                      SPECIAL OFFER
+                    </div>
+                    
+                    <div className="aspect-video bg-gradient-to-br from-copper/10 to-amber-600/10 rounded-2xl mb-4 xl:mb-6 flex items-center justify-center overflow-hidden">
+                      <div className="text-center p-4">
+                        <Sparkles className="w-16 h-16 text-copper mx-auto mb-3" />
+                        <div className="text-2xl font-bold text-white">{currentItem.type === 'promo' ? (currentItem.data.title || 'Limited Time Offer') : (currentItem.data.name || 'Limited Time Offer')}</div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 xl:space-y-4">
+                      <h3 className="font-display text-xl xl:text-2xl text-white">{currentItem.data.title || currentItem.data.name}</h3>
+                      <p className="font-body text-white/70 text-sm">{currentItem.data.description || currentItem.data.subtitle || 'Don\'t miss out on this amazing deal!'}</p>
+                      
+                      <div className="pt-3 xl:pt-4 border-t border-white/10">
+                        <button 
+                          onClick={onExplore}
+                          className="w-full bg-gradient-to-r from-copper to-amber-500 text-white px-4 xl:px-6 py-3 rounded-full font-body font-semibold text-sm hover:from-copper/90 hover:to-amber-500/90 transition-colors"
+                        >
+                          Shop Now
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                </div>
+
+                {/* Slide Indicators */}
+                {carouselItems.length > 1 && (
+                  <div className="flex justify-center gap-2 mt-4">
+                    {carouselItems.map((item, index) => (
+                      <button
+                        key={index}
+                        onClick={() => setCurrentSlide(index)}
+                        className={`h-2 rounded-full transition-all ${
+                          index === currentSlide 
+                            ? item.type === 'admin_banner' ? 'bg-white w-6' : item.type === 'combo' || item.type === 'banner_combo' ? 'bg-purple-500 w-6' : item.type === 'promo' ? 'bg-copper w-6' : 'bg-copper w-6'
+                            : 'bg-white/30 w-2 hover:bg-white/50'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* Decorative Elements */}
+                <div className="absolute -bottom-8 -left-8 w-32 h-32 bg-gradient-to-br from-blue-500/20 to-purple-500/20 rounded-full blur-3xl" />
+                <div className="absolute -top-8 -right-8 w-24 h-24 bg-gradient-to-br from-copper/20 to-yellow-500/20 rounded-full blur-2xl" />
+              </div>
+            ) : (
+              <div className="backdrop-blur-xl bg-white/5 border border-white/10 rounded-3xl p-8 h-96 flex items-center justify-center">
+                <div className="animate-pulse text-white/50">Loading featured products...</div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Scroll Indicator - Hidden on mobile */}
+      <div className="hidden md:block absolute bottom-20 left-1/2 -translate-x-1/2 animate-bounce">
+        <ChevronDown className="w-6 h-6 md:w-8 md:h-8 text-white/50" />
+      </div>
+
+      {/* Brand Logos Bar - Metallic Copper */}
+      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-r from-amber-800 via-copper to-amber-700 backdrop-blur-md border-t border-amber-600/30 py-3 md:py-6 shadow-lg">
+        <div className="max-w-[1400px] mx-auto px-4 sm:px-6 md:px-12">
+          <div className="flex items-center justify-center md:justify-between">
+            <span className="font-body text-xs text-white/80 hidden md:block font-medium">Authorized Partner</span>
+            <div className="flex items-center justify-center gap-4 sm:gap-6 md:gap-10">
+              {['BOSCH', 'SIEMENS', 'ELECTROLUX', 'HINDWARE'].map((brand, i) => (
+                <span key={i} className="font-display text-xs sm:text-sm md:text-lg lg:text-xl text-white/90 hover:text-white transition-colors cursor-pointer tracking-wider font-semibold">
+                  {brand}
+                </span>
+              ))}
+            </div>
+            <span className="font-body text-xs text-white/80 hidden md:block font-medium">Since 2014</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
+
+export default PremiumHero;

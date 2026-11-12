@@ -1,0 +1,45 @@
+ac---air-conditioners/electrolux|127678|<title>Buy Electrolux AC Air Conditioners Online | Aditya Retail</title>
+ac---air-conditioners/haier|310864|<title>Aditya Retail - Premium Home Appliances | Bosch &amp; Siemens</title>
+accessories/bosch|135520|<title>Buy Bosch Accessories Online | Aditya Retail</title>
+air-fryer/bosch|120762|<title>Buy Bosch Air Fryer Online | Aditya Retail</title>
+chimney/bosch|183795|<title>Buy Bosch Chimney Online | Aditya Retail</title>
+chimney/electrolux|223100|<title>Buy Electrolux Chimney Online | Aditya Retail</title>
+chimney/haier|105608|<title>Buy Haier Chimney Online | Aditya Retail</title>
+chimney/siemens|173418|<title>Buy Siemens Chimney Online | Aditya Retail</title>
+clothes-dryer/siemens|110824|<title>Buy Siemens Clothes Dryer Online | Aditya Retail</title>
+coffee-machine/bosch|140134|<title>Buy Bosch Coffee Machine Online | Aditya Retail</title>
+coffee-machine/electrolux|111558|<title>Buy Electrolux Coffee Machine Online | Aditya Retail</title>
+coffee-machine/siemens|112698|<title>Buy Siemens Coffee Machines Online | Aditya Retail</title>
+detergents/bosch|201850|<title>Buy Bosch Detergents Online | Aditya Retail</title>
+dishwasher/bosch|191823|<title>Buy Bosch Dishwashers Online | Aditya Retail</title>
+dishwasher/electrolux|150488|<title>Buy Electrolux Dishwashers Online | Aditya Retail</title>
+dishwasher/siemens|199817|<title>Buy Siemens Dishwashers Online | Aditya Retail</title>
+gas-hob/bosch|181309|<title>Buy Bosch Gas Hob Online | Aditya Retail</title>
+gas-hob/electrolux|172085|<title>Buy Electrolux Gas Hobs Online | Aditya Retail</title>
+gas-hob/siemens|164045|<title>Buy Siemens Gas Hob Online | Aditya Retail</title>
+geysers/haier|161126|<title>Buy Haier Geysers Online | Aditya Retail</title>
+induction-hob/bosch|112738|<title>Buy Bosch Induction Hob Online | Aditya Retail</title>
+induction-hob/electrolux|130171|<title>Buy Electrolux Induction Hob Online | Aditya Retail</title>
+induction-hob/siemens|148143|<title>Buy Siemens Induction Hob Online | Aditya Retail</title>
+microwave/bosch|121391|<title>Buy Bosch Microwaves Online | Aditya Retail</title>
+microwave/electrolux|121440|<title>Buy Electrolux Microwaves Online | Aditya Retail</title>
+microwave/haier|104160|<title>Buy Haier Microwave Online | Aditya Retail</title>
+microwave/siemens|129311|<title>Buy Siemens Microwaves Online | Aditya Retail</title>
+mixer-grinder/bosch|179637|<title>Buy Bosch Mixer Grinder Online | Aditya Retail</title>
+mixer-grinder/bosch|179637|<title>Buy Bosch Mixer Grinder Online | Aditya Retail</title>
+oven/bosch|206036|<title>Buy Bosch Ovens Online | Aditya Retail</title>
+oven/electrolux|189592|<title>Buy Electrolux Ovens Online | Aditya Retail</title>
+oven/siemens|174179|<title>Buy Oven Online | Best Prices &amp; Offers | Aditya Retail</title>
+refrigerator/bosch|355940|<title>Buy Bosch Refrigerators Online | Aditya Retail</title>
+refrigerator/bosch|355940|<title>Buy Bosch Refrigerators Online | Aditya Retail</title>
+refrigerator/electrolux|247703|<title>Buy Electrolux Refrigerator Online | Aditya Retail</title>
+refrigerator/haier|999884|<title>Buy Haier Refrigerators Online | Aditya Retail</title>
+refrigerator/siemens|131387|<title>Buy Siemens Refrigerators Online | Aditya Retail</title>
+tv/haier|474895|<title>Buy Haier TV Online | Aditya Retail</title>
+vacuum-cleaners/electrolux|120423|<title>Buy Electrolux Vacuum Cleaners Online | Aditya Retail</title>
+warmer-drawer/bosch|111047|<title>Buy Bosch Warmer Drawers Online | Aditya Retail</title>
+warmer-drawer/siemens|120919|<title>Buy Siemens Warmer Drawer Online | Aditya Retail</title>
+washing-machine/bosch|288607|<title>Buy Bosch Washing Machines Online | Aditya Retail</title>
+washing-machine/electrolux|225832|<title>Buy Electrolux Washing Machines Online | Aditya Retail</title>
+washing-machine/haier|358551|<title>Buy Haier Washing Machines Online | Aditya Retail</title>
+washing-machine/siemens|164332|<title>Buy Siemens Washing Machines Online | Aditya Retail</title>

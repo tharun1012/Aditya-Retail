@@ -1,0 +1,604 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { BACKEND_URL } from '../config/api';
+import { FileText, CheckSquare, Square, RefreshCw, Truck, Package, Eye, Edit, Store, Search, FileCheck2 } from 'lucide-react';
+import DocumentActions from './DocumentActions';
+
+
+const SalesOrderConversion = () => {
+  const navigate = useNavigate();
+  const [salesOrders, setSalesOrders] = useState([]);
+  const [stores, setStores] = useState([]);
+  const [storeFilter, setStoreFilter] = useState('all');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [selectedOrders, setSelectedOrders] = useState([]);
+  const [converting, setConverting] = useState(false);
+  const [viewingOrder, setViewingOrder] = useState(null);
+  const [partialSel, setPartialSel] = useState({});
+
+  useEffect(() => {
+    const m = {};
+    (viewingOrder?.items || []).forEach(i => {
+      if (i.product_id) m[i.product_id] = { selected: false, quantity: i.quantity || 0 };
+    });
+    setPartialSel(m);
+  }, [viewingOrder]);
+
+  useEffect(() => {
+    fetchPendingSalesOrders();
+    fetchStores();
+  }, []);
+
+  const fetchStores = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/invoices/offline/stores`);
+      const data = await res.json();
+      if (data.status === 'success' && Array.isArray(data.stores)) {
+        setStores(data.stores);
+      }
+    } catch (e) {
+      console.error('Failed to fetch stores:', e);
+    }
+  };
+
+  const fetchPendingSalesOrders = async () => {
+    setLoading(true);
+    try {
+      // Fetch ALL sales orders that haven't been converted yet
+      const response = await fetch(`${BACKEND_URL}/api/invoices/offline/?document_type=sales_order&limit=5000&include_converted=true`);
+      const data = await response.json();
+      if (data.status === 'success') {
+        // Filter to show only unconverted SOs (status not 'converted' or 'cancelled')
+        const pendingOrders = (data.invoices || []).filter(order => 
+          order.status !== 'cancelled'
+        );
+        setSalesOrders(pendingOrders);
+      }
+    } catch (error) {
+      console.error('Failed to fetch sales orders:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Derived: filter the loaded SOs by store + search term (client-side, instant)
+  const isFinished = (o) => o.document_type === 'invoice' || ['converted','delivered','completed'].includes(o.status);
+
+  const filteredOrders = useMemo(() => {
+    return salesOrders.filter((order) => {
+      // Store filter
+      if (storeFilter !== 'all') {
+        const code = order.store_code || order.store?.code;
+        if (code !== storeFilter) return false;
+      }
+      // Search filter
+      if (searchTerm) {
+        const q = searchTerm.toLowerCase().trim();
+        const haystack = [
+          order.invoice_number,
+          order.customer?.name || order.customer_name,
+          order.customer?.phone || order.customer_phone,
+        ].filter(Boolean).join(' ').toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [salesOrders, storeFilter, searchTerm]);
+
+  const toggleOrderSelection = (orderId) => {
+    if (selectedOrders.includes(orderId)) {
+      setSelectedOrders(selectedOrders.filter(id => id !== orderId));
+    } else {
+      setSelectedOrders([...selectedOrders, orderId]);
+    }
+  };
+
+  const toggleSelectAll = () => {
+    const visibleIds = filteredOrders.filter(o => !isFinished(o)).map(order => order.id);
+    const allSelected = visibleIds.length > 0 && visibleIds.every(id => selectedOrders.includes(id));
+    if (allSelected) {
+      setSelectedOrders(selectedOrders.filter(id => !visibleIds.includes(id)));
+    } else {
+      // Add all currently-visible orders to selection (preserve other selections)
+      const merged = Array.from(new Set([...selectedOrders, ...visibleIds]));
+      setSelectedOrders(merged);
+    }
+  };
+
+  const handlePartialConvert = async () => {
+    const order = viewingOrder;
+    if (!order) return;
+    const selectedItems = (order.items || [])
+      .filter(i => partialSel[i.product_id]?.selected && Number(partialSel[i.product_id]?.quantity) > 0)
+      .map(i => ({
+        product_id: i.product_id,
+        product_name: i.product_name || '',
+        quantity: Number(partialSel[i.product_id].quantity),
+        rate: i.rate || i.price || 0,
+        hsn_code: i.hsn_code || '',
+        gst_rate: i.gst_rate || i.tax_rate || 18,
+        serial_numbers: i.serial_numbers || []
+      }));
+    if (selectedItems.length === 0) {
+      alert('Please select at least one item to convert');
+      return;
+    }
+    if (!window.confirm('Convert ' + selectedItems.length + ' selected item(s) to an invoice?')) return;
+
+    setConverting(true);
+    try {
+      const adminUser = JSON.parse(localStorage.getItem('admin_user') || '{}');
+      const convertedBy = adminUser.full_name || adminUser.email || 'warehouse_manager';
+      const url = BACKEND_URL + '/api/invoices/offline/sales-orders/partial-convert';
+      const send = async (force) => {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sales_order_id: order.id,
+            selected_items: selectedItems,
+            converted_by: convertedBy,
+            ...(force ? { force: true } : {})
+          })
+        });
+        return res.json();
+      };
+
+      let data = await send(false);
+      if (data.status === 'duplicate_warning') {
+        if (!window.confirm('Possible Duplicate Invoice: ' + data.message)) {
+          return;
+        }
+        data = await send(true);
+      }
+
+      if (data.status === 'success') {
+        const inv = data.new_invoice?.invoice_number || '';
+        alert(data.remaining_items_count > 0
+          ? 'Created Invoice ' + inv + '. ' + data.remaining_items_count + ' item(s) remain in the SO for future delivery.'
+          : 'All items converted to Invoice ' + inv);
+        setViewingOrder(null);
+        fetchPendingSalesOrders();
+      } else {
+        alert('Failed to convert: ' + (data.detail || data.message || 'Unknown error'));
+      }
+    } catch (error) {
+      console.error('Partial conversion failed:', error);
+      alert('Failed to convert selected items');
+    } finally {
+      setConverting(false);
+    }
+  };
+
+  const handleConvertToInvoice = async (idsArg) => {
+    const ids = Array.isArray(idsArg) ? idsArg : selectedOrders;
+    if (ids.length === 0) {
+      alert('Please select at least one sales order to convert');
+      return;
+    }
+
+    if (!window.confirm(`Convert ${ids.length} sales order(s) to invoice(s)?`)) {
+      return;
+    }
+
+    setConverting(true);
+    try {
+      const adminUser = JSON.parse(localStorage.getItem('admin_user') || '{}');
+      const convertedBy = adminUser.full_name || adminUser.email || 'warehouse_manager';
+
+      const response = await fetch(`${BACKEND_URL}/api/invoices/offline/sales-orders/convert-to-invoice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sales_order_ids: ids,
+          converted_by: convertedBy
+        })
+      });
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        const failed = data.failed_conversions || [];
+        let summary = `Converted: ${data.converted_count}`;
+        if (failed.length > 0) {
+          summary += `\n\nFailed: ${failed.length}\n` + failed.slice(0, 3).map(f => `- ${f.message || f.reason}`).join('\n');
+        }
+        alert(summary);
+        setSelectedOrders([]);
+        fetchPendingSalesOrders();
+      } else {
+        alert(`Failed to convert: ${data.detail || data.message || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Failed to convert sales orders:', error);
+      alert('Failed to convert sales orders');
+    } finally {
+      setConverting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 bg-gray-50 min-h-screen">
+      {/* Header */}
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-2">
+              <Truck className="text-green-500" />
+              Sales Order Conversion
+            </h1>
+            <p className="text-gray-600 mt-1">Convert pending sales orders to invoices for delivery</p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={fetchPendingSalesOrders}
+              className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center gap-2"
+            >
+              <RefreshCw size={18} />
+              Refresh
+            </button>
+            {selectedOrders.length > 0 && (
+              <button
+                onClick={handleConvertToInvoice}
+                disabled={converting}
+                className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 flex items-center gap-2 disabled:opacity-50"
+              >
+                <FileText size={18} />
+                Convert to Invoice ({selectedOrders.length})
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Stats */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-white rounded-lg shadow p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-gray-600 text-sm">
+                  {storeFilter !== 'all' || searchTerm ? 'Filtered SOs' : 'Pending Sales Orders'}
+                </p>
+                <p className="text-2xl font-bold text-gray-900">
+                  {filteredOrders.filter(o => !isFinished(o)).length}
+                  {(storeFilter !== 'all' || searchTerm) && (
+                    <span className="text-base text-gray-400 font-normal"> / {salesOrders.length}</span>
+                  )}
+                </p>
+              </div>
+              <Package className="text-yellow-500" size={32} />
+            </div>
+          </div>
+          <div className="bg-white rounded-lg shadow p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-gray-600 text-sm">Selected for Conversion</p>
+                <p className="text-2xl font-bold text-green-600">{selectedOrders.length}</p>
+              </div>
+              <CheckSquare className="text-green-500" size={32} />
+            </div>
+          </div>
+          <div className="bg-white rounded-lg shadow p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-gray-600 text-sm">Total Value</p>
+                <p className="text-2xl font-bold text-gray-900">
+                  ₹{filteredOrders.filter(o => !isFinished(o)).reduce((sum, order) => sum + (order.total_amount || 0), 0).toFixed(2)}
+                </p>
+              </div>
+              <FileText className="text-blue-500" size={32} />
+            </div>
+          </div>
+        </div>
+
+        {/* Filters Row — store dropdown + search */}
+        <div className="mt-4 bg-white rounded-lg shadow p-4 flex flex-wrap gap-3 items-center">
+          <div className="flex items-center gap-2 min-w-[260px]">
+            <Store size={18} className="text-gray-400" />
+            <select
+              value={storeFilter}
+              onChange={(e) => setStoreFilter(e.target.value)}
+              className="flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 text-sm bg-white"
+              data-testid="store-filter"
+            >
+              <option value="all">All Stores ({stores.length})</option>
+              {stores.map((s) => (
+                <option key={s.code} value={s.code}>
+                  {s.code} — {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1 min-w-[220px] relative">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search by SO #, customer name or phone..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-9 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 text-sm"
+              data-testid="search-input"
+            />
+          </div>
+          {(storeFilter !== 'all' || searchTerm) && (
+            <button
+              onClick={() => { setStoreFilter('all'); setSearchTerm(''); }}
+              className="px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700"
+              data-testid="clear-filters-btn"
+            >
+              Clear Filters
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Sales Orders List */}
+      {filteredOrders.length === 0 ? (
+        <div className="bg-white rounded-lg shadow p-12 text-center">
+          <Package className="mx-auto text-gray-400 mb-4" size={64} />
+          <h3 className="text-xl font-semibold text-gray-600 mb-2">
+            {salesOrders.length === 0 ? 'No Pending Sales Orders' : 'No SOs Match Your Filters'}
+          </h3>
+          <p className="text-gray-500">
+            {salesOrders.length === 0
+              ? 'All sales orders have been converted to invoices or there are no large appliance orders pending delivery.'
+              : 'Try selecting "All Stores" or clearing the search.'}
+          </p>
+        </div>
+      ) : (
+        <div className="bg-white rounded-lg shadow overflow-hidden">
+          {/* Select All */}
+          <div className="px-6 py-3 bg-gray-50 border-b border-gray-200 flex items-center gap-3">
+            <button
+              onClick={toggleSelectAll}
+              className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900"
+            >
+              {filteredOrders.filter(o => !isFinished(o)).length > 0 && filteredOrders.filter(o => !isFinished(o)).every(o => selectedOrders.includes(o.id)) ? (
+                <CheckSquare className="text-blue-500" size={20} />
+              ) : (
+                <Square className="text-gray-400" size={20} />
+              )}
+              Select All Visible ({filteredOrders.filter(o => !isFinished(o)).length})
+            </button>
+          </div>
+
+          {/* Table */}
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Select</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Order Number</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Store</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Items</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Payment</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created By</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {filteredOrders.map((order) => (
+                <tr
+                  key={order.id}
+                  className={`hover:bg-gray-50 ${selectedOrders.includes(order.id) ? 'bg-blue-50' : ''}`}
+                >
+                  <td className="px-6 py-4 whitespace-nowrap" onClick={() => !isFinished(order) && toggleOrderSelection(order.id)}>
+                    {selectedOrders.includes(order.id) ? (
+                      <CheckSquare className="text-blue-500 cursor-pointer" size={20} />
+                    ) : (
+                      isFinished(order) ? <span className="text-gray-300 text-sm">—</span> : <Square className="text-gray-400 cursor-pointer" size={20} />
+                    )}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                    {order.document_type === 'invoice' && order.original_so_number ? order.original_so_number : order.invoice_number}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    <div className="flex items-center gap-1.5">
+                      <Store size={14} className="text-gray-400" />
+                      <span className="text-gray-700 font-medium">{order.store_code || order.store?.code || '—'}</span>
+                    </div>
+                    {order.store_details?.name && (
+                      <div className="text-xs text-gray-500 mt-0.5 max-w-[180px] truncate" title={order.store_details.name}>
+                        {order.store_details.name}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    <div>
+                      <div className="font-medium">{order.customer?.name || order.customer_name || 'N/A'}</div>
+                      <div className="text-gray-500 text-xs">{order.customer?.phone || order.customer_phone || ''}</div>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {order.items?.length || 0} items
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-semibold">
+                    ₹{order.total_amount?.toFixed(2)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                      order.payment_status === 'paid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                    }`}>
+                      {order.payment_mode}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                      isFinished(order) ? 'bg-green-100 text-green-800' : order.status === 'partially_delivered' ? 'bg-blue-100 text-blue-800' : 'bg-yellow-100 text-yellow-800'
+                    }`}>
+                      {isFinished(order) ? 'Converted' : order.status === 'partially_delivered' ? 'Partially delivered'
+                        : (order.status === 'pending_delivery' || order.status === 'pending') ? 'Pending delivery'
+                        : String(order.status || 'pending').replace(/_/g, ' ')}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {new Date(order.created_at).toLocaleDateString()}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {order.created_by}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setViewingOrder(order);
+                        }}
+                        className="text-blue-600 hover:text-blue-900 p-1"
+                        title="View Details"
+                      >
+                        <Eye size={18} />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`/admin/sales-orders/edit/${order.id}`, { state: { returnPath: "/admin/accounting", returnState: { openModule: "conversion" } } });
+                        }}
+                        className="text-amber-600 hover:text-amber-900 p-1"
+                        title="Edit Order"
+                      >
+                        <Edit size={18} />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleConvertToInvoice([order.id]);
+                        }}
+                        disabled={converting || isFinished(order)}
+                        className="text-purple-600 hover:text-purple-900 p-1 disabled:opacity-50"
+                        title="Convert to Invoice"
+                        data-testid={`row-convert-${order.id}`}
+                      >
+                        <FileCheck2 size={18} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* View Order Modal with Document Actions */}
+      {viewingOrder && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-200">
+              <h2 className="text-2xl font-bold">Sales Order Details</h2>
+              <p className="text-gray-600">{viewingOrder.invoice_number}</p>
+            </div>
+            <div className="p-6">
+              <div className="mb-6">
+                <h3 className="font-semibold text-lg mb-3">Customer Information</h3>
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <p><strong>Name:</strong> {viewingOrder.customer?.name || viewingOrder.customer_name || 'N/A'}</p>
+                  <p><strong>Phone:</strong> {viewingOrder.customer?.phone || viewingOrder.customer_phone || 'N/A'}</p>
+                  <p><strong>Email:</strong> {viewingOrder.customer?.email || viewingOrder.customer_email || 'N/A'}</p>
+                  <p><strong>Address:</strong> {viewingOrder.customer?.address || viewingOrder.customer_address || 'N/A'}</p>
+                </div>
+              </div>
+
+              <div className="mb-6">
+                <h3 className="font-semibold text-lg mb-3">Order Items</h3>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs">{!isFinished(viewingOrder) ? "Convert" : ""}</th>
+                        <th className="px-4 py-2 text-left text-xs">Product</th>
+                        <th className="px-4 py-2 text-left text-xs">Qty</th>
+                        <th className="px-4 py-2 text-left text-xs">Rate</th>
+                        <th className="px-4 py-2 text-left text-xs">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y">
+                      {viewingOrder.items?.map((item, idx) => (
+                        <tr key={idx}>
+                          <td className="px-4 py-2 text-sm">
+                            {!isFinished(viewingOrder) && item.product_id && (
+                              <input
+                                type="checkbox"
+                                checked={!!partialSel[item.product_id]?.selected}
+                                onChange={(e) => setPartialSel(prev => ({
+                                  ...prev,
+                                  [item.product_id]: { ...prev[item.product_id], selected: e.target.checked }
+                                }))}
+                              />
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-sm">{item.product_name}</td>
+                          <td className="px-4 py-2 text-sm">
+                            {!isFinished(viewingOrder) && item.product_id && partialSel[item.product_id]?.selected ? (
+                              <span className="inline-flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max={item.quantity}
+                                  value={partialSel[item.product_id]?.quantity}
+                                  onChange={(e) => {
+                                    const v = Math.max(1, Math.min(item.quantity, parseInt(e.target.value) || 1));
+                                    setPartialSel(prev => ({ ...prev, [item.product_id]: { ...prev[item.product_id], quantity: v } }));
+                                  }}
+                                  className="w-16 px-2 py-1 border rounded"
+                                />
+                                <span className="text-gray-500">of {item.quantity}</span>
+                              </span>
+                            ) : item.quantity}
+                          </td>
+                          <td className="px-4 py-2 text-sm">₹{item.rate?.toFixed(2)}</td>
+                          <td className="px-4 py-2 text-sm font-semibold">₹{item.total?.toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="mt-4 text-right">
+                  <p className="text-xl font-bold">Total: ₹{viewingOrder.total_amount?.toFixed(2)}</p>
+                </div>
+              </div>
+
+              <div className="border-t pt-4">
+                <h3 className="font-semibold text-lg mb-3">Document Actions</h3>
+                <DocumentActions 
+                  document={viewingOrder} 
+                  documentType="invoice"
+                />
+              </div>
+            </div>
+            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+              {!isFinished(viewingOrder) && (
+                <button
+                  onClick={handlePartialConvert}
+                  disabled={converting}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                  data-testid="partial-convert-btn"
+                >
+                  {converting ? 'Converting...' : 'Convert selected items'}
+                </button>
+              )}
+              <button
+                onClick={() => setViewingOrder(null)}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default SalesOrderConversion;

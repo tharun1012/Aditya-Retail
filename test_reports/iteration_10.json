@@ -1,0 +1,51 @@
+{
+  "summary": "Backend testing of the two Bosch cashback bug fixes (SKU-specific offer isolation + terms/tenure/valid_bank field extraction). All 11 pytest tests passed in 7.4s. DB cleaned and Bosch Excel re-uploaded (442 offers extracted, 105 SKU-matched to products in 0.47s). Both reported bugs are fully fixed on real Bosch data.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_cashback_sku_isolation_and_fields.py",
+    "/app/test_reports/pytest/pytest_cashback_iter10.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "cashback_offers_routes.py `_build_whatsapp_link` (line 93-94) still overwrites `encoded` — first assignment is dead code (flagged in iter 9, still not fixed). Cosmetic only.",
+    "cashback_offers_routes.py `_col_index(headers, ' cb', ...)` at line 165 still uses leading-space keyword (brittle substring match). Consider tokenising header. Flagged iter 9, still open.",
+    "cashback_offers_routes.py `insert_many(to_insert, ordered=False)` — bulk insert at line 491 does not pass `ordered=False`; a single bad doc still aborts the whole 442-offer batch. Flagged iter 9, still open.",
+    "cashback_offers_routes.py `offers_for_product` non_sku_filter (line 586-589) uses two separate `$or` clauses; verified to work correctly for both missing-sku and empty-product_ids cases, but could be simplified into a single explicit `$and` for readability.",
+    "cashback_offers_routes.py — After row-based extraction, ~340 SKU offers still have empty product_ids (SKUs not in catalog). Those are silently stored in DB and never surface (correctly hidden by the new fallback filter). Consider logging a summary of unmatched SKUs for the admin to know which products need to be added to catalog."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_cashback_sku_isolation_and_fields.py"
+  ],
+  "success_rate": {
+    "backend": "100% (11/11 tests passed)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "None — /api/offers endpoints are unauthenticated",
+  "seed_data_creation": "Reused /tmp/bosch_cashback.xlsx (real 444-row Bosch file, downloaded from customer-assets). Created /tmp/small_offers_iter10.xlsx (4-row LLM fallback file). Manual TEST_ brand-wide offer created via POST and deleted at end of test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Both Bosch bugs from iteration 10 are fully verified fixed. Sample offer document after upload: {sku:'KGN56LB42I', valid_bank:'All Banks', terms:'In 3 months NCEMI, in 6 months 2.5% of the EMI cost...', tenure:'3,6,9 & 12', amount_upto:2500.0, brand:'Bosch / Bosch Spl', categories:['Refrigerator','Bottom Freezer']}. GET /api/offers/product/{bosch_product_id} returns exactly 1 offer matching that SKU. Non-Bosch products return 0 offers. Manual brand-wide (no sku, empty product_ids) offers still work via the brand+category $or fallback. Row-based extraction still fast (<1s). LLM fallback still works for small Excel/PDF. Test file at /app/backend/tests/test_cashback_sku_isolation_and_fields.py drops db.cashback_offers first — do NOT run against production.",
+  "verified_metrics": {
+    "bosch_upload_elapsed_seconds": 0.47,
+    "bosch_offers_extracted": 442,
+    "bosch_offers_matched_to_products": 105,
+    "offers_with_terms": 442,
+    "offers_with_tenure": 442,
+    "sample_valid_bank": "All Banks",
+    "sample_terms": "In 3 months NCEMI, in 6 months 2.5% of the EMI cost will be borne by the consumer & In 9 & 12 months consumer will bear the whole EMI",
+    "sample_tenure": "3,6,9 & 12",
+    "sku_isolation_verified": "GET /offers/product/{pid} returns exactly 1 offer with matching SKU",
+    "non_bosch_leak_check": "0 offers returned for non-Bosch products",
+    "brand_wide_offer_regression": "TEST_ brand-wide offer visible on Bosch refrigerator PDP",
+    "small_excel_llm_offers": ">=2 with Bosch brand preserved"
+  },
+  "rca of the issue": "Bug 1 root cause: in offers_for_product, the previous $or branch matched any offer with same brand/category — offers that had a SKU but empty product_ids (SKU not in catalog) leaked to unrelated products. Fix (verified): non_sku_filter requires `sku==null OR missing OR ''` AND `product_ids missing OR []` for the brand/category fallback branch. Bug 2 root cause: `_col_index(headers, 'bank')` incorrectly matched the 'Remarks (Banks...)' column header which held EMI terms text. Fix (verified): dedicated `idx_terms` targets 'remarks (banks' / 'remarks (other banks' headers for terms; valid_bank extracted from the legend row above the header ('All Banks'); new `tenure` column extracted separately."
+}

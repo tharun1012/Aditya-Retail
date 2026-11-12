@@ -1,0 +1,96 @@
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { isFestive } from '../utils/festive';
+import FestiveGreeting from '../components/FestiveGreeting';
+
+const ActiveThemeContext = createContext({ theme: null, source: null, loading: true });
+
+export const useActiveTheme = () => useContext(ActiveThemeContext);
+
+const FAMILY_HEX = {
+  red: '#ef4444', orange: '#f97316', amber: '#f59e0b', yellow: '#eab308',
+  green: '#22c55e', cyan: '#06b6d4', blue: '#3b82f6', indigo: '#6366f1',
+  purple: '#a855f7', pink: '#ec4899', rose: '#f43f5e', gray: '#6b7280'
+};
+const LIGHTNESS = { 50: 0.96, 100: 0.92, 200: 0.85, 300: 0.75, 400: 0.64, 500: 0.54, 600: 0.46, 700: 0.39, 800: 0.32, 900: 0.25 };
+
+const hexToHsl = (hex) => {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+  }
+  h = (h * 60 + 360) % 360;
+  const l = (max + min) / 2;
+  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  return [h, s, l];
+};
+
+const hslToRgb = (h, s, l) => {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+    : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return [r, g, b].map(v => Math.round((v + m) * 255)).join(' ');
+};
+
+const buildPalette = (gradientFrom, brandHex) => {
+  const match = /^from-([a-z]+)-\d+$/.exec(gradientFrom || '');
+  const hex = /^#[0-9a-f]{6}$/i.test(brandHex || '') ? brandHex : (match && FAMILY_HEX[match[1]]);
+  if (!hex) return null;
+  const [h, s] = hexToHsl(hex);
+  const out = {};
+  const dark = h > 35 && h < 70 ? 0.8 : 1; // keep yellows readable under white text
+  Object.entries(LIGHTNESS).forEach(([shade, l]) => { out[shade] = hslToRgb(h, s, Number(shade) >= 600 ? l * dark : l); });
+  return out;
+};
+
+export const ActiveThemeProvider = ({ children }) => {
+  const [state, setState] = useState({ theme: null, source: null, loading: true });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/promotions/themes/active`);
+        const data = await res.json();
+        if (!cancelled) {
+          setState({
+            theme: data.status === 'success' ? data.theme : null,
+            source: data.source || null,
+            loading: false
+          });
+        }
+      } catch (e) {
+        if (!cancelled) setState({ theme: null, source: null, loading: false });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Festivals only: recolour the brand palette and switch on the festive layer
+  useEffect(() => {
+    if (!isFestive(state.theme)) return undefined;
+    const palette = buildPalette(state.theme.gradient_from, state.theme.brand_hex);
+    if (!palette) return undefined;
+    const root = document.documentElement;
+    Object.entries(palette).forEach(([shade, rgb]) => root.style.setProperty(`--brand-${shade}`, rgb));
+    document.body.classList.add('festive-theme');
+    return () => {
+      Object.keys(palette).forEach(shade => root.style.removeProperty(`--brand-${shade}`));
+      document.body.classList.remove('festive-theme');
+    };
+  }, [state.theme]);
+
+  return (
+    <ActiveThemeContext.Provider value={state}>
+      {children}
+      <FestiveGreeting theme={state.theme} />
+    </ActiveThemeContext.Provider>
+  );
+};

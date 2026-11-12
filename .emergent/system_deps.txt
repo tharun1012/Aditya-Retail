@@ -1,0 +1,4 @@
+dnsutils=1:9.18.49-1~deb12u3
+fonts-dejavu-core=2.37-6
+netcat-openbsd=1.219-1
+poppler-utils=22.12.0-2+deb12u3

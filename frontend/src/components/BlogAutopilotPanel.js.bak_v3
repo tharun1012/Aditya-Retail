@@ -1,0 +1,140 @@
+import React, { useState } from "react";
+
+const BACKEND = process.env.REACT_APP_BACKEND_URL || "";
+
+function getToken() {
+  const keys = ["token", "access_token", "admin_token", "adminToken", "authToken", "auth_token", "jwt"];
+  try {
+    for (const k of keys) {
+      const v = localStorage.getItem(k);
+      if (v) return v.replace(/^"|"$/g, "");
+    }
+  } catch (e) {}
+  return "";
+}
+
+async function callApi(path, method, body) {
+  const token = getToken();
+  const res = await fetch(`${BACKEND}/api/blog-autopilot/${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) {
+    const msg = (data && (data.detail || data.message)) || `Request failed (HTTP ${res.status})`;
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  return data;
+}
+
+const box = { border: "1px solid #e2e8f0", borderRadius: 8, padding: 16, margin: "16px 0", background: "#fff" };
+const btn = (bg, disabled) => ({
+  background: disabled ? "#94a3b8" : bg, color: "#fff", border: "none", borderRadius: 6,
+  padding: "8px 16px", marginRight: 8, cursor: disabled ? "not-allowed" : "pointer", fontSize: 14,
+});
+
+export default function BlogAutopilotPanel({ onDraftCreated }) {
+  const [loading, setLoading] = useState("");
+  const [topic, setTopic] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState(null);
+
+  const run = async (kind) => {
+    setError("");
+    setLoading(kind);
+    try {
+      if (kind === "status") {
+        setStatus(await callApi("status", "GET"));
+      } else if (kind === "topic") {
+        setDraft(null);
+        setTopic(await callApi("generate?dry_run=true", "POST", { dry_run: true }));
+      } else {
+        const data = await callApi("generate?dry_run=false", "POST", { dry_run: false });
+        if (data && data.dry_run === true) {
+          throw new Error("The backend ran this as a dry run, so nothing was saved. Send me the Details from this reply.");
+        }
+        setDraft(data);
+        if (onDraftCreated) onDraftCreated(data);
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const asText = (v) => (v === undefined || v === null ? "" : typeof v === "object" ? (v.topic || v.title || JSON.stringify(v)) : String(v));
+  const topicObj = topic && (topic.topic && typeof topic.topic === "object" ? topic.topic : topic);
+  const topicText = topicObj ? asText(topicObj.topic || topicObj.title || topicObj.blog_topic) : "";
+  const topicCategory = topicObj ? asText(topicObj.category) : "";
+  const topicKeywords = topicObj && Array.isArray(topicObj.keywords) ? topicObj.keywords.join(", ") : "";
+  const pick = (o, keys) => { for (const k of keys) if (o && o[k] !== undefined) return o[k]; return undefined; };
+
+  return (
+    <div style={box} data-testid="blog-autopilot-panel">
+      <h3 style={{ margin: "0 0 4px", fontSize: 18 }}>AI Autopilot</h3>
+      <p style={{ margin: "0 0 12px", color: "#64748b", fontSize: 13 }}>
+        Let the AI choose a fresh topic and write a draft. Drafts are never published automatically; review them in the list below.
+      </p>
+      <div>
+        <button style={btn("#475569", !!loading)} disabled={!!loading} onClick={() => run("status")}>
+          {loading === "status" ? "Checking..." : "Check status"}
+        </button>
+        <button style={btn("#2563eb", !!loading)} disabled={!!loading} onClick={() => run("topic")}>
+          {loading === "topic" ? "Thinking..." : "Suggest a topic"}
+        </button>
+        <button style={btn("#16a34a", !!loading)} disabled={!!loading} onClick={() => run("draft")}>
+          {loading === "draft" ? "Writing draft (may take a minute)..." : "Write draft"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ marginTop: 12, padding: 10, background: "#fef2f2", color: "#b91c1c", borderRadius: 6, fontSize: 14 }}>
+          {error}
+        </div>
+      )}
+
+      {status && (
+        <pre style={{ marginTop: 12, padding: 10, background: "#f8fafc", borderRadius: 6, fontSize: 12, overflow: "auto" }}>
+          {JSON.stringify(status, null, 2)}
+        </pre>
+      )}
+
+      {topic && !draft && (
+        <div style={{ marginTop: 12, padding: 10, background: "#eff6ff", borderRadius: 6, fontSize: 14 }}>
+          <strong>Suggested topic:</strong> {topicText || "(see details below)"}
+          {topicCategory && <div style={{ marginTop: 4, fontSize: 13 }}><strong>Category:</strong> {topicCategory}</div>}
+          {topicKeywords && <div style={{ marginTop: 2, fontSize: 13 }}><strong>Keywords:</strong> {topicKeywords}</div>}
+          <details style={{ marginTop: 6 }}>
+            <summary style={{ cursor: "pointer", fontSize: 12 }}>Details</summary>
+            <pre style={{ fontSize: 12, overflow: "auto" }}>{JSON.stringify(topic, null, 2)}</pre>
+          </details>
+          <div style={{ marginTop: 6, fontSize: 12, color: "#64748b" }}>Nothing was saved. Click "Write draft" to create it.</div>
+        </div>
+      )}
+
+      {draft && (
+        <div style={{ marginTop: 12, padding: 10, background: "#f0fdf4", borderRadius: 6, fontSize: 14 }}>
+          <strong>Draft created:</strong> {asText(pick(draft, ["title", "topic"]))}
+          <div style={{ marginTop: 4 }}>
+            {pick(draft, ["word_count", "words"]) !== undefined && <span>Words: {asText(pick(draft, ["word_count", "words"]))} &nbsp;</span>}
+            {pick(draft, ["faq_count", "faqs"]) !== undefined && <span>FAQs: {asText(pick(draft, ["faq_count", "faqs"]))}</span>}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 12, color: "#64748b" }}>
+            Find it in the blog list below, review it, then publish. Reload the list if it does not appear.
+          </div>
+          <details style={{ marginTop: 6 }}>
+            <summary style={{ cursor: "pointer", fontSize: 12 }}>Details</summary>
+            <pre style={{ fontSize: 12, overflow: "auto" }}>{JSON.stringify(draft, null, 2)}</pre>
+          </details>
+        </div>
+      )}
+    </div>
+  );
+}

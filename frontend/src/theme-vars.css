@@ -1,0 +1,24 @@
+:root {
+  --brand-50: 255 251 235;
+  --brand-100: 254 243 199;
+  --brand-200: 253 230 138;
+  --brand-300: 252 211 77;
+  --brand-400: 251 191 36;
+  --brand-500: 245 158 11;
+  --brand-600: 217 119 6;
+  --brand-700: 180 83 9;
+  --brand-800: 146 64 14;
+  --brand-900: 120 53 15;
+}
+
+/* Festive layer: active only while the provider has put body.festive-theme on the page */
+body.festive-theme { background-color: rgb(var(--brand-50) / 0.45); }
+.festive-theme .bg-cream,
+.festive-theme .bg-gray-50 { background-color: rgb(var(--brand-50) / 0.6); }
+.hero-tint { display: none; }
+.festive-theme .hero-tint { display: block; }
+.festive-theme .festive-footer { border-top: 4px solid rgb(var(--brand-500)); }
+
+/* Nav follows the day's palette; falls back to the normal brand colour */
+.festive-nav { background-color: rgb(var(--brand-700)); }
+.festive-theme .festive-nav { background-image: linear-gradient(to right, rgb(var(--brand-500)), rgb(var(--brand-700))); }

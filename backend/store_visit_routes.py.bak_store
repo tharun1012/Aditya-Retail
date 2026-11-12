@@ -1,0 +1,189 @@
+"""
+Store Visit Lead Capture
+For customers who want to visit physical stores
+"""
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, EmailStr
+from typing import Optional, List
+from datetime import datetime, timezone
+import uuid
+from database import get_db
+from sendgrid_email_service import sendgrid_email_service
+
+router = APIRouter(prefix="/store-visit", tags=["Store Visit"])
+
+class StoreVisitLead(BaseModel):
+    name: str
+    email: Optional[EmailStr] = None
+    phone: str
+    interested_products: List[str]
+    preferred_store: str  # banaswadi, bosch, dasarahalli
+    preferred_date: Optional[str] = None
+    preferred_time: Optional[str] = None
+    notes: Optional[str] = None
+
+STORE_INFO = {
+    "banaswadi": {
+        "name": "Banaswadi Store",
+        "address": "HRBR Layout, 2nd Block, Banasawadi, Bengaluru, Karnataka",
+        "phone": "+91-9844577440",
+        "hours": "Mon-Sat: 10 AM - 8 PM"
+    },
+    "bosch": {
+        "name": "Bosch Brand Store",
+        "address": "Bosch Brand Store Location, Bengaluru",
+        "phone": "+91-9844577440",
+        "hours": "Mon-Sat: 10 AM - 8 PM"
+    },
+    "dasarahalli": {
+        "name": "Dasarahalli Store",
+        "address": "Dasarahalli, Bengaluru, Karnataka",
+        "phone": "+91-9844577440",
+        "hours": "Mon-Sat: 10 AM - 8 PM"
+    }
+}
+
+@router.post("/")
+async def create_store_visit_lead(lead_data: StoreVisitLead, db = Depends(get_db)):
+    """Create a lead for customer wanting to visit store"""
+    try:
+        # Create lead in database
+        lead_id = str(uuid.uuid4())
+        
+        lead = {
+            "id": lead_id,
+            "name": lead_data.name,
+            "email": lead_data.email,
+            "phone": lead_data.phone,
+            "source": f"store_visit_{lead_data.preferred_store}",
+            "store_location": lead_data.preferred_store,
+            "status": "new",
+            "interested_products": lead_data.interested_products,
+            "notes": f"Store Visit Request. {lead_data.notes or ''}",
+            "preferred_visit_date": lead_data.preferred_date,
+            "preferred_visit_time": lead_data.preferred_time,
+            "visit_confirmed": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "interactions": [{
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "store_visit_request",
+                "content": f"Customer requested store visit at {STORE_INFO[lead_data.preferred_store]['name']}"
+            }]
+        }
+        
+        await db.leads.insert_one(lead)
+        
+        # Send confirmation email to customer
+        if lead_data.email:
+            await send_store_visit_confirmation(lead, db)
+        
+        # Notify sales team (could add email notification here)
+        
+        store_details = STORE_INFO[lead_data.preferred_store]
+        
+        return {
+            "status": "success",
+            "message": "Store visit request received! Our team will contact you shortly.",
+            "lead_id": lead_id,
+            "store_details": store_details
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating store visit lead: {str(e)}")
+
+async def send_store_visit_confirmation(lead: dict, db):
+    """Send confirmation email for store visit"""
+    try:
+        email = lead.get('email')
+        if not email:
+            return
+        
+        name = lead.get('name')
+        first_name = name.split()[0]
+        store_key = lead.get('store_location')
+        store = STORE_INFO[store_key]
+        products = lead.get('interested_products', [])
+        
+        subject = f"Hi {first_name}, Your Store Visit Appointment - Aditya Retail"
+        
+        products_section = ""
+        if products:
+            products_section = "\n\n🛍️ PRODUCTS YOU'RE INTERESTED IN:\n" + "\n".join([f"• {p}" for p in products])
+        
+        visit_details = ""
+        if lead.get('preferred_visit_date'):
+            visit_details = f"\n\n📅 YOUR PREFERRED VISIT:\nDate: {lead.get('preferred_visit_date')}\nTime: {lead.get('preferred_visit_time', 'Anytime during store hours')}"
+        
+        body = f"""Hi {first_name},
+
+Thank you for choosing to visit our store! We're excited to welcome you.
+
+📍 STORE DETAILS:
+{store['name']}
+{store['address']}
+{products_section}
+{visit_details}
+
+📞 STORE CONTACT:
+Phone: {store['phone']}
+Hours: {store['hours']}
+
+🎁 WHEN YOU VISIT:
+✅ Expert product demonstration
+✅ Special in-store offers
+✅ Instant price negotiation
+✅ Test products before buying
+✅ Free installation guidance
+
+Our sales team will call you shortly to confirm your visit and answer any questions!
+
+For immediate assistance:
+📱 WhatsApp: {store['phone']}
+📧 Email: service.adityaretail@gmail.com
+
+Looking forward to seeing you!
+
+Warm Regards,
+Rohit Upadhyaya
+Sales Manager
+Aditya Retail - {store['name']}
+"""
+        
+        result = sendgrid_email_service.send_email(
+            to_email=email,
+            subject=subject,
+            body=body,
+            from_agent="sales",
+            html=False
+        )
+        
+        if result.get('status') == 'success':
+            await db.leads.update_one(
+                {"id": lead['id']},
+                {
+                    "$push": {
+                        "emails_sent": {
+                            "type": "store_visit_confirmation",
+                            "sent_at": datetime.now(timezone.utc).isoformat(),
+                            "status": "sent"
+                        }
+                    },
+                    "$set": {
+                        "status": "contacted",
+                        "last_contact_date": datetime.now(timezone.utc).isoformat()
+                    }
+                }
+            )
+            print(f"✅ Store visit confirmation sent to {email}")
+        
+    except Exception as e:
+        print(f"❌ Error sending store visit confirmation: {e}")
+
+@router.get("/stores")
+async def get_store_locations():
+    """Get all store locations with details"""
+    return {
+        "status": "success",
+        "stores": STORE_INFO
+    }

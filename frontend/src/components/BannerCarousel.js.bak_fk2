@@ -1,0 +1,123 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { BACKEND_URL } from '../config/api';
+import { imgSrc } from '../utils/img';
+
+const GAP = 12; // px between slides
+
+const BannerCarousel = () => {
+  const navigate = useNavigate();
+  const [banners, setBanners] = useState([]);
+  const [i, setI] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const [broken, setBroken] = useState({});
+  const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 768);
+  const seen = useRef(new Set());
+  const touchX = useRef(null);
+
+  useEffect(() => {
+    const onResize = () => setWide(window.innerWidth >= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/api/banners/active/homepage`)
+      .then((r) => r.json())
+      .then((d) => setBanners((d.banners || []).filter((b) => b.image_url)))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (paused || banners.length < 2) return undefined;
+    const t = setInterval(() => setI((p) => (p + 1) % banners.length), 5000);
+    return () => clearInterval(t);
+  }, [paused, banners.length]);
+
+  useEffect(() => {
+    const b = banners[i];
+    if (b && !seen.current.has(b.id)) {
+      seen.current.add(b.id);
+      fetch(`${BACKEND_URL}/api/banners/${b.id}/track-view`, { method: 'POST' }).catch(() => {});
+    }
+  }, [i, banners]);
+
+  if (banners.length === 0) return null;
+  const go = (n) => setI((n + banners.length) % banners.length);
+
+  const open = (b) => {
+    fetch(`${BACKEND_URL}/api/banners/${b.id}/track-click`, { method: 'POST', keepalive: true }).catch(() => {});
+    const u = b.link_url;
+    if (!u) return;
+    if (/^https?:/.test(u)) window.open(u, '_blank', 'noopener');
+    else navigate(u);
+  };
+
+  // slide width as % of container; the rest is split between the two peeking edges
+  const w = wide ? 84 : 90;
+  const side = (100 - w) / 2;
+
+  return (
+    <div className="relative w-full max-w-[1600px] mx-auto mt-3 overflow-hidden select-none"
+      onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}
+      onTouchStart={(e) => { touchX.current = e.touches[0].clientX; }}
+      onTouchEnd={(e) => {
+        if (touchX.current == null) return;
+        const dx = e.changedTouches[0].clientX - touchX.current;
+        if (Math.abs(dx) > 50) go(i + (dx < 0 ? 1 : -1));
+        touchX.current = null;
+      }}>
+      <div className="flex transition-transform duration-500 ease-out"
+        style={{ gap: GAP, transform: `translateX(calc(${side}% - ${i} * (${w}% + ${GAP}px)))` }}>
+        {banners.map((b, n) => {
+          const active = n === i;
+          return (
+            <div key={b.id} data-slide=""
+              style={{ flex: `0 0 ${w}%` }}
+              className={`relative overflow-hidden rounded-xl md:rounded-2xl cursor-pointer bg-gray-100 transition-opacity duration-500 h-[170px] sm:h-[220px] md:h-[280px] lg:h-[300px] ${active ? 'opacity-100' : 'opacity-50'}`}
+              onClick={() => (active ? open(b) : go(n))} role="link" aria-label={b.title}>
+              {broken[b.id] ? (
+                <div className="absolute inset-0 bg-gradient-to-r from-amber-700 to-orange-500" />
+              ) : (
+                <img src={imgSrc(b.image_url)} alt={b.title} draggable={false}
+                  onError={() => setBroken((p) => ({ ...p, [b.id]: true }))}
+                  className="absolute inset-0 h-full w-full object-cover object-center" />
+              )}
+              <div className="absolute inset-0 bg-gradient-to-r from-black/60 via-black/20 to-transparent" />
+              <div className="absolute inset-y-0 left-0 flex max-w-[85%] flex-col justify-center px-5 md:px-14 text-white">
+                <h2 className="text-lg sm:text-2xl md:text-3xl font-bold leading-tight">{b.title}</h2>
+                {b.description && <p className="mt-1 hidden md:block text-sm lg:text-base text-white/90 max-w-xl">{b.description}</p>}
+                {b.link_url && (
+                  <span className="mt-3 inline-block self-start rounded-full bg-white px-4 py-1.5 text-xs md:text-sm font-semibold text-gray-900">
+                    Shop now
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {banners.length > 1 && (
+        <>
+          <button onClick={() => go(i - 1)} aria-label="Previous"
+            className="absolute left-1 md:left-3 top-1/2 -translate-y-1/2 rounded-full bg-white/90 p-2 shadow-md hover:bg-white">
+            <ChevronLeft className="h-5 w-5 md:h-6 md:w-6" />
+          </button>
+          <button onClick={() => go(i + 1)} aria-label="Next"
+            className="absolute right-1 md:right-3 top-1/2 -translate-y-1/2 rounded-full bg-white/90 p-2 shadow-md hover:bg-white">
+            <ChevronRight className="h-5 w-5 md:h-6 md:w-6" />
+          </button>
+          <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 gap-2">
+            {banners.map((b, n) => (
+              <button key={b.id} onClick={() => go(n)} aria-label={`Banner ${n + 1}`}
+                className={`h-2 rounded-full transition-all ${n === i ? 'w-6 bg-white' : 'w-2 bg-white/60'}`} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+export default BannerCarousel;

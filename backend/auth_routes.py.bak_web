@@ -1,0 +1,988 @@
+from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
+from typing import Optional, List
+import jwt
+from jwt import PyJWTError, ExpiredSignatureError
+import bcrypt
+from datetime import datetime, timedelta
+import os
+from motor.motor_asyncio import AsyncIOMotorClient
+import uuid
+
+router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+# Security
+security = HTTPBearer()
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
+
+# MongoDB connection
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+db_name = os.environ.get('DB_NAME', 'startup_template')
+client = AsyncIOMotorClient(mongo_url)
+db = client[db_name]
+
+# Models
+class AdminUser(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str
+    role: str = "admin"  # super_admin, admin, editor, viewer, delivery_person
+
+class CustomerRegister(BaseModel):
+    email: EmailStr
+    password: str
+    first_name: str
+    last_name: str
+    phone: Optional[str] = None
+    
+class AdminLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class AdminUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class PermissionsUpdate(BaseModel):
+    can_view_analytics: bool = True
+    can_manage_products: bool = True
+    can_manage_orders: bool = True
+    can_manage_customers: bool = True
+    can_manage_campaigns: bool = True
+    can_manage_inventory: bool = True
+    can_manage_admins: bool = False
+
+class DeliveryPersonCreate(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str
+    phone: str
+    vehicle_number: Optional[str] = None
+    address: Optional[str] = None
+
+# Helper functions
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against its hash"""
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Create JWT access token"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Get current authenticated user from JWT token"""
+    try:
+        token = credentials.credentials
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        
+        user = await db.admin_users.find_one({"email": email})
+        if user is None:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        if not user.get("is_active", True):
+            raise HTTPException(status_code=401, detail="User account is inactive")
+        
+        return user
+    except ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except PyJWTError:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+async def require_super_admin(current_user: dict = Depends(get_current_user)):
+    """Require super admin role"""
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="Super admin access required")
+    return current_user
+
+# Routes
+@router.post("/register")
+async def register_admin(user: AdminUser):
+    """Register a new admin user (only super_admin can do this)"""
+    try:
+        # Check if email already exists
+        existing_user = await db.admin_users.find_one({"email": user.email})
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        
+        # Hash password
+        hashed_password = hash_password(user.password)
+        
+        # Create user document
+        user_doc = {
+            "id": str(uuid.uuid4()),
+            "email": user.email,
+            "password": hashed_password,
+            "full_name": user.full_name,
+            "role": user.role,
+            "is_active": True,
+            "created_at": datetime.utcnow().isoformat(),
+            "permissions": {
+                "can_view_analytics": True,
+                "can_manage_products": user.role in ["super_admin", "admin", "editor"],
+                "can_manage_orders": user.role in ["super_admin", "admin"],
+                "can_manage_customers": user.role in ["super_admin", "admin"],
+                "can_manage_campaigns": user.role in ["super_admin", "admin"],
+                "can_manage_inventory": user.role in ["super_admin", "admin"],
+                "can_manage_admins": user.role == "super_admin"
+            }
+        }
+        
+        await db.admin_users.insert_one(user_doc)
+        
+        # Remove password from response
+        user_doc.pop("password")
+        user_doc.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "message": "Admin user registered successfully",
+            "user": user_doc
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/customer/register")
+async def register_customer(user: CustomerRegister):
+    """Register a new customer account"""
+    try:
+        # Check if email already exists in users collection
+        existing_user = await db.users.find_one({"email": user.email})
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered. Please login instead.")
+        
+        # Hash password
+        hashed_password = hash_password(user.password)
+        
+        # Create user document
+        user_id = str(uuid.uuid4())
+        user_doc = {
+            "id": user_id,
+            "email": user.email,
+            "password": hashed_password,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "phone": user.phone or "",
+            "role": "customer",
+            "is_active": True,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        await db.users.insert_one(user_doc)
+        
+        # Create access token
+        access_token = create_access_token(
+            data={"sub": user.email, "user_id": user_id, "role": "customer"}
+        )
+        
+        # Prepare user response (without password)
+        user_response = {
+            "id": user_id,
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "phone": user.phone or "",
+            "role": "customer"
+        }
+        
+        return {
+            "status": "success",
+            "message": "Account created successfully",
+            "access_token": access_token,
+            "user": user_response
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/customer/login")
+async def customer_login(credentials: AdminLogin):
+    """Login customer - checks users collection"""
+    try:
+        # Find user by email in users collection
+        user = await db.users.find_one({"email": credentials.email})
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Check if user has a password (might be Google OAuth user)
+        if not user.get("password"):
+            raise HTTPException(
+                status_code=401, 
+                detail="This account uses Google Sign-In. Please use 'Sign in with Google'."
+            )
+        
+        # Verify password
+        if not verify_password(credentials.password, user["password"]):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Create access token
+        access_token = create_access_token(
+            data={"sub": user["email"], "user_id": user["id"], "role": "customer"}
+        )
+        
+        return {
+            "status": "success",
+            "access_token": access_token,
+            "user": {
+                "id": user["id"],
+                "email": user["email"],
+                "first_name": user.get("first_name", user.get("name", "").split()[0] if user.get("name") else ""),
+                "last_name": user.get("last_name", " ".join(user.get("name", "").split()[1:]) if user.get("name") else ""),
+                "phone": user.get("phone", ""),
+                "role": "customer"
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/admin/test-login")
+async def admin_test_login(credentials: AdminLogin):
+    """Test login endpoint to debug"""
+    user = await db.admin_users.find_one({"email": credentials.email})
+    if not user:
+        return {"found": False, "email": credentials.email}
+    
+    stored_hash = user.get("password", "")
+    password_valid = verify_password(credentials.password, stored_hash)
+    
+    return {
+        "found": True,
+        "email": credentials.email,
+        "role": user.get("role"),
+        "password_received": credentials.password,
+        "hash_exists": bool(stored_hash),
+        "password_valid": password_valid
+    }
+
+@router.post("/admin/login")
+async def admin_login(credentials: AdminLogin):
+    """Login admin user - specific endpoint for admin login page"""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Admin login attempt for: {credentials.email}")
+    
+    try:
+        # Find user by email in admin_users collection
+        user = await db.admin_users.find_one({"email": credentials.email})
+        logger.info(f"User found: {user is not None}")
+        
+        if not user:
+            logger.warning("User not found")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Check if this is NOT a delivery person (they should use delivery login)
+        if user.get("role") == "delivery_person":
+            logger.warning("Delivery person trying to use admin login")
+            raise HTTPException(status_code=401, detail="Please use the Delivery Person login portal")
+        
+        # Verify password
+        logger.info("Verifying password...")
+        password_valid = verify_password(credentials.password, user["password"])
+        logger.info(f"Password valid: {password_valid}")
+        
+        if not password_valid:
+            logger.warning("Invalid password")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Check if user is active
+        if not user.get("is_active", True):
+            logger.warning("User is inactive")
+            raise HTTPException(status_code=401, detail="Account is inactive")
+        
+        # Create access token
+        access_token = create_access_token(
+            data={"sub": user["email"], "role": user["role"]}
+        )
+        
+        # Update last login
+        await db.admin_users.update_one(
+            {"email": credentials.email},
+            {"$set": {"last_login": datetime.utcnow().isoformat()}}
+        )
+        
+        # Remove password from response
+        user.pop("password")
+        user.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "access_token": access_token,
+            "token": access_token,
+            "token_type": "bearer",
+            "user": user
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/login")
+async def login(credentials: AdminLogin):
+    """Login admin user"""
+    try:
+        # Find user by email
+        user = await db.admin_users.find_one({"email": credentials.email})
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Verify password
+        if not verify_password(credentials.password, user["password"]):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Check if user is active
+        if not user.get("is_active", True):
+            raise HTTPException(status_code=401, detail="Account is inactive")
+        
+        # Create access token
+        access_token = create_access_token(
+            data={"sub": user["email"], "role": user["role"]}
+        )
+        
+        # Update last login
+        await db.admin_users.update_one(
+            {"email": credentials.email},
+            {"$set": {"last_login": datetime.utcnow().isoformat()}}
+        )
+        
+        # Remove password from response
+        user.pop("password")
+        user.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": user
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/unified-login")
+async def unified_login(credentials: AdminLogin):
+    """
+    Unified login endpoint that checks all user types:
+    1. Customer (users collection)
+    2. Admin (admin_users collection)
+    3. Store User (store_users collection)
+    4. Company Admin (admins collection)
+    Supports login by email, username, or phone
+    Returns role and appropriate redirect path
+    """
+    import hashlib
+    
+    def hash_password_sha256(password: str) -> str:
+        return hashlib.sha256(password.encode()).hexdigest()
+    
+    try:
+        login_id = credentials.email.lower().strip()  # Can be email, username, or phone
+        
+        # Build query to check email, username, or phone
+        def build_user_query(login_identifier):
+            """Build a query that checks email, username, or phone"""
+            return {"$or": [
+                {"email": login_identifier},
+                {"username": login_identifier},
+                {"phone": login_identifier}
+            ]}
+        
+        # 1. Try Customer Login first
+        customer = await db.users.find_one(build_user_query(login_id))
+        if customer and customer.get("password"):
+            if verify_password(credentials.password, customer["password"]):
+                access_token = create_access_token(
+                    data={"sub": customer.get("email", login_id), "user_id": customer["id"], "role": "customer"}
+                )
+                return {
+                    "status": "success",
+                    "access_token": access_token,
+                    "user_type": "customer",
+                    "redirect_path": "/my-account",
+                    "user": {
+                        "id": customer["id"],
+                        "email": customer.get("email", ""),
+                        "first_name": customer.get("first_name", customer.get("name", "").split()[0] if customer.get("name") else ""),
+                        "last_name": customer.get("last_name", " ".join(customer.get("name", "").split()[1:]) if customer.get("name") else ""),
+                        "phone": customer.get("phone", ""),
+                        "role": "customer"
+                    }
+                }
+        
+        # 2. Try Admin/Delivery Person Login (both are in admin_users collection)
+        admin = await db.admin_users.find_one(build_user_query(login_id))
+        if admin:
+            if verify_password(credentials.password, admin["password"]):
+                if not admin.get("is_active", True):
+                    raise HTTPException(status_code=401, detail="Account is inactive")
+                
+                access_token = create_access_token(
+                    data={"sub": admin.get("email", login_id), "role": admin["role"], "user_id": admin.get("id")}
+                )
+                
+                await db.admin_users.update_one(
+                    {"id": admin["id"]},
+                    {"$set": {"last_login": datetime.utcnow().isoformat()}}
+                )
+                
+                admin.pop("password", None)
+                admin.pop("_id", None)
+                
+                # Determine redirect based on role
+                user_role = admin.get("role", "admin")
+                if user_role == "delivery_person":
+                    # Delivery person - redirect to delivery dashboard
+                    return {
+                        "status": "success",
+                        "access_token": access_token,
+                        "user_type": "delivery_person",
+                        "redirect_path": "/delivery-dashboard",
+                        "user": admin
+                    }
+                else:
+                    # Admin, super_admin, manager, etc - redirect to admin
+                    return {
+                        "status": "success",
+                        "access_token": access_token,
+                        "user_type": "admin",
+                        "redirect_path": "/admin",
+                        "user": admin
+                    }
+        
+        # 3. Try Store User Login
+        store_user = await db.store_users.find_one({
+            "$and": [
+                {"is_active": True},
+                build_user_query(login_id)
+            ]
+        })
+        if store_user:
+            if store_user["password_hash"] == hash_password_sha256(credentials.password):
+                store = await db.stores.find_one({"id": store_user["store_id"]}, {"_id": 0})
+                
+                token = str(uuid.uuid4())
+                await db.store_sessions.update_one(
+                    {"user_id": store_user["id"]},
+                    {"$set": {
+                        "token": token,
+                        "store_id": store_user["store_id"],
+                        "created_at": datetime.utcnow()
+                    }},
+                    upsert=True
+                )
+                
+                await db.store_users.update_one(
+                    {"id": store_user["id"]},
+                    {"$set": {"last_login": datetime.utcnow()}}
+                )
+                
+                return {
+                    "status": "success",
+                    "access_token": token,
+                    "user_type": "store",
+                    "redirect_path": "/store/dashboard",
+                    "user": {
+                        "id": store_user["id"],
+                        "email": store_user.get("email", ""),
+                        "username": store_user.get("username", ""),
+                        "first_name": store_user.get("first_name", ""),
+                        "last_name": store_user.get("last_name", ""),
+                        "role": store_user["role"],
+                        "store_id": store_user["store_id"],
+                        "store_code": store_user["store_code"],
+                        "store_name": store_user["store_name"]
+                    },
+                    "store": store
+                }
+        
+        # 4. Try Company Admin Login (admins collection - created via Admin User Management)
+        company_admin = await db.admins.find_one({
+            "$and": [
+                {"is_active": True},
+                build_user_query(login_id)
+            ]
+        })
+        if company_admin:
+            if company_admin.get("password") == hash_password_sha256(credentials.password):
+                admin_identifier = company_admin.get("email") or company_admin.get("username") or login_id
+                access_token = create_access_token(
+                    data={"sub": admin_identifier, "role": company_admin["role"], "user_id": company_admin.get("id")}
+                )
+                
+                await db.admins.update_one(
+                    {"id": company_admin.get("id")},
+                    {"$set": {"last_login": datetime.utcnow().isoformat()}}
+                )
+                
+                company_admin.pop("password", None)
+                company_admin.pop("_id", None)
+                
+                # Redirect to admin dashboard
+                redirect_path = "/admin"
+                
+                return {
+                    "status": "success",
+                    "access_token": access_token,
+                    "user_type": "company_admin",
+                    "redirect_path": redirect_path,
+                    "user": company_admin
+                }
+        
+        # No matching user found
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/me-jwt")
+async def get_current_user_info(current_user: dict = Depends(get_current_user)):
+    """Get current user information (JWT-based auth)"""
+    current_user.pop("password", None)
+    current_user.pop("_id", None)
+    return {
+        "status": "success",
+        "user": current_user
+    }
+
+@router.get("/users")
+async def list_admin_users(
+    current_user: dict = Depends(get_current_user)
+):
+    """List all admin users (requires admin or super_admin role)"""
+    try:
+        if current_user["role"] not in ["super_admin", "admin"]:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        users = await db.admin_users.find({}, {"password": 0, "_id": 0}).to_list(None)
+        
+        return {
+            "status": "success",
+            "users": users,
+            "count": len(users)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/users/{user_id}")
+async def update_admin_user(
+    user_id: str,
+    updates: AdminUpdate,
+    current_user: dict = Depends(require_super_admin)
+):
+    """Update admin user (super_admin only)"""
+    try:
+        # Build update document
+        update_doc = {}
+        if updates.full_name is not None:
+            update_doc["full_name"] = updates.full_name
+        if updates.role is not None:
+            update_doc["role"] = updates.role
+        if updates.is_active is not None:
+            update_doc["is_active"] = updates.is_active
+        
+        if not update_doc:
+            raise HTTPException(status_code=400, detail="No updates provided")
+        
+        update_doc["updated_at"] = datetime.utcnow().isoformat()
+        
+        result = await db.admin_users.update_one(
+            {"id": user_id},
+            {"$set": update_doc}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "status": "success",
+            "message": "User updated successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/users/{user_id}/permissions")
+async def update_user_permissions(
+    user_id: str,
+    permissions: PermissionsUpdate,
+    current_user: dict = Depends(require_super_admin)
+):
+    """Update user permissions (super_admin only)"""
+    try:
+        result = await db.admin_users.update_one(
+            {"id": user_id},
+            {"$set": {
+                "permissions": permissions.dict(),
+                "updated_at": datetime.utcnow().isoformat()
+            }}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "status": "success",
+            "message": "Permissions updated successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/users/{user_id}")
+async def delete_admin_user(
+    user_id: str,
+    current_user: dict = Depends(require_super_admin)
+):
+    """Delete admin user (super_admin only)"""
+    try:
+        # Prevent deleting yourself
+        if current_user["id"] == user_id:
+            raise HTTPException(status_code=400, detail="Cannot delete your own account")
+        
+        result = await db.admin_users.delete_one({"id": user_id})
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "status": "success",
+            "message": "User deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/delivery-person/create")
+async def create_delivery_person(
+    person: DeliveryPersonCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create delivery person account (admin/super_admin only)"""
+    try:
+        # Check if user has admin permissions
+        if current_user.get("role") not in ["super_admin", "admin"]:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        # Check if email already exists
+        existing_user = await db.admin_users.find_one({"email": person.email})
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        
+        # Hash password
+        hashed_password = hash_password(person.password)
+        
+        # Create delivery person document
+        delivery_person_doc = {
+            "id": str(uuid.uuid4()),
+            "email": person.email,
+            "password": hashed_password,
+            "full_name": person.full_name,
+            "phone": person.phone,
+            "vehicle_number": person.vehicle_number,
+            "address": person.address,
+            "role": "delivery_person",
+            "is_active": True,
+            "created_at": datetime.utcnow().isoformat(),
+            "created_by": current_user.get("email"),
+            "permissions": {
+                "can_view_assigned_deliveries": True,
+                "can_update_delivery_status": True,
+                "can_upload_delivery_proof": True,
+                "can_collect_payment": True
+            }
+        }
+        
+        await db.admin_users.insert_one(delivery_person_doc)
+        
+        # Remove password from response
+        delivery_person_doc.pop("password")
+        delivery_person_doc.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "message": "Delivery person created successfully",
+            "delivery_person": delivery_person_doc
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/delivery-persons")
+async def list_delivery_persons(
+    current_user: dict = Depends(get_current_user)
+):
+    """List all delivery persons (admin/super_admin only)"""
+    try:
+        # Check if user has admin permissions
+        if current_user.get("role") not in ["super_admin", "admin"]:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        delivery_persons = await db.admin_users.find(
+            {"role": "delivery_person"},
+            {"password": 0, "_id": 0}
+        ).to_list(None)
+        
+        return {
+            "status": "success",
+            "delivery_persons": delivery_persons,
+            "count": len(delivery_persons)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/delivery-person/login")
+async def delivery_person_login(credentials: AdminLogin):
+    """Delivery person login"""
+    try:
+        # Find delivery person by email
+        user = await db.admin_users.find_one({
+            "email": credentials.email,
+            "role": "delivery_person"
+        })
+        
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Verify password
+        if not verify_password(credentials.password, user["password"]):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Check if user is active
+        if not user.get("is_active", True):
+            raise HTTPException(status_code=401, detail="Account is inactive")
+        
+        # Create access token
+        access_token = create_access_token(
+            data={"sub": user["email"], "role": user["role"], "user_id": user["id"]}
+        )
+        
+        # Update last login
+        await db.admin_users.update_one(
+            {"email": credentials.email},
+            {"$set": {"last_login": datetime.utcnow().isoformat()}}
+        )
+        
+        # Remove password from response
+        user.pop("password")
+        user.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": user
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/create-super-admin")
+async def create_initial_super_admin():
+    """Create initial super admin (only works if no super admin exists)"""
+    try:
+        # Check if any super admin exists
+        existing_super_admin = await db.admin_users.find_one({"role": "super_admin"})
+        if existing_super_admin:
+            raise HTTPException(status_code=400, detail="Super admin already exists")
+        
+        # Create default super admin
+        super_admin = {
+            "id": str(uuid.uuid4()),
+            "email": "admin@adityaretail.com",
+            "password": hash_password("admin123"),
+            "full_name": "Super Administrator",
+            "role": "super_admin",
+            "is_active": True,
+            "created_at": datetime.utcnow().isoformat(),
+            "permissions": {
+                "can_view_analytics": True,
+                "can_manage_products": True,
+                "can_manage_orders": True,
+                "can_manage_customers": True,
+                "can_manage_campaigns": True,
+                "can_manage_inventory": True,
+                "can_manage_admins": True
+            }
+        }
+        
+        await db.admin_users.insert_one(super_admin)
+        
+        return {
+            "status": "success",
+            "message": "Super admin created successfully",
+            "email": "admin@adityaretail.com",
+            "password": "admin123"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ==================== WAREHOUSE-ACCESSIBLE DELIVERY PERSON ENDPOINTS ====================
+
+@router.post("/delivery-person/create-from-warehouse")
+async def create_delivery_person_from_warehouse(person: DeliveryPersonCreate):
+    """Create delivery person account (accessible from warehouse without admin token)"""
+    try:
+        # Check if email already exists
+        existing_user = await db.admin_users.find_one({"email": person.email})
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        
+        # Hash password
+        hashed_password = hash_password(person.password)
+        
+        # Create delivery person document
+        delivery_person_doc = {
+            "id": str(uuid.uuid4()),
+            "email": person.email,
+            "password": hashed_password,
+            "full_name": person.full_name,
+            "phone": person.phone,
+            "vehicle_number": person.vehicle_number or "",
+            "address": person.address or "",
+            "role": "delivery_person",
+            "is_active": True,
+            "created_at": datetime.utcnow().isoformat(),
+            "created_by": "warehouse",
+            "permissions": {
+                "can_view_assigned_deliveries": True,
+                "can_update_delivery_status": True,
+                "can_upload_delivery_proof": True,
+                "can_collect_payment": True
+            }
+        }
+        
+        await db.admin_users.insert_one(delivery_person_doc)
+        
+        # Remove password from response
+        delivery_person_doc.pop("password")
+        delivery_person_doc.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "message": "Delivery person created successfully",
+            "delivery_person": delivery_person_doc
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/delivery-persons/list")
+async def list_delivery_persons_public():
+    """List all delivery persons (accessible without admin token for warehouse use)"""
+    try:
+        delivery_persons = await db.admin_users.find(
+            {"role": "delivery_person"},
+            {"password": 0, "_id": 0}
+        ).to_list(None)
+        
+        return {
+            "status": "success",
+            "delivery_persons": delivery_persons,
+            "count": len(delivery_persons)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/delivery-person/{person_id}/update")
+async def update_delivery_person(person_id: str, updates: dict):
+    """Update delivery person details"""
+    try:
+        # Remove fields that shouldn't be updated directly
+        updates.pop("id", None)
+        updates.pop("_id", None)
+        updates.pop("role", None)
+        updates.pop("created_at", None)
+        
+        # If password is being updated, hash it
+        if "password" in updates and updates["password"]:
+            updates["password"] = hash_password(updates["password"])
+        else:
+            updates.pop("password", None)
+        
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        
+        result = await db.admin_users.update_one(
+            {"id": person_id, "role": "delivery_person"},
+            {"$set": updates}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Delivery person not found")
+        
+        # Get updated document
+        updated_person = await db.admin_users.find_one(
+            {"id": person_id},
+            {"password": 0, "_id": 0}
+        )
+        
+        return {
+            "status": "success",
+            "message": "Delivery person updated successfully",
+            "delivery_person": updated_person
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/delivery-person/{person_id}/delete")
+async def delete_delivery_person(person_id: str):
+    """Delete/deactivate delivery person"""
+    try:
+        # Soft delete - just mark as inactive
+        result = await db.admin_users.update_one(
+            {"id": person_id, "role": "delivery_person"},
+            {"$set": {"is_active": False, "updated_at": datetime.utcnow().isoformat()}}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Delivery person not found")
+        
+        return {
+            "status": "success",
+            "message": "Delivery person deactivated successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

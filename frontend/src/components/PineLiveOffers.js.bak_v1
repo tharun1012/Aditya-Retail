@@ -1,0 +1,48 @@
+import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+
+const API = process.env.REACT_APP_BACKEND_URL;
+const inr = (n) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
+// Live Pine Labs Offer Discovery, shown as received (banks, tenures, EMI, rate, fee).
+const PineLiveOffers = ({ productId }) => {
+  const [offer, setOffer] = useState(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    if (!productId) return undefined;
+    setLoading(true);
+    axios.get(`${API}/api/offers/pine-live/${productId}`)
+      .then((r) => alive && setOffer(r.data?.offer || null))
+      .catch(() => alive && setOffer(null))
+      .finally(() => alive && setLoading(false));
+    return () => { alive = false; };
+  }, [productId]);
+  if (loading) return <div className="text-xs text-gray-400 py-2">Loading Pine Labs offers…</div>;
+  if (!offer || !offer.issuers || offer.issuers.length === 0) return null;
+  return (
+    <div data-testid="pine-live-offers" className="bg-white border border-gray-200 rounded-xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold text-gray-900">EMI Offers <span className="text-xs text-gray-500">({offer.bank_count} banks)</span></div>
+        <span className="text-[10px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded-full px-2 py-0.5">Live from Pine Labs</span>
+      </div>
+      <div className="space-y-3 max-h-80 overflow-y-auto">
+        {offer.issuers.map((iss) => (
+          <div key={iss.name} className="border border-gray-100 rounded-lg p-2">
+            <div className="text-xs font-semibold text-gray-800 mb-1">{iss.name}</div>
+            <div className="flex flex-wrap gap-1.5">
+              {iss.tenures.map((t) => (
+                <div key={t.months} className={`text-[11px] rounded-md border px-2 py-1 ${t.no_cost ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-gray-50 border-gray-200 text-gray-700'}`}>
+                  <div className="font-semibold">{t.months} mo · ₹{inr(t.emi)}/mo</div>
+                  <div className="text-[10px]">{t.no_cost ? 'No Cost EMI' : `${t.rate}% p.a.`}{t.fee ? ` · fee ₹${inr(t.fee)}` : ''}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default PineLiveOffers;

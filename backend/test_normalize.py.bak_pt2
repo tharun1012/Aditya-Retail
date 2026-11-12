@@ -1,0 +1,10 @@
+from product_normalize import clean_brand, clean_category
+B = {"BOSCH ": "Bosch", "bosch": "Bosch", "Bosch Limited - Powertools": "Bosch", "HAIER APPLIANCES INDIA PVT LIMITED": "Haier",
+     "ELECTROLUX INDIA PRIVATE LIMITED": "Electrolux", "SIEMENS ": "Siemens", "L K AGENCY": "L K AGENCY", "Dyson": "Dyson", "": ""}
+C = {"REF": "Refrigerator", "refrigerator": "Refrigerator", " Chimney": "Chimney", "CHIMNEY": "Chimney", "W/M": "Washing Machine",
+     "washing_machine": "Washing Machine", "AC ": "AC - Air Conditioners", "Microwaves": "Microwave", "Dryer": "Clothes Dryer",
+     "Detergents": "Detergent", "Power Tools": "Power Tools", "Powertools": "Power Tools", "uncategorized": "uncategorized", "bosch jug 2": "bosch jug 2"}
+for k, v in B.items(): assert clean_brand(k) == v, (k, clean_brand(k))
+for k, v in C.items(): assert clean_category(k) == v, (k, clean_category(k))
+assert clean_brand("BSH Household Appliances Mfg Pvt Ltd", "Siemens iQ500 Dryer") == "Siemens"
+print("normaliser OK")

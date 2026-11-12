@@ -1,0 +1,832 @@
+"""
+E-Invoice PDF Generator
+Generates GST-compliant invoices for both B2B and B2C transactions
+Supports both online orders and offline invoices
+"""
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm, inch
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, HRFlowable
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+from reportlab.pdfgen import canvas
+from reportlab.graphics.barcode import qr
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics import renderPDF
+from io import BytesIO
+from datetime import datetime
+import qrcode
+import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Company Details
+COMPANY_INFO = {
+    "name": "ADITYA RETAIL",
+    "gstin": "29ABAFA6295J1Z2",
+    "address": "#21/1, 16th Cross, Sampige Road, Malleshwaram",
+    "city": "Bangalore",
+    "state": "Karnataka",
+    "state_code": "29",
+    "pincode": "560003",
+    "phone": "080-23563499 / 080-40972295",
+    "email": "info@adityaretail.com",
+    "website": "WWW.ADITYARETAIL.COM"
+}
+
+def generate_qr_code(data: str, size: int = 100) -> BytesIO:
+    """Generate QR code image"""
+    qr_img = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=2,
+    )
+    qr_img.add_data(data)
+    qr_img.make(fit=True)
+    img = qr_img.make_image(fill_color="black", back_color="white")
+    
+    buffer = BytesIO()
+    img.save(buffer, format='PNG')
+    buffer.seek(0)
+    return buffer
+
+def number_to_words(num):
+    """Convert number to words (Indian numbering system)"""
+    ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
+            'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen',
+            'Seventeen', 'Eighteen', 'Nineteen']
+    tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety']
+    
+    if num == 0:
+        return 'Zero'
+    
+    def helper(n):
+        if n < 20:
+            return ones[n]
+        elif n < 100:
+            return tens[n // 10] + ('' if n % 10 == 0 else ' ' + ones[n % 10])
+        elif n < 1000:
+            return ones[n // 100] + ' Hundred' + ('' if n % 100 == 0 else ' and ' + helper(n % 100))
+        elif n < 100000:
+            return helper(n // 1000) + ' Thousand' + ('' if n % 1000 == 0 else ' ' + helper(n % 1000))
+        elif n < 10000000:
+            return helper(n // 100000) + ' Lakh' + ('' if n % 100000 == 0 else ' ' + helper(n % 100000))
+        else:
+            return helper(n // 10000000) + ' Crore' + ('' if n % 10000000 == 0 else ' ' + helper(n % 10000000))
+    
+    rupees = int(num)
+    paise = int(round((num - rupees) * 100))
+    
+    result = helper(rupees) + ' Rupees'
+    if paise > 0:
+        result += ' and ' + helper(paise) + ' Paise'
+    
+    return result + ' Only'
+
+class InvoicePDFGenerator:
+    def __init__(self, invoice_data: dict, invoice_type: str = "online"):
+        """
+        Initialize invoice generator
+        
+        Args:
+            invoice_data: Dictionary containing invoice details
+            invoice_type: "online" or "offline"
+        """
+        self.invoice_data = invoice_data
+        self.invoice_type = invoice_type
+        # Determine if this is a Sales Order vs Invoice
+        # Check document_type field first, then check invoice_number for SO patterns
+        invoice_number = str(invoice_data.get('invoice_number', ''))
+        self.is_sales_order = (
+            invoice_data.get('document_type') == 'sales_order' or
+            invoice_number.startswith('SO-') or
+            '-SO-' in invoice_number or
+            invoice_number.upper().startswith('SO')
+        )
+        self.buffer = BytesIO()
+        self.styles = getSampleStyleSheet()
+        self._setup_styles()
+        
+    def _setup_styles(self):
+        """Setup custom paragraph styles"""
+        self.styles.add(ParagraphStyle(
+            name='CompanyName',
+            fontSize=16,
+            fontName='Helvetica-Bold',
+            alignment=TA_CENTER,
+            spaceAfter=2*mm
+        ))
+        self.styles.add(ParagraphStyle(
+            name='SectionHeader',
+            fontSize=10,
+            fontName='Helvetica-Bold',
+            textColor=colors.white,
+            backColor=colors.HexColor('#1e40af'),
+            alignment=TA_LEFT,
+            leftIndent=2*mm,
+            spaceBefore=3*mm,
+            spaceAfter=2*mm
+        ))
+        self.styles.add(ParagraphStyle(
+            name='SmallText',
+            fontSize=8,
+            fontName='Helvetica',
+            alignment=TA_LEFT
+        ))
+        self.styles.add(ParagraphStyle(
+            name='SmallBold',
+            fontSize=8,
+            fontName='Helvetica-Bold',
+            alignment=TA_LEFT
+        ))
+        
+    def _calculate_gst(self, items: list, customer_state: str = "Karnataka") -> dict:
+        """Calculate GST breakdown from items"""
+        is_inter_state = customer_state.upper() not in ['KARNATAKA', 'KA', '29']
+        
+        total_taxable = 0
+        total_cgst = 0
+        total_sgst = 0
+        total_igst = 0
+        total_cess = 0
+        
+        # Check if order is from Tally import (prices are exclusive)
+        is_tally_import = self.invoice_data.get('import_source') == 'tally' or self.invoice_data.get('price_type') == 'exclusive'
+        
+        for item in items:
+            # Get item values - handle both inclusive and exclusive pricing
+            rate = float(item.get('rate', item.get('price', item.get('unit_price', 0))))
+            qty = int(item.get('quantity', item.get('qty', 1)))
+            discount_pct = float(item.get('discount', item.get('discount_percent', 0)))
+            tax_rate = float(item.get('tax_rate', item.get('gst_rate', 18)))
+            
+            # Check if price is GST inclusive
+            # For Tally imports, default to exclusive (False)
+            # For other orders, default to inclusive (True)
+            default_inclusive = not is_tally_import
+            is_inclusive = item.get('price_inclusive', default_inclusive)
+            
+            gross_amount = rate * qty
+            discount_amount = (gross_amount * discount_pct) / 100
+            
+            if is_inclusive:
+                # Reverse calculate taxable amount from inclusive price
+                net_amount = gross_amount - discount_amount
+                taxable_amount = net_amount / (1 + tax_rate / 100)
+                tax_amount = net_amount - taxable_amount
+            else:
+                # Price is already excluding GST - use as-is
+                taxable_amount = gross_amount - discount_amount
+                tax_amount = (taxable_amount * tax_rate) / 100
+            
+            total_taxable += taxable_amount
+            
+            if is_inter_state:
+                total_igst += tax_amount
+            else:
+                total_cgst += tax_amount / 2
+                total_sgst += tax_amount / 2
+        
+        return {
+            'taxable_amount': round(total_taxable, 2),
+            'cgst': round(total_cgst, 2),
+            'sgst': round(total_sgst, 2),
+            'igst': round(total_igst, 2),
+            'cess': round(total_cess, 2),
+            'total_tax': round(total_cgst + total_sgst + total_igst + total_cess, 2),
+            'is_inter_state': is_inter_state
+        }
+    
+    def generate(self) -> bytes:
+        """Generate the PDF invoice and return as bytes"""
+        doc = SimpleDocTemplate(
+            self.buffer,
+            pagesize=A4,
+            rightMargin=10*mm,
+            leftMargin=10*mm,
+            topMargin=10*mm,
+            bottomMargin=15*mm
+        )
+        
+        story = []
+        
+        # Build invoice content
+        story.extend(self._build_header())
+        story.extend(self._build_e_invoice_details())
+        story.extend(self._build_party_details())
+        story.extend(self._build_transaction_details())
+        story.extend(self._build_items_table())
+        story.extend(self._build_summary())
+        story.extend(self._build_footer())
+        
+        doc.build(story)
+        
+        pdf_bytes = self.buffer.getvalue()
+        self.buffer.close()
+        
+        return pdf_bytes
+    
+    def _build_header(self) -> list:
+        """Build invoice header: store info left, title/no/date right — mirrors the on-screen modal"""
+        elements = []
+
+        store_details = self.invoice_data.get('store_details', {}) or {}
+        display_name = store_details.get('name') or COMPANY_INFO['name']
+        display_gst = store_details.get('gst_number') or COMPANY_INFO['gstin']
+        display_address = store_details.get('address') or COMPANY_INFO['address']
+        display_city = store_details.get('city') or COMPANY_INFO['city']
+        display_state = store_details.get('state') or COMPANY_INFO['state']
+        display_pincode = store_details.get('pincode') or COMPANY_INFO['pincode']
+        display_phone = store_details.get('phone') or COMPANY_INFO['phone']
+        display_email = self.invoice_data.get('store_email') or COMPANY_INFO['email']
+        from store_config import get_store_header_subtitle
+        _sub = get_store_header_subtitle(
+            self.invoice_data.get('store_code') or store_details.get('code') or store_details.get('store_code'),
+            str(self.invoice_data.get('invoice_number') or self.invoice_data.get('order_number') or '')
+        )
+        subtitle_html = f'<font size="10"><b>{_sub}</b></font><br/>' if _sub else ''
+
+        company_info = f"""
+        <font size="16"><b>Aditya Retail</b></font><br/>
+        {subtitle_html}
+        <font size="7" color="#6b7280">{display_address}, {display_city}</font><br/>
+        <font size="7" color="#6b7280">{display_state} - {display_pincode}</font><br/>
+        <font size="7" color="#6b7280">Phone: {display_phone} | Email: {display_email}</font>
+        """
+        company_para = Paragraph(company_info, ParagraphStyle(
+            'CompanyInfo', fontSize=9, alignment=TA_LEFT, leading=13
+        ))
+
+        gst_badge_para = Paragraph(
+            f'<font color="white" size="8"><b>GSTIN: {display_gst}</b></font>',
+            ParagraphStyle('GstBadge', alignment=TA_LEFT)
+        )
+        gst_badge = Table([[gst_badge_para]], colWidths=[45*mm])
+        gst_badge.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#1e293b')),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+
+        # Document Title - always TAX INVOICE / SALES ORDER, matches modal (no GSTIN condition)
+        invoice_type_text = "SALES ORDER" if self.is_sales_order else "TAX INVOICE"
+
+        doc_num = self.invoice_data.get('invoice_number', self.invoice_data.get('order_number', 'N/A'))
+        doc_date_raw = self.invoice_data.get('invoice_date', self.invoice_data.get('created_at', datetime.now().strftime('%d-%m-%Y')))
+        if isinstance(doc_date_raw, str) and 'T' in doc_date_raw:
+            try:
+                doc_date_raw = datetime.fromisoformat(doc_date_raw.replace('Z', '+00:00')).strftime('%d-%m-%Y')
+            except Exception:
+                pass
+
+        if isinstance(doc_date_raw, str) and len(doc_date_raw) == 10 and doc_date_raw[4] == '-' and doc_date_raw[7] == '-':
+            doc_date_raw = f"{doc_date_raw[8:10]}-{doc_date_raw[5:7]}-{doc_date_raw[0:4]}"
+
+        original_so_number = self.invoice_data.get('original_so_number')
+        ref_so_line = f'<br/><font size="7" color="#6b7280">Ref SO: {original_so_number}</font>' if original_so_number else ""
+        title_block = f"""
+        <font size="20" color="#1e293b"><b>{invoice_type_text}</b></font><br/>
+        <font size="9"><b>No: {doc_num}</b></font><br/>
+        <font size="7" color="#6b7280">Date: {doc_date_raw}</font>{ref_so_line}
+        """
+        title_para = Paragraph(title_block, ParagraphStyle(
+            'TitleBlock', fontSize=9, alignment=TA_RIGHT, leading=13
+        ))
+
+        company_block = Table([[company_para], [Spacer(1, 2*mm)], [gst_badge]], colWidths=[110*mm])
+        company_block.setStyle(TableStyle([
+            ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        ]))
+
+        header_table = Table([[company_block, title_para]], colWidths=[110*mm, 60*mm])
+        header_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LINEBELOW', (0, 0), (-1, -1), 2, colors.HexColor('#1e293b')),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+
+        elements.append(header_table)
+        elements.append(Spacer(1, 4*mm))
+
+        return elements
+    
+    def _build_e_invoice_details(self) -> list:
+        """Build e-Invoice details section (for B2B)"""
+        elements = []
+        
+        # Only show for B2B invoices with GSTIN
+        if not self.invoice_data.get('customer_gstin'):
+            return elements
+        
+        # Section header
+        header = Paragraph("e-Invoice Details", self.styles['SectionHeader'])
+        elements.append(header)
+        
+        irn = self.invoice_data.get('irn', 'To be generated')
+        ack_no = self.invoice_data.get('ack_no', 'Pending')
+        ack_date = self.invoice_data.get('ack_date', '-')
+        
+        e_inv_data = [
+            ['IRN:', irn[:50] + '...' if len(str(irn)) > 50 else irn],
+            ['Ack. No.:', ack_no],
+            ['Ack. Date:', ack_date]
+        ]
+        
+        e_inv_table = Table(e_inv_data, colWidths=[25*mm, 145*mm])
+        e_inv_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        
+        elements.append(e_inv_table)
+        elements.append(Spacer(1, 2*mm))
+        
+        return elements
+    
+    def _build_transaction_details(self) -> list:
+        """Single-row supply-details strip, matching the on-screen invoice view"""
+        elements = []
+
+        customer_state_for_supply = self.invoice_data.get('shipping_address', {}).get('state', 'Karnataka')
+        is_inter_state_supply = str(customer_state_for_supply).upper() not in ['KARNATAKA', 'KA', '29']
+        supply_type = "Inter-State" if is_inter_state_supply else "Intra-State"
+        place_of_supply = self.invoice_data.get(
+            'place_of_supply',
+            self.invoice_data.get('shipping_address', {}).get('state', 'Karnataka')
+        )
+        state_code_map = {
+            'Karnataka': '29', 'Maharashtra': '27', 'Tamil Nadu': '33',
+            'Kerala': '32', 'Andhra Pradesh': '37', 'Telangana': '36',
+        }
+        state_code = state_code_map.get(place_of_supply, '-')
+        payment_mode = self.invoice_data.get('payment_method', 'Cash').title()
+        doc_type_label = ('Sales Order' if self.is_sales_order else 'Invoice')
+
+        def cell(label, value):
+            return Paragraph(
+                f"<font size='7' color='#64748b'>{label}</font><br/><font size='9'><b>{value}</b></font>",
+                ParagraphStyle('SupplyCell', alignment=TA_CENTER, leading=12)
+            )
+
+        cells = [cell('Place of Supply', place_of_supply), cell('State Code', state_code),
+                 cell('Supply Type', supply_type), cell('Payment Mode', payment_mode)]
+        col_widths = [42.5*mm] * 4
+        if not self.is_sales_order:
+            cells.append(cell('Document Type', doc_type_label))
+            col_widths = [34*mm] * 5
+
+        strip = Table([cells], colWidths=col_widths)
+        bg = colors.HexColor('#fffbeb') if self.is_sales_order else colors.HexColor('#f8fafc')
+        border = colors.HexColor('#fde68a') if self.is_sales_order else colors.HexColor('#e2e8f0')
+        strip.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BACKGROUND', (0, 0), (-1, -1), bg),
+            ('BOX', (0, 0), (-1, -1), 1, border),
+            ('INNERGRID', (0, 0), (-1, -1), 0, colors.white),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+        ]))
+
+        elements.append(strip)
+        elements.append(Spacer(1, 4*mm))
+        return elements
+    
+    def _build_party_details(self) -> list:
+        """Build party details section with 4 boxes: Bill From, Bill To, Ship From, Ship To"""
+        elements = []
+        
+        # Get customer info
+        customer_name = self.invoice_data.get('customer_name', 'Walk-in Customer')
+        customer_gstin = self.invoice_data.get('customer_gstin', self.invoice_data.get('customer_gst', ''))
+        customer_phone = self.invoice_data.get('customer_phone', '')
+        
+        # Billing address
+        billing = self.invoice_data.get('billing_address', {})
+        if isinstance(billing, dict) and billing:
+            bill_address = billing.get('address', billing.get('address_line1', ''))
+            bill_city = billing.get('city', '')
+            bill_state = billing.get('state', 'Karnataka')
+            bill_pincode = billing.get('pincode', '')
+        else:
+            bill_address = self.invoice_data.get('customer_address', '')
+            bill_city = self.invoice_data.get('customer_city', '')
+            bill_state = self.invoice_data.get('customer_state', 'Karnataka')
+            bill_pincode = self.invoice_data.get('customer_pincode', '')
+        
+        # Shipping address
+        shipping = self.invoice_data.get('shipping_address', {})
+        if isinstance(shipping, dict) and shipping:
+            ship_address = shipping.get('address', shipping.get('address_line1', ''))
+            ship_city = shipping.get('city', '')
+            ship_state = shipping.get('state', 'Karnataka')
+            ship_pincode = shipping.get('pincode', '')
+        else:
+            ship_address = bill_address
+            ship_city = bill_city
+            ship_state = bill_state
+            ship_pincode = bill_pincode
+        
+        # Get store/warehouse info for Ship From
+        store_details = self.invoice_data.get('store_details', {})
+        ship_from_name = store_details.get('name', COMPANY_INFO['name'])
+        ship_from_gst = store_details.get('gst_number', COMPANY_INFO['gstin'])
+        ship_from_address = store_details.get('address', COMPANY_INFO['address'])
+        ship_from_city = store_details.get('city', COMPANY_INFO['city'])
+        ship_from_state = store_details.get('state', COMPANY_INFO['state'])
+        ship_from_pincode = store_details.get('pincode', COMPANY_INFO['pincode'])
+        
+        # Row 1: Bill From + Bill To
+        bill_from_name = store_details.get('name') or COMPANY_INFO['name']
+        bill_from_gst = store_details.get('gst_number') or COMPANY_INFO['gstin']
+        bill_from_address = store_details.get('address') or COMPANY_INFO['address']
+        bill_from_city = store_details.get('city') or COMPANY_INFO['city']
+        bill_from_state_disp = store_details.get('state') or COMPANY_INFO['state']
+        bill_from_pincode_disp = store_details.get('pincode') or COMPANY_INFO['pincode']
+        bill_from_info = f"""<b>Bill From</b><br/>
+        <font size="7"><b>{bill_from_name}</b></font><br/>
+        <font size="7" color="blue">GSTIN: {bill_from_gst}</font><br/>
+        <font size="7">{bill_from_address}</font><br/>
+        <font size="7">{bill_from_city}, {bill_from_state_disp} - {bill_from_pincode_disp}</font><br/>
+        <font size="7">PAN: {store_details.get('pan', '')}</font>
+        """
+        
+        recipient_gstin = f"<font color='blue'>GSTIN: {customer_gstin}</font><br/>" if customer_gstin else ""
+        customer_email = self.invoice_data.get('customer_email', '')
+        recipient_email = f'<br/><font size="7">Email: {customer_email}</font>' if customer_email else ""
+        bill_to_info = f"""<b>Bill To</b><br/>
+        <font size="7"><b>{customer_name}</b></font><br/>
+        <font size="7">{recipient_gstin}</font>
+        <font size="7">{bill_address}</font><br/>
+        <font size="7">{bill_city}, {bill_state} - {bill_pincode}</font><br/>
+        <font size="7">Ph: {customer_phone}</font>{recipient_email}
+        """
+        
+        # Row 2: Ship From + Ship To (only for invoices, not SOs)
+        ship_from_info = f"""<b>Ship From</b><br/>
+        <font size="7"><b>{ship_from_name}</b></font><br/>
+        <font size="7" color="blue">GSTIN: {ship_from_gst}</font><br/>
+        <font size="7">{ship_from_address}</font><br/>
+        <font size="7">{ship_from_city}, {ship_from_state} - {ship_from_pincode}</font>
+        """
+        
+        ship_to_info = f"""<b>Ship To</b><br/>
+        <font size="7"><b>{customer_name}</b></font><br/>
+        <font size="7">{ship_address}</font><br/>
+        <font size="7">{ship_city}, {ship_state} - {ship_pincode}</font><br/>
+        <font size="7">Ph: {customer_phone}</font>
+        """
+        
+        # Two separate boxed row-groups (Bill row, Ship row) with a real gap
+        # between them, matching the modal's two distinct grid blocks.
+        common_box_style = [
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
+            ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]
+
+        bill_table = Table(
+            [[Paragraph(bill_from_info, self.styles['SmallText']),
+              Paragraph(bill_to_info, self.styles['SmallText'])]],
+            colWidths=[85*mm, 85*mm]
+        )
+        bill_table.setStyle(TableStyle(common_box_style + [
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f8fafc')),  # slate-50
+        ]))
+
+        party_table = bill_table
+
+        if not self.is_sales_order:
+            ship_table = Table(
+                [[Paragraph(ship_from_info, self.styles['SmallText']),
+                  Paragraph(ship_to_info, self.styles['SmallText'])]],
+                colWidths=[85*mm, 85*mm]
+            )
+            ship_style = common_box_style + [
+                ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#ecfdf5')),  # Ship From - emerald-50
+                ('BOX', (0, 0), (0, 0), 0.75, colors.HexColor('#a7f3d0')),
+                ('BACKGROUND', (1, 0), (1, 0), colors.HexColor('#eff6ff')),  # Ship To - blue-50
+                ('BOX', (1, 0), (1, 0), 0.75, colors.HexColor('#bfdbfe')),
+            ]
+            ship_table.setStyle(TableStyle(ship_style))
+
+        elements.append(bill_table)
+        if not self.is_sales_order:
+            elements.append(Spacer(1, 3*mm))
+            elements.append(ship_table)
+        elements.append(Spacer(1, 3*mm))
+        
+        return elements
+    
+    def _build_items_table(self) -> list:
+        """Build items/goods table"""
+        elements = []
+        
+        items = self.invoice_data.get('items', [])
+        customer_state = self.invoice_data.get('shipping_address', {}).get('state', 'Karnataka')
+        is_inter_state = customer_state.upper() not in ['KARNATAKA', 'KA', '29']
+        
+        # Table headers
+        if is_inter_state:
+            headers = ['Sr', 'Description', 'HSN', 'Qty', 'Rate', 'Taxable', 'IGST%', 'IGST', 'Total']
+            col_widths = [8*mm, 40*mm, 18*mm, 12*mm, 20*mm, 20*mm, 12*mm, 18*mm, 22*mm]
+        else:
+            headers = ['Sr', 'Description', 'HSN', 'Qty', 'Rate', 'Taxable', 'CGST', 'SGST', 'Total']
+            col_widths = [8*mm, 38*mm, 18*mm, 12*mm, 18*mm, 18*mm, 18*mm, 18*mm, 22*mm]
+        
+        table_data = [headers]
+        
+        for idx, item in enumerate(items, 1):
+            rate = float(item.get('rate', item.get('price', item.get('unit_price', 0))))
+            qty = int(item.get('quantity', item.get('qty', 1)))
+            discount_pct = float(item.get('discount', item.get('discount_percent', 0)))
+            tax_rate = float(item.get('tax_rate', item.get('gst_rate', 18)))
+            hsn = item.get('hsn_code', item.get('hsn', '-'))
+            
+            # Calculate amounts
+            gross = rate * qty
+            discount = (gross * discount_pct) / 100
+            net = gross - discount
+            
+            # Reverse calculate from inclusive price
+            taxable = net / (1 + tax_rate / 100)
+            tax_amount = net - taxable
+            
+            description = item.get('product_name', item.get('name', item.get('description', 'Item')))
+            if len(description) > 35:
+                description = description[:32] + '...'
+            
+            if is_inter_state:
+                row = [
+                    str(idx),
+                    description,
+                    str(hsn) if hsn else '-',
+                    str(qty),
+                    f"{rate:,.2f}",
+                    f"{taxable:,.2f}",
+                    f"{tax_rate}%",
+                    f"{tax_amount:,.2f}",
+                    f"{net:,.2f}"
+                ]
+            else:
+                half_tax = tax_amount / 2
+                row = [
+                    str(idx),
+                    description,
+                    str(hsn) if hsn else '-',
+                    str(qty),
+                    f"{rate:,.2f}",
+                    f"{taxable:,.2f}",
+                    f"{half_tax:,.2f}",
+                    f"{half_tax:,.2f}",
+                    f"{net:,.2f}"
+                ]
+            
+            table_data.append(row)
+        
+        items_table = Table(table_data, colWidths=col_widths)
+        items_table.setStyle(TableStyle([
+            # Header styling
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e40af')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 7),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            
+            # Body styling
+            ('FONTSIZE', (0, 1), (-1, -1), 7),
+            ('ALIGN', (0, 1), (0, -1), 'CENTER'),  # Sr No
+            ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),  # Numbers right aligned
+            ('ALIGN', (1, 1), (1, -1), 'LEFT'),    # Description left
+            
+            # Grid
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8fafc')]),
+            
+            # Padding
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 2),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        
+        elements.append(items_table)
+        elements.append(Spacer(1, 4*mm))
+        
+        return elements
+    
+    def _build_summary(self) -> list:
+        """Build invoice summary with GST breakdown including delivery charges GST"""
+        elements = []
+        
+        items = self.invoice_data.get('items', [])
+        customer_state = self.invoice_data.get('shipping_address', {}).get('state', 'Karnataka')
+        gst_calc = self._calculate_gst(items, customer_state)
+        
+        discount_amount = float(self.invoice_data.get('discount_amount', 0))
+        delivery_charges = float(self.invoice_data.get('shipping_charges', self.invoice_data.get('delivery_charges', 0)))
+        round_off = float(self.invoice_data.get('round_off', 0))
+        
+        # Get delivery charges GST breakdown (18% inclusive)
+        delivery_taxable = float(self.invoice_data.get('delivery_charges_taxable', 0))
+        delivery_tax = float(self.invoice_data.get('delivery_charges_tax', 0))
+        
+        # If not pre-calculated, calculate now (for backward compatibility)
+        if delivery_charges > 0 and delivery_taxable == 0:
+            delivery_gst_rate = 18.0
+            delivery_taxable = delivery_charges / (1 + delivery_gst_rate / 100)
+            delivery_tax = delivery_charges - delivery_taxable
+        
+        # Add delivery tax to totals
+        total_taxable = gst_calc['taxable_amount'] + delivery_taxable
+        total_tax = gst_calc['total_tax'] + delivery_tax
+        
+        subtotal = gst_calc['taxable_amount'] + gst_calc['total_tax']
+        grand_total = subtotal - discount_amount + delivery_charges + round_off
+        
+        # Totals table - matches modal: Taxable -> CGST/SGST or IGST -> Delivery (if any) -> Grand Total
+        rows = [['Taxable Amount:', f"Rs. {gst_calc['taxable_amount']:,.2f}"]]
+        if gst_calc['is_inter_state']:
+            rows.append(['IGST:', f"Rs. {gst_calc['igst']:,.2f}"])
+        else:
+            rows.append(['CGST:', f"Rs. {gst_calc['cgst']:,.2f}"])
+            rows.append(['SGST:', f"Rs. {gst_calc['sgst']:,.2f}"])
+        if delivery_charges > 0:
+            rows.append(['Delivery Charges:', f"Rs. {delivery_charges:,.2f}"])
+        if round_off != 0:
+            rows.append(['Round Off:', f"Rs. {round_off:,.2f}"])
+        rows.append(['Grand Total:', f"Rs. {grand_total:,.2f}"])
+
+        totals_table = Table(rows, colWidths=[36*mm, 26*mm])
+        totals_table.setStyle(TableStyle([
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('TEXTCOLOR', (0, 0), (-1, -2), colors.HexColor('#4b5563')),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, -1), (-1, -1), 10),
+            ('LINEABOVE', (0, -1), (-1, -1), 1.2, colors.HexColor('#1e293b')),
+            ('TOPPADDING', (0, -1), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -2), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ]))
+
+        amount_words = number_to_words(grand_total)
+        words_para = Paragraph(
+            f"<font color='#92400e'><b>Amount in Words</b></font><br/>"
+            f"<font color='#78350f' size='9'><b>{amount_words}</b></font>",
+            ParagraphStyle('Words', fontSize=8, fontName='Helvetica', leading=13)
+        )
+
+        side_by_side = Table([[words_para, '', totals_table]], colWidths=[100*mm, 4*mm, 64*mm])
+        side_by_side.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BOX', (0, 0), (0, 0), 0.75, colors.HexColor('#fde68a')),
+            ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#fffbeb')),
+            ('BOX', (2, 0), (2, 0), 0.5, colors.HexColor('#e2e8f0')),
+            ('BACKGROUND', (2, 0), (2, 0), colors.HexColor('#f8fafc')),
+            ('LEFTPADDING', (0, 0), (0, 0), 6),
+            ('RIGHTPADDING', (0, 0), (0, 0), 6),
+            ('TOPPADDING', (0, 0), (0, 0), 6),
+            ('BOTTOMPADDING', (0, 0), (0, 0), 6),
+            ('LEFTPADDING', (2, 0), (2, 0), 6),
+            ('RIGHTPADDING', (2, 0), (2, 0), 6),
+            ('TOPPADDING', (2, 0), (2, 0), 6),
+            ('BOTTOMPADDING', (2, 0), (2, 0), 6),
+        ]))
+
+        elements.append(side_by_side)
+        elements.append(Spacer(1, 5*mm))
+
+        return elements
+    
+    def _build_footer(self) -> list:
+        """Build invoice footer with Goods Received confirmation box (only for Invoices, not SOs)"""
+        elements = []
+        
+        # Only show "Goods Received in Good Condition" box for actual Invoices, NOT for Sales Orders
+        if not self.is_sales_order:
+            goods_received_box = """
+            <b>GOODS RECEIVED IN GOOD CONDITION</b><br/><br/>
+            <font size="8">
+            Customer Name: ____________________________________<br/><br/>
+            Date: ____________________<br/><br/>
+            Signature: ____________________________________<br/><br/>
+            Remarks: ____________________________________<br/>
+            ____________________________________
+            </font>
+            """
+            
+            received_para = Paragraph(goods_received_box, ParagraphStyle(
+                'ReceivedBox', 
+                fontSize=9, 
+                fontName='Helvetica-Bold',
+                borderWidth=1,
+                borderColor=colors.black,
+                borderPadding=5
+            ))
+            
+            # Create a bordered box for goods received
+            received_table = Table([[received_para]], colWidths=[170*mm])
+            received_table.setStyle(TableStyle([
+                ('BOX', (0, 0), (-1, -1), 1.5, colors.black),
+                ('TOPPADDING', (0, 0), (-1, -1), 8),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                ('LEFTPADDING', (0, 0), (-1, -1), 10),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+                ('BACKGROUND', (0, 0), (-1, -1), colors.Color(0.98, 0.98, 0.98)),
+            ]))
+            
+            elements.append(received_table)
+            elements.append(Spacer(1, 5*mm))
+        
+        # Bank details and terms - Updated with real bank details
+        bank_info = """<b>Bank Details:</b><br/>
+        <font size="7">Bank Name: DBS Bank</font><br/>
+        <font size="7">Account Name: Aditya Retail</font><br/>
+        <font size="7">A/C No: 827200176347</font><br/>
+        <font size="7">IFSC Code: DBSS0IN0827</font><br/>
+        <font size="7">Branch: Ulsoor Road, Bangalore</font><br/>
+        <font size="7">Account Type: Current Account</font><br/>
+        <font size="7">GST: 29ABAFA6295J1Z2</font>
+        """
+        
+        terms_info = """<b>Terms & Conditions:</b><br/>
+        <font size="7">1. Goods once sold will not be taken back.</font><br/>
+        <font size="7">2. Subject to Bangalore Jurisdiction.</font><br/>
+        <font size="7">3. E&amp;OE</font>
+        """
+        
+        signature_info = """<br/><br/><br/><br/>
+        <font size="8">Authorized Signatory</font><br/>
+        <font size="7">For ADITYA RETAIL</font>
+        """
+        
+        footer_data = [[
+            Paragraph(bank_info, self.styles['SmallText']),
+            '',
+            Paragraph(terms_info, self.styles['SmallText']),
+            '',
+            Paragraph(signature_info, ParagraphStyle('Sig', fontSize=8, alignment=TA_CENTER))
+        ]]
+        
+        footer_table = Table(footer_data, colWidths=[58*mm, 4*mm, 58*mm, 4*mm, 46*mm])
+        footer_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('VALIGN', (4, 0), (4, 0), 'BOTTOM'),
+            ('ALIGN', (4, 0), (4, 0), 'CENTER'),
+            ('BOX', (0, 0), (0, 0), 0.5, colors.HexColor('#e2e8f0')),
+            ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#f8fafc')),
+            ('BOX', (2, 0), (2, 0), 0.5, colors.HexColor('#e2e8f0')),
+            ('BACKGROUND', (2, 0), (2, 0), colors.HexColor('#f8fafc')),
+            ('LEFTPADDING', (0, 0), (0, 0), 6),
+            ('RIGHTPADDING', (0, 0), (0, 0), 6),
+            ('TOPPADDING', (0, 0), (0, 0), 6),
+            ('BOTTOMPADDING', (0, 0), (0, 0), 6),
+            ('LEFTPADDING', (2, 0), (2, 0), 6),
+            ('RIGHTPADDING', (2, 0), (2, 0), 6),
+            ('TOPPADDING', (2, 0), (2, 0), 6),
+            ('BOTTOMPADDING', (2, 0), (2, 0), 6),
+        ]))
+        
+        elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
+        elements.append(Spacer(1, 2*mm))
+        elements.append(footer_table)
+        
+        # Print info
+        print_info = Paragraph(
+            f"<font size='6'>Generated by: {COMPANY_INFO['gstin']} | Print Date: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')} | This is a computer generated invoice</font>",
+            ParagraphStyle('PrintInfo', fontSize=6, alignment=TA_CENTER, textColor=colors.grey)
+        )
+        elements.append(Spacer(1, 3*mm))
+        elements.append(print_info)
+        
+        return elements
+
+
+def generate_invoice_pdf(invoice_data: dict, invoice_type: str = "online") -> bytes:
+    """
+    Main function to generate invoice PDF
+    
+    Args:
+        invoice_data: Dictionary with invoice details
+        invoice_type: "online" or "offline"
+    
+    Returns:
+        PDF as bytes
+    """
+    generator = InvoicePDFGenerator(invoice_data, invoice_type)
+    return generator.generate()

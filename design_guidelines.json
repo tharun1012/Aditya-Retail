@@ -1,0 +1,163 @@
+{
+  "identity": {
+    "persona": "E1",
+    "role": "Creative Designer (Top 1%)",
+    "philosophy": "Fusion over Imitation. Emotion First. Content is King.",
+    "anti_patterns": [
+      "Generic 'SaaS Blue' gradients",
+      "Center-aligned everything",
+      "Boring equal-width grids",
+      "Default Inter font for headings"
+    ]
+  },
+  "theme": {
+    "name": "The Digital Atelier",
+    "description": "A gallery-like experience where appliances are presented as art pieces. High contrast, generous whitespace, and sophisticated typography.",
+    "mode": "light",
+    "modes": {
+      "light": {
+        "background": "#FAFAFA",
+        "foreground": "#18181B",
+        "card": "#FFFFFF",
+        "border": "#E4E4E7"
+      },
+      "dark": {
+        "background": "#09090B",
+        "foreground": "#FAFAFA",
+        "card": "#18181B",
+        "border": "#27272A"
+      }
+    }
+  },
+  "typography": {
+    "headings": {
+      "font_family": "Playfair Display, serif",
+      "usage": "Hero titles, Section headers, Product names",
+      "weights": ["400", "600"],
+      "tracking": "tracking-tight"
+    },
+    "body": {
+      "font_family": "Manrope, sans-serif",
+      "usage": "Paragraphs, UI elements, Specifications",
+      "weights": ["400", "500"],
+      "tracking": "tracking-normal"
+    },
+    "accents": {
+      "font_family": "JetBrains Mono, monospace",
+      "usage": "Technical specs, Price tags, AI data points",
+      "size": "text-xs"
+    }
+  },
+  "colors": {
+    "palette": {
+      "primary": {
+        "name": "Obsidian",
+        "hex": "#18181B",
+        "usage": "Primary buttons, Strong text"
+      },
+      "secondary": {
+        "name": "Platinum",
+        "hex": "#E4E4E7",
+        "usage": "Secondary buttons, Borders, Subtle backgrounds"
+      },
+      "accent": {
+        "name": "Burnished Copper",
+        "hex": "#B45309",
+        "usage": "Call to actions (subtle), Sale tags, Highlights"
+      },
+      "ai_glow": {
+        "name": "Ethereal Blue",
+        "gradient": "from-blue-500/20 to-purple-500/20",
+        "usage": "AI Agent backgrounds, Active states"
+      }
+    },
+    "rules": [
+      "Never use pure black (#000000). Use #18181B.",
+      "Never use pure white (#FFFFFF) for page background. Use #FAFAFA for warmth.",
+      "AI elements must have a 'glass' effect, not solid colors."
+    ]
+  },
+  "layout_strategies": {
+    "spacing": {
+      "scale": "Generous (2x standard)",
+      "section_padding": "py-24 md:py-32",
+      "container_padding": "px-6 md:px-12"
+    },
+    "grids": {
+      "marketing": "The Tetris Grid (Asymmetric 12-col)",
+      "product_list": "Masonry or Staggered Grid (Avoid uniform rows)",
+      "dashboard": "High Density 4-col Grid"
+    },
+    "containers": {
+      "max_width": "max-w-[1400px]",
+      "alignment": "Center with generous margins"
+    }
+  },
+  "components": {
+    "buttons": {
+      "style": "Sharp edges or Pill-shaped (Choose one, stick to it)",
+      "interaction": "Scale down slightly on click (active:scale-95)",
+      "hover": "Invert colors or Slide-up text"
+    },
+    "cards": {
+      "style": "Flat with 1px border, No shadow by default",
+      "hover": "Lift (-translate-y-1) + Soft Shadow (shadow-xl)",
+      "content_padding": "p-6 or p-8"
+    },
+    "ai_widgets": {
+      "style": "Glassmorphism (backdrop-blur-xl)",
+      "border": "1px solid rgba(255,255,255,0.2)",
+      "shadow": "Glow effect on hover"
+    }
+  },
+  "visual_assets": {
+    "images": {
+      "hero_background": {
+        "url": "https://images.unsplash.com/photo-1639405069836-f82aa6dcb900?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzV8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBsdXh1cnklMjBraXRjaGVuJTIwaW50ZXJpb3IlMjBkZXNpZ258ZW58MHx8fHwxNzcwNDgwNjY5fDA&ixlib=rb-4.1.0&q=85",
+        "alt": "Modern luxury kitchen with stainless steel appliances",
+        "usage": "Homepage Hero, Category Headers"
+      },
+      "lifestyle_kitchen": {
+        "url": "https://images.unsplash.com/photo-1755624222023-621f7718950b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzV8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBsdXh1cnklMjBraXRjaGVuJTIwaW50ZXJpb3IlMjBkZXNpZ258ZW58MHx8fHwxNzcwNDgwNjY5fDA&ixlib=rb-4.1.0&q=85",
+        "alt": "Green tile modern kitchen detail",
+        "usage": "About Us, Expert Consultation Section"
+      },
+      "ai_abstract": {
+        "url": "https://images.unsplash.com/photo-1764438042422-4acdd318f51c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzB8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGRpZ2l0YWwlMjB3YXZlcyUyMGJsdWUlMjBzaWx2ZXIlMjBlbGVnYW50JTIwdGVjaG5vbG9neSUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzcwNDgwNjQzfDA&ixlib=rb-4.1.0&q=85",
+        "alt": "Abstract blue digital waves",
+        "usage": "AI Agent Backgrounds, Loading States"
+      },
+      "product_detail": {
+        "url": "https://images.unsplash.com/photo-1695654673011-35de11c0f010?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzJ8MHwxfHNlYXJjaHwxfHxlbGVjdHJvbHV4JTIwYnVpbHQlMjBpbiUyMG92ZW58ZW58MHx8fHwxNzcwNDgwNjgyfDA&ixlib=rb-4.1.0&q=85",
+        "alt": "Close up of oven knobs",
+        "usage": "Product Features, Quality Assurance"
+      }
+    },
+    "icons": {
+      "library": "Lucide React",
+      "style": "Stroke width 1.5px (Thin & Elegant)"
+    }
+  },
+  "motion": {
+    "transitions": "transition-all duration-500 ease-[0.22,1,0.36,1] (Custom Bezier)",
+    "scroll": "Use Lenis for smooth scrolling if possible",
+    "micro_interactions": "Buttons should have magnetic pull or subtle glow on hover"
+  },
+  "instructions_to_main_agent": [
+    "1. INSTALL FONTS: Add 'Playfair Display' and 'Manrope' via Google Fonts in index.html or CSS.",
+    "2. IMPLEMENT THEME: Update tailwind.config.js with the 'Obsidian' and 'Platinum' colors.",
+    "3. BUILD HERO: Create a full-screen hero section using the 'hero_background' image with a dark overlay (bg-black/40) and white serif text.",
+    "4. AI AGENTS: Design the AI Chat Widget as a floating glass card (backdrop-blur-xl) with the 'ai_abstract' image as a subtle animated background.",
+    "5. PRODUCT CARDS: Do not use standard borders. Use a large amount of whitespace and a subtle gray background (#F4F4F5) for the image container.",
+    "6. NAVIGATION: Keep the navbar transparent with a blur effect. Use a serif font for the logo 'Aditya Retail'.",
+    "7. TESTING: Ensure all interactive elements have data-testid attributes."
+  ],
+  "universal_guidelines": [
+    "Avoid 'AI Slop': No generic gradients, no centered text blocks without purpose.",
+    "Dark colors look good when used independently without gradients.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur).",
+    "Every interaction needs micro-animations.",
+    "Use 2-3x more spacing than feels comfortable."
+  ]
+}

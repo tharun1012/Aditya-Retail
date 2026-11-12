@@ -1,0 +1,107 @@
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
+import { FileText } from 'lucide-react';
+
+const TermsPage = () => {
+  const navigate = useNavigate();
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="bg-white shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 py-4">
+          <button onClick={() => navigate('/')} className="text-blue-600 hover:text-blue-700 font-medium">
+            ← Back to Store
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white py-16">
+        <div className="max-w-4xl mx-auto px-4 text-center">
+          <FileText className="w-16 h-16 mx-auto mb-4" />
+          <h1 className="text-4xl font-bold mb-4">Terms & Conditions</h1>
+          <p className="text-blue-100">Last updated: November 2025</p>
+        </div>
+      </div>
+
+      <div className="max-w-4xl mx-auto px-4 py-16">
+        <div className="bg-white rounded-2xl shadow-lg p-8 prose max-w-none">
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">1. Acceptance of Terms</h2>
+            <p className="text-gray-700">
+              By accessing and using Aditya Retail's website and services, you agree to be bound by these Terms and Conditions. If you do not agree, please do not use our services.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">2. Products and Pricing</h2>
+            <ul className="list-disc pl-6 text-gray-700 space-y-2">
+              <li>All products sold are genuine Bosch and Siemens appliances</li>
+              <li>Prices are subject to change without notice</li>
+              <li>We reserve the right to limit quantities</li>
+              <li>Product images are for reference only; actual product may vary slightly</li>
+              <li>All prices are in Indian Rupees (INR) and include applicable taxes</li>
+            </ul>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">3. Orders and Payment</h2>
+            <ul className="list-disc pl-6 text-gray-700 space-y-2">
+              <li>Order confirmation does not guarantee product availability</li>
+              <li>We reserve the right to cancel orders for any reason</li>
+              <li>Payment must be made in full before order processing</li>
+              <li>For COD orders, payment must be made upon delivery</li>
+              <li>We accept PhonePe, UPI, and Cash on Delivery</li>
+            </ul>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">4. Shipping and Delivery</h2>
+            <ul className="list-disc pl-6 text-gray-700 space-y-2">
+              <li>Delivery timelines are estimates and not guaranteed</li>
+              <li>Risk of loss passes to you upon delivery</li>
+              <li>Signature may be required for delivery confirmation</li>
+              <li>Delivery to serviceable pincodes only</li>
+              <li>Installation services available at additional cost</li>
+            </ul>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">5. Returns and Refunds</h2>
+            <ul className="list-disc pl-6 text-gray-700 space-y-2">
+              <li>7-day return policy from date of delivery</li>
+              <li>Product must be unused and in original packaging</li>
+              <li>Return shipping costs may apply</li>
+              <li>Refunds processed within 7-10 business days</li>
+              <li>Some products may not be eligible for return</li>
+            </ul>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">6. Warranty</h2>
+            <p className="text-gray-700">
+              All products come with manufacturer's warranty. Warranty terms vary by product. Please refer to the product warranty card for specific details. We are not responsible for manufacturer warranty claims.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">7. Limitation of Liability</h2>
+            <p className="text-gray-700">
+              Aditya Retail shall not be liable for any indirect, incidental, or consequential damages arising from the use of our products or services. Our total liability is limited to the purchase price of the product.
+            </p>
+          </section>
+
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">8. Contact Information</h2>
+            <p className="text-gray-700">
+              For questions about these Terms, contact us at:<br />
+              <strong>Email:</strong> support@adityaretail.com<br />
+              <strong>Phone:</strong> +91 98765 43210
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default TermsPage;

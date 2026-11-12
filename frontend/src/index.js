@@ -1,0 +1,83 @@
+import './theme-vars.css';
+import React from "react";
+import ReactDOM from "react-dom/client";
+import "@/index.css";
+import App from "@/App";
+import { ActiveThemeProvider } from './context/ActiveThemeContext';
+import reportWebVitals, { handleWebVitals } from "./utils/reportWebVitals";
+import * as serviceWorkerRegistration from "./utils/serviceWorkerRegistration";
+import ChunkErrorBoundary from "./components/ChunkErrorBoundary";
+
+// Domain hygiene: only clean caches if we land on a clearly retired host.
+// We do NOT force www vs no-www — both are valid canonical hosts.
+const cleanupStaleHosts = async () => {
+  const currentHost = window.location.hostname;
+
+  const knownGoodPatterns = [
+    "adityaretail.com",
+    "localhost",
+    "127.0.0.1",
+    "emergent.host",
+  ];
+
+  const isKnownHost = knownGoodPatterns.some(
+    (p) =>
+      currentHost === p ||
+      currentHost.endsWith(`.${p}`) ||
+      currentHost.includes(p)
+  );
+
+  if (isKnownHost) return;
+
+  console.log("[Domain] Unknown host, clearing client caches");
+
+  try {
+    if ("caches" in window) {
+      const names = await caches.keys();
+      await Promise.all(names.map((n) => caches.delete(n)));
+    }
+
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+    }
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+cleanupStaleHosts();
+
+const rootElement = document.getElementById("root");
+
+const root = ReactDOM.createRoot(rootElement);
+
+root.render(
+  <React.StrictMode>
+    <ChunkErrorBoundary>
+      <ActiveThemeProvider>
+        <App />
+      </ActiveThemeProvider>
+    </ChunkErrorBoundary>
+  </React.StrictMode>
+);
+
+// Register Service Worker for PWA
+if (!navigator.userAgent.includes("ReactSnap")) {
+  serviceWorkerRegistration.register({
+    onSuccess: () => {
+      console.log("[PWA] Service Worker registered successfully");
+    },
+    onUpdate: (registration) => {
+      console.log("[PWA] New content available, auto-updating...");
+
+      if (registration.waiting) {
+        registration.waiting.postMessage({ type: "SKIP_WAITING" });
+        window.location.reload();
+      }
+    },
+  });
+}
+
+// Measure and report Core Web Vitals
+reportWebVitals(handleWebVitals);

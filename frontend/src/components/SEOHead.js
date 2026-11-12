@@ -1,0 +1,186 @@
+import React, { useState, useEffect } from 'react';
+import { Helmet } from 'react-helmet-async';
+import { BACKEND_URL } from '../config/api';
+
+// JSON-LD component - renders directly in DOM (more reliable than Helmet for structured data)
+const JsonLd = ({ data }) => {
+  if (!data) return null;
+  return (
+    <script
+      type="application/ld+json"
+      dangerouslySetInnerHTML={{ __html: JSON.stringify(data) }}
+    />
+  );
+};
+
+const _seoCache = {};
+const _seoNorm = (p) => {
+  let x = (p || '/').split('?')[0].split('#')[0];
+  if (x.length > 1) x = x.replace(/\/+$/, '');
+  return x.toLowerCase() || '/';
+};
+
+// Admin-managed override for the current URL path (SEO Manager). Null if none.
+export const useSEOOverride = () => {
+  const path = _seoNorm(typeof window !== 'undefined' ? window.location.pathname : '/');
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (path in _seoCache) return;
+    let alive = true;
+    fetch(`${BACKEND_URL}/api/seo-settings/by-path?path=${encodeURIComponent(path)}`)
+      .then(r => r.json())
+      .then(d => { _seoCache[path] = d.seo || null; if (alive) tick(t => t + 1); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [path]);
+  return _seoCache[path] || null;
+};
+
+export const SEOOverrideText = ({ field, fallback }) => {
+  const seo = useSEOOverride();
+  return <>{(seo && seo[field]) || fallback}</>;
+};
+
+const SEOHead = ({ 
+  title,
+  description,
+  keywords,
+  canonical,
+  ogImage,
+  ogType = 'website',
+  schema,
+  schemas,
+  noindex = false
+}) => {
+  const baseUrl = 'https://adityaretail.com';
+  const seo = useSEOOverride();
+  const ovCanon = seo?.canonical_url;
+  const canonicalUrl = ovCanon
+    ? (/^https?:/i.test(ovCanon) ? ovCanon : `${baseUrl}${ovCanon.startsWith('/') ? '' : '/'}${ovCanon}`)
+    : (canonical ? `${baseUrl}${canonical}` : baseUrl);
+  const defaultImage = `${baseUrl}/aditya-logo.png`;
+  const imageUrl = seo?.og_image || ogImage || defaultImage;
+  
+  const defaultTitle = 'Aditya Retail - Premium Home Appliances | Bosch, Siemens';
+  const defaultDescription = 'Shop premium home appliances from top brands like Bosch and Siemens. Washing machines, refrigerators, chimneys, ovens, dishwashers with best prices and warranty. Free delivery across India.';
+  const defaultKeywords = 'home appliances, Bosch, Siemens, washing machine, refrigerator, chimney, oven, dishwasher, kitchen appliances, online shopping';
+  
+  const pageTitle = seo?.title || title || defaultTitle;
+  const pageDescription = seo?.description || description || defaultDescription;
+  const pageKeywords = seo?.keywords || keywords || defaultKeywords;
+
+  // direct DOM sync: guarantees head tags reflect the override even if Helmet doesn't apply them
+  useEffect(() => {
+    document.title = pageTitle;
+    const upsert = (selector, tag, attrs, valueAttr, value) => {
+      let el = document.head.querySelector(selector);
+      if (!el) {
+        el = document.createElement(tag);
+        Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+        document.head.appendChild(el);
+      }
+      el.setAttribute(valueAttr, value);
+    };
+    upsert('meta[name="description"]', 'meta', { name: 'description' }, 'content', pageDescription);
+    upsert('meta[name="keywords"]', 'meta', { name: 'keywords' }, 'content', pageKeywords);
+    upsert('link[rel="canonical"]', 'link', { rel: 'canonical' }, 'href', canonicalUrl);
+    upsert('meta[property="og:title"]', 'meta', { property: 'og:title' }, 'content', pageTitle);
+    upsert('meta[property="og:description"]', 'meta', { property: 'og:description' }, 'content', pageDescription);
+    upsert('meta[property="og:url"]', 'meta', { property: 'og:url' }, 'content', canonicalUrl);
+    upsert('meta[property="og:image"]', 'meta', { property: 'og:image' }, 'content', imageUrl);
+  }, [pageTitle, pageDescription, pageKeywords, canonicalUrl, imageUrl]);
+
+  // Combine single schema + array of schemas
+  const allSchemas = [];
+  if (schema) allSchemas.push(schema);
+  if (schemas && Array.isArray(schemas)) allSchemas.push(...schemas);
+  
+  return (
+    <>
+      <Helmet>
+        {/* Basic Meta Tags */}
+        <title>{pageTitle}</title>
+        <meta name="description" content={pageDescription} />
+        <meta name="keywords" content={pageKeywords} />
+        
+        {/* Canonical URL */}
+        <link rel="canonical" href={canonicalUrl} />
+        
+        {/* Robots */}
+        {noindex ? (
+          <meta name="robots" content="noindex, nofollow" />
+        ) : (
+          <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+        )}
+        
+        {/* Open Graph / Facebook */}
+        <meta property="og:type" content={ogType} />
+        <meta property="og:url" content={canonicalUrl} />
+        <meta property="og:title" content={pageTitle} />
+        <meta property="og:description" content={pageDescription} />
+        <meta property="og:image" content={imageUrl} />
+        <meta property="og:site_name" content="Aditya Retail" />
+        
+        {/* Twitter */}
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:url" content={canonicalUrl} />
+        <meta name="twitter:title" content={pageTitle} />
+        <meta name="twitter:description" content={pageDescription} />
+        <meta name="twitter:image" content={imageUrl} />
+        
+        {/* Additional Meta */}
+        <meta name="author" content="Aditya Retail" />
+        <meta name="language" content="English" />
+        <meta name="revisit-after" content="7 days" />
+        <meta name="distribution" content="global" />
+        <meta name="rating" content="general" />
+        
+        {/* Geo Tags */}
+        <meta name="geo.region" content="IN" />
+        <meta name="geo.placename" content="India" />
+      </Helmet>
+      
+      {/* JSON-LD Schemas rendered directly in DOM */}
+      {allSchemas.map((s, i) => (
+        <JsonLd key={`schema-${i}`} data={s} />
+      ))}
+    </>
+  );
+};
+
+// Predefined SEO configurations for common pages
+export const SEOConfigs = {
+  homepage: {
+    title: 'Aditya Retail - Premium Home Appliances | Bosch & Siemens',
+    description: 'Shop premium home appliances from Bosch, Siemens & more. Washing machines, refrigerators, chimneys, ovens, dishwashers with best prices. Free delivery across India.',
+    keywords: 'home appliances online, Bosch appliances, Siemens appliances, washing machine, refrigerator, chimney, oven, dishwasher, kitchen appliances India',
+    canonical: '/',
+  },
+  
+  category: (categoryName) => ({
+    title: `Buy ${categoryName} Online | Best Prices & Offers | Aditya Retail`,
+    description: `Shop ${categoryName} from top brands like Bosch and Siemens. Get best deals, free delivery, warranty & installation. Wide range of ${categoryName} available online.`,
+    keywords: `${categoryName} online, buy ${categoryName}, ${categoryName} price, ${categoryName} offers, Bosch ${categoryName}, Siemens ${categoryName}`,
+    canonical: `/${categoryName.toLowerCase().replace(/ /g, '-')}`,
+  }),
+  
+  product: (product) => {
+    const price = product.price ? `₹${product.price.toLocaleString('en-IN')}` : '';
+    const brand = product.brand || '';
+    const catSlug = product.category ? product.category.toLowerCase().replace(/\s+/g, '-') : '';
+    const modelNumber = product.model_number || product.modelNumber;
+    
+    return {
+      title: `${product.name} - ${brand} | ${price} | Aditya Retail`,
+      description: `Buy ${product.name} by ${brand} online at ${price}. ${product.description?.substring(0, 150) || 'Premium quality appliance with warranty and free delivery.'}`,
+      keywords: `${product.name}, ${brand}, buy ${product.name}, ${product.name} price, ${product.name} online`,
+      canonical: catSlug && modelNumber
+        ? `/${catSlug}/${modelNumber}`
+        : `/product/${product.id}`,
+      ogImage: product.images?.[0] || product.image,
+      ogType: 'product',
+    };
+  }
+};
+
+export default SEOHead;

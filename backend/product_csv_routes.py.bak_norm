@@ -1,0 +1,252 @@
+"""
+Product CSV Export and Import Routes
+Allows bulk product management via CSV files
+"""
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi.responses import StreamingResponse
+from typing import List
+from datetime import datetime, timezone
+import csv
+import io
+from database import get_db
+
+router = APIRouter(prefix="/products/csv", tags=["Product CSV"])
+
+@router.get("/export")
+async def export_products_csv(db = Depends(get_db)):
+    """Export all products to CSV format"""
+    try:
+        # Fetch all products
+        products = await db.products.find({}, {"_id": 0}).to_list(1000)
+        
+        # Create CSV in memory
+        output = io.StringIO()
+        
+        # Define headers
+        headers = [
+            'id', 'sku', 'name', 'brand', 'category', 'sub_category',
+            'price', 'mrp', 'stock', 'description', 'features',
+            'specifications', 'image', 'images', 'warranty_years',
+            'energy_rating', 'is_new', 'is_featured'
+        ]
+        
+        writer = csv.DictWriter(output, fieldnames=headers, extrasaction='ignore')
+        writer.writeheader()
+        
+        for product in products:
+            # Convert lists to pipe-separated strings
+            if product.get('features'):
+                product['features'] = ' | '.join(product['features'])
+            
+            if product.get('specifications'):
+                specs = []
+                for spec in product['specifications']:
+                    if isinstance(spec, dict):
+                        specs.append(f"{spec.get('name', '')}:{spec.get('value', '')}")
+                product['specifications'] = ' | '.join(specs)
+            
+            if product.get('images'):
+                product['images'] = ' | '.join(product['images'])
+            
+            writer.writerow(product)
+        
+        # Prepare response
+        output.seek(0)
+        
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=products_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+@router.post("/import")
+async def import_products_csv(
+    file: UploadFile = File(...),
+    update_existing: bool = True,
+    db = Depends(get_db)
+):
+    """
+    Import products from CSV file
+    
+    Parameters:
+    - update_existing: If True, updates existing products. If False, only adds new products.
+    """
+    try:
+        # Read CSV file
+        contents = await file.read()
+        csv_data = contents.decode('utf-8')
+        csv_reader = csv.DictReader(io.StringIO(csv_data))
+        
+        updated_count = 0
+        added_count = 0
+        skipped_count = 0
+        errors = []
+        
+        for row_num, row in enumerate(csv_reader, start=2):
+            try:
+                product_id = row.get('id', '').strip()
+                
+                if not product_id:
+                    skipped_count += 1
+                    errors.append(f"Row {row_num}: Missing product ID")
+                    continue
+                
+                # Parse the row data
+                product_data = {
+                    'id': product_id,
+                    'sku': row.get('sku', '').strip(),
+                    'name': row.get('name', '').strip(),
+                    'brand': row.get('brand', '').strip(),
+                    'category': row.get('category', '').strip(),
+                    'sub_category': row.get('sub_category', '').strip(),
+                    'description': row.get('description', '').strip(),
+                    'image': row.get('image', '').strip(),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                }
+                
+                # Parse numeric fields
+                try:
+                    product_data['price'] = float(row.get('price', 0))
+                except ValueError:
+                    product_data['price'] = 0
+                
+                try:
+                    product_data['mrp'] = float(row.get('mrp', 0))
+                except ValueError:
+                    product_data['mrp'] = 0
+                
+                try:
+                    product_data['stock'] = int(row.get('stock', 0))
+                except ValueError:
+                    product_data['stock'] = 0
+                
+                try:
+                    product_data['warranty_years'] = int(row.get('warranty_years', 0))
+                except ValueError:
+                    product_data['warranty_years'] = 0
+                
+                # Parse boolean fields
+                product_data['is_new'] = row.get('is_new', '').lower() in ['true', '1', 'yes']
+                product_data['is_featured'] = row.get('is_featured', '').lower() in ['true', '1', 'yes']
+                
+                # Parse energy rating
+                product_data['energy_rating'] = row.get('energy_rating', '').strip()
+                
+                # Parse features (pipe-separated)
+                features_str = row.get('features', '').strip()
+                if features_str:
+                    product_data['features'] = [f.strip() for f in features_str.split('|') if f.strip()]
+                else:
+                    product_data['features'] = []
+                
+                # Parse specifications (pipe-separated, format: name:value)
+                specs_str = row.get('specifications', '').strip()
+                specifications = []
+                if specs_str:
+                    for spec_pair in specs_str.split('|'):
+                        if ':' in spec_pair:
+                            name, value = spec_pair.split(':', 1)
+                            specifications.append({
+                                'name': name.strip(),
+                                'value': value.strip()
+                            })
+                product_data['specifications'] = specifications
+                
+                # Parse images (pipe-separated)
+                images_str = row.get('images', '').strip()
+                if images_str:
+                    product_data['images'] = [img.strip() for img in images_str.split('|') if img.strip()]
+                else:
+                    product_data['images'] = []
+                
+                # Check if product exists
+                existing_product = await db.products.find_one({"id": product_id})
+                
+                if existing_product:
+                    if update_existing:
+                        # Update existing product
+                        await db.products.update_one(
+                            {"id": product_id},
+                            {"$set": product_data}
+                        )
+                        updated_count += 1
+                    else:
+                        skipped_count += 1
+                else:
+                    # Add created_at for new products
+                    product_data['created_at'] = datetime.now(timezone.utc).isoformat()
+                    await db.products.insert_one(product_data)
+                    added_count += 1
+                
+            except Exception as e:
+                errors.append(f"Row {row_num}: {str(e)}")
+                skipped_count += 1
+        
+        return {
+            "status": "success",
+            "message": f"Import complete: {added_count} added, {updated_count} updated, {skipped_count} skipped",
+            "added": added_count,
+            "updated": updated_count,
+            "skipped": skipped_count,
+            "errors": errors[:10]  # Return first 10 errors
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+
+@router.get("/template")
+async def download_csv_template():
+    """Download a CSV template for product import"""
+    try:
+        output = io.StringIO()
+        
+        headers = [
+            'id', 'sku', 'name', 'brand', 'category', 'sub_category',
+            'price', 'mrp', 'stock', 'description', 'features',
+            'specifications', 'image', 'images', 'warranty_years',
+            'energy_rating', 'is_new', 'is_featured'
+        ]
+        
+        writer = csv.DictWriter(output, fieldnames=headers)
+        writer.writeheader()
+        
+        # Add example row
+        example = {
+            'id': 'example-product-id',
+            'sku': 'BOSCH-WM-001',
+            'name': 'Example Washing Machine',
+            'brand': 'Bosch',
+            'category': 'Washing Machine',
+            'sub_category': 'Front Load',
+            'price': '45990',
+            'mrp': '52990',
+            'stock': '10',
+            'description': 'High-efficiency washing machine',
+            'features': 'Feature 1 | Feature 2 | Feature 3',
+            'specifications': 'Capacity:8 kg | Spin Speed:1200 RPM | Energy Rating:5 Star',
+            'image': 'https://example.com/image.jpg',
+            'images': 'https://example.com/img1.jpg | https://example.com/img2.jpg',
+            'warranty_years': '2',
+            'energy_rating': '5 Star',
+            'is_new': 'false',
+            'is_featured': 'false'
+        }
+        writer.writerow(example)
+        
+        output.seek(0)
+        
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=product_import_template.csv"
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Template generation failed: {str(e)}")

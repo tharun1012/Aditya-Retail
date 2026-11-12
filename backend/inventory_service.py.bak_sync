@@ -1,0 +1,566 @@
+"""
+Inventory Management Service
+Handles stock tracking, updates, and alerts
+"""
+from datetime import datetime, timezone
+from typing import Optional, Dict, List
+import uuid
+
+class InventoryService:
+    def __init__(self, db):
+        self.db = db
+    
+    async def initialize_product_stock(self, product_id: str, initial_stock: int = 10, reorder_level: int = 5):
+        """Initialize stock tracking for a product"""
+        try:
+            result = await self.db.products.update_one(
+                {"id": product_id},
+                {
+                    "$set": {
+                        "current_stock": initial_stock,
+                        "reorder_level": reorder_level,
+                        "max_stock_level": initial_stock * 5,  # 5x initial as max
+                        "last_stock_update": datetime.now(timezone.utc).isoformat(),
+                        "stock_history": [{
+                            "id": str(uuid.uuid4()),
+                            "type": "initialization",
+                            "quantity": initial_stock,
+                            "balance_after": initial_stock,
+                            "reason": "Initial stock setup",
+                            "reference_id": None,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "created_by": "system"
+                        }]
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            print(f"Error initializing stock: {str(e)}")
+            return False
+    
+    async def update_stock(
+        self, 
+        product_id: str, 
+        quantity_change: int,  # positive for increase, negative for decrease
+        transaction_type: str,  # 'sale', 'purchase', 'return', 'adjustment'
+        reference_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        created_by: str = "system"
+    ) -> Dict:
+        """
+        Update product stock and maintain history
+        Returns: {"success": bool, "current_stock": int, "message": str}
+        """
+        try:
+            # Get current product
+            product = await self.db.products.find_one({"id": product_id}, {"_id": 0})
+            
+            if not product:
+                return {"success": False, "message": f"Product not found: {product_id}"}
+            
+            current_stock = product.get("current_stock", 0)
+            new_stock = current_stock + quantity_change
+            
+            # Create stock history entry
+            history_entry = {
+                "id": str(uuid.uuid4()),
+                "type": transaction_type,
+                "quantity": quantity_change,
+                "balance_before": current_stock,
+                "balance_after": new_stock,
+                "reason": reason or f"{transaction_type.capitalize()} transaction",
+                "reference_id": reference_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": created_by
+            }
+            
+            # Update product
+            result = await self.db.products.update_one(
+                {"id": product_id},
+                {
+                    "$set": {
+                        "current_stock": new_stock,
+                        "last_stock_update": datetime.now(timezone.utc).isoformat()
+                    },
+                    "$push": {"stock_history": history_entry}
+                }
+            )
+            
+            if result.modified_count > 0:
+                # Check if stock is low
+                reorder_level = product.get("reorder_level", 5)
+                warning = ""
+                if new_stock <= 0:
+                    warning = "OUT OF STOCK"
+                elif new_stock <= reorder_level:
+                    warning = "LOW STOCK"
+                
+                return {
+                    "success": True,
+                    "current_stock": new_stock,
+                    "previous_stock": current_stock,
+                    "warning": warning,
+                    "message": f"Stock updated successfully. New stock: {new_stock}"
+                }
+            else:
+                return {"success": False, "message": "Failed to update stock"}
+            
+        except Exception as e:
+            return {"success": False, "message": f"Error updating stock: {str(e)}"}
+    
+    async def check_stock_availability(self, product_id: str, required_quantity: int) -> Dict:
+        """
+        Check if sufficient stock is available (considering reserved stock)
+        Returns: {"available": bool, "current_stock": int, "available_stock": int, "message": str}
+        """
+        try:
+            product = await self.db.products.find_one({"id": product_id}, {"_id": 0})
+            
+            if not product:
+                return {
+                    "available": False,
+                    "current_stock": 0,
+                    "available_stock": 0,
+                    "message": "Product not found"
+                }
+            
+            current_stock = product.get("current_stock", 0)
+            reserved_stock = product.get("reserved_stock", 0)
+            available_stock = current_stock - reserved_stock
+            product_name = product.get("name", "Unknown Product")
+            
+            if available_stock >= required_quantity:
+                return {
+                    "available": True,
+                    "current_stock": current_stock,
+                    "reserved_stock": reserved_stock,
+                    "available_stock": available_stock,
+                    "message": "Sufficient stock available"
+                }
+            else:
+                return {
+                    "available": False,
+                    "current_stock": current_stock,
+                    "reserved_stock": reserved_stock,
+                    "available_stock": available_stock,
+                    "shortage": required_quantity - available_stock,
+                    "message": f"Insufficient stock for {product_name}. Available: {available_stock}, Required: {required_quantity}"
+                }
+            
+        except Exception as e:
+            return {"available": False, "message": f"Error checking stock: {str(e)}"}
+    
+    async def reserve_stock(
+        self,
+        product_id: str,
+        quantity: int,
+        reference_id: str,
+        reference_type: str = "sales_order",
+        reason: Optional[str] = None,
+        created_by: str = "system"
+    ) -> Dict:
+        """
+        Reserve/block stock for a sales order without deducting it
+        The stock is marked as reserved and can be released or converted to actual sale
+        """
+        try:
+            product = await self.db.products.find_one({"id": product_id}, {"_id": 0})
+            
+            if not product:
+                return {"success": False, "message": f"Product not found: {product_id}"}
+            
+            current_stock = product.get("current_stock", 0)
+            reserved_stock = product.get("reserved_stock", 0)
+            available_stock = current_stock - reserved_stock
+            
+            # Check if enough stock is available to reserve
+            warning = ""
+            if available_stock < quantity:
+                warning = f"INSUFFICIENT STOCK - Only {available_stock} available, {quantity} requested"
+            
+            new_reserved = reserved_stock + quantity
+            
+            # Create reservation record
+            reservation = {
+                "id": str(uuid.uuid4()),
+                "product_id": product_id,
+                "quantity": quantity,
+                "reference_id": reference_id,
+                "reference_type": reference_type,
+                "reason": reason or f"Reserved for {reference_type}",
+                "status": "active",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": created_by
+            }
+            
+            # Create stock history entry
+            history_entry = {
+                "id": str(uuid.uuid4()),
+                "type": "reservation",
+                "quantity": quantity,
+                "balance_before": current_stock,
+                "balance_after": current_stock,  # Stock doesn't change, only reserved
+                "reserved_before": reserved_stock,
+                "reserved_after": new_reserved,
+                "reason": reason or f"Stock reserved for {reference_type}: {reference_id}",
+                "reference_id": reference_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": created_by
+            }
+            
+            # Update product with reservation
+            result = await self.db.products.update_one(
+                {"id": product_id},
+                {
+                    "$set": {
+                        "reserved_stock": new_reserved,
+                        "last_stock_update": datetime.now(timezone.utc).isoformat()
+                    },
+                    "$push": {"stock_history": history_entry}
+                }
+            )
+            
+            # Store reservation in separate collection for tracking
+            await self.db.stock_reservations.insert_one(reservation)
+            
+            if result.modified_count > 0:
+                return {
+                    "success": True,
+                    "current_stock": current_stock,
+                    "reserved_stock": new_reserved,
+                    "available_stock": current_stock - new_reserved,
+                    "warning": warning,
+                    "message": f"Stock reserved successfully. Reserved: {quantity}"
+                }
+            else:
+                return {"success": False, "message": "Failed to reserve stock"}
+            
+        except Exception as e:
+            return {"success": False, "message": f"Error reserving stock: {str(e)}"}
+    
+    async def release_reserved_stock(
+        self,
+        product_id: str,
+        reference_id: str,
+        reason: Optional[str] = None,
+        created_by: str = "system"
+    ) -> Dict:
+        """
+        Release reserved stock (when SO is cancelled)
+        """
+        try:
+            # Find the reservation
+            reservation = await self.db.stock_reservations.find_one({
+                "product_id": product_id,
+                "reference_id": reference_id,
+                "status": "active"
+            })
+            
+            if not reservation:
+                return {"success": False, "message": "No active reservation found"}
+            
+            quantity = reservation.get("quantity", 0)
+            
+            # Update product
+            product = await self.db.products.find_one({"id": product_id}, {"_id": 0})
+            if not product:
+                return {"success": False, "message": "Product not found"}
+            
+            reserved_stock = product.get("reserved_stock", 0)
+            new_reserved = max(0, reserved_stock - quantity)
+            
+            # Create history entry
+            history_entry = {
+                "id": str(uuid.uuid4()),
+                "type": "reservation_release",
+                "quantity": quantity,
+                "balance_before": product.get("current_stock", 0),
+                "balance_after": product.get("current_stock", 0),
+                "reserved_before": reserved_stock,
+                "reserved_after": new_reserved,
+                "reason": reason or f"Reservation released for: {reference_id}",
+                "reference_id": reference_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": created_by
+            }
+            
+            # Update product
+            await self.db.products.update_one(
+                {"id": product_id},
+                {
+                    "$set": {
+                        "reserved_stock": new_reserved,
+                        "last_stock_update": datetime.now(timezone.utc).isoformat()
+                    },
+                    "$push": {"stock_history": history_entry}
+                }
+            )
+            
+            # Update reservation status
+            await self.db.stock_reservations.update_one(
+                {"_id": reservation["_id"]},
+                {"$set": {"status": "released", "released_at": datetime.now(timezone.utc).isoformat()}}
+            )
+            
+            return {
+                "success": True,
+                "released_quantity": quantity,
+                "message": "Reservation released successfully"
+            }
+            
+        except Exception as e:
+            return {"success": False, "message": f"Error releasing reservation: {str(e)}"}
+    
+    async def convert_reservation_to_sale(
+        self,
+        product_id: str,
+        reference_id: str,
+        new_reference_id: str,  # Invoice ID
+        created_by: str = "system",
+        quantity: float = None  # Optional: partial conversion. None = convert full reservation.
+    ) -> Dict:
+        """
+        Convert reserved stock to actual sale (when SO is converted to Invoice).
+        Supports partial conversion when a subset of the reserved quantity is
+        being invoiced (e.g. "Convert Qty" selection in the SO-to-Invoice UI).
+        """
+        try:
+            # Find the reservation
+            reservation = await self.db.stock_reservations.find_one({
+                "product_id": product_id,
+                "reference_id": reference_id,
+                "status": "active"
+            })
+            
+            if not reservation:
+                return {"success": False, "message": "No active reservation found"}
+            
+            reserved_quantity = reservation.get("quantity", 0)
+            
+            # Determine how much is actually being converted now
+            if quantity is None:
+                quantity = reserved_quantity
+            elif quantity > reserved_quantity:
+                return {
+                    "success": False,
+                    "message": f"Cannot convert {quantity} units — only {reserved_quantity} reserved."
+                }
+            
+            # Get product
+            product = await self.db.products.find_one({"id": product_id}, {"_id": 0})
+            if not product:
+                return {"success": False, "message": "Product not found"}
+            
+            current_stock = product.get("current_stock", 0)
+            reserved_stock = product.get("reserved_stock", 0)
+            
+            new_stock = current_stock - quantity
+            new_reserved = max(0, reserved_stock - quantity)
+            
+            # Create history entry
+            history_entry = {
+                "id": str(uuid.uuid4()),
+                "type": "sale_from_reservation",
+                "quantity": -quantity,
+                "balance_before": current_stock,
+                "balance_after": new_stock,
+                "reserved_before": reserved_stock,
+                "reserved_after": new_reserved,
+                "reason": f"Converted from SO to Invoice: {new_reference_id}",
+                "reference_id": new_reference_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": created_by
+            }
+            
+            # Update product - reduce both stock and reserved
+            await self.db.products.update_one(
+                {"id": product_id},
+                {
+                    "$set": {
+                        "current_stock": new_stock,
+                        "reserved_stock": new_reserved,
+                        "last_stock_update": datetime.now(timezone.utc).isoformat()
+                    },
+                    "$push": {"stock_history": history_entry}
+                }
+            )
+            
+            # Update reservation status — full or partial conversion
+            remaining_reserved_qty = reserved_quantity - quantity
+            if remaining_reserved_qty <= 0:
+                # Fully converted
+                await self.db.stock_reservations.update_one(
+                    {"_id": reservation["_id"]},
+                    {
+                        "$set": {
+                            "status": "converted",
+                            "converted_to": new_reference_id,
+                            "converted_at": datetime.now(timezone.utc).isoformat()
+                        }
+                    }
+                )
+            else:
+                # Partial conversion: reduce this reservation, keep the rest active
+                await self.db.stock_reservations.update_one(
+                    {"_id": reservation["_id"]},
+                    {
+                        "$set": {
+                            "quantity": remaining_reserved_qty,
+                            "last_partial_conversion_at": datetime.now(timezone.utc).isoformat(),
+                            "last_partial_conversion_to": new_reference_id
+                        }
+                    }
+                )
+            
+            # Check for warnings
+            reorder_level = product.get("reorder_level", 5)
+            warning = ""
+            if new_stock <= 0:
+                warning = "OUT OF STOCK"
+            elif new_stock <= reorder_level:
+                warning = "LOW STOCK"
+            
+            return {
+                "success": True,
+                "current_stock": new_stock,
+                "warning": warning,
+                "message": "Reservation converted to sale successfully"
+            }
+            
+        except Exception as e:
+            return {"success": False, "message": f"Error converting reservation: {str(e)}"}
+    
+    async def get_low_stock_products(self) -> List[Dict]:
+        """Get all products with stock at or below reorder level"""
+        try:
+            products = await self.db.products.find(
+                {
+                    "$expr": {
+                        "$lte": ["$current_stock", "$reorder_level"]
+                    }
+                },
+                {"_id": 0}
+            ).to_list(None)
+            
+            return products
+        except Exception as e:
+            print(f"Error fetching low stock products: {str(e)}")
+            return []
+    
+    async def get_out_of_stock_products(self) -> List[Dict]:
+        """Get all products with zero or negative stock"""
+        try:
+            products = await self.db.products.find(
+                {"current_stock": {"$lte": 0}},
+                {"_id": 0}
+            ).to_list(None)
+            
+            return products
+        except Exception as e:
+            print(f"Error fetching out of stock products: {str(e)}")
+            return []
+    
+    async def get_stock_summary(self) -> Dict:
+        """Get overall stock summary statistics"""
+        try:
+            pipeline = [
+                {
+                    "$group": {
+                        "_id": None,
+                        "total_products": {"$sum": 1},
+                        "total_stock_value": {
+                            "$sum": {"$multiply": ["$current_stock", "$price"]}
+                        },
+                        "in_stock_count": {
+                            "$sum": {
+                                "$cond": [{"$gt": ["$current_stock", "$reorder_level"]}, 1, 0]
+                            }
+                        },
+                        "low_stock_count": {
+                            "$sum": {
+                                "$cond": [
+                                    {
+                                        "$and": [
+                                            {"$gt": ["$current_stock", 0]},
+                                            {"$lte": ["$current_stock", "$reorder_level"]}
+                                        ]
+                                    },
+                                    1,
+                                    0
+                                ]
+                            }
+                        },
+                        "out_of_stock_count": {
+                            "$sum": {
+                                "$cond": [{"$lte": ["$current_stock", 0]}, 1, 0]
+                            }
+                        }
+                    }
+                }
+            ]
+            
+            result = await self.db.products.aggregate(pipeline).to_list(1)
+            
+            if result:
+                summary = result[0]
+                summary.pop("_id", None)
+                return summary
+            else:
+                return {
+                    "total_products": 0,
+                    "total_stock_value": 0,
+                    "in_stock_count": 0,
+                    "low_stock_count": 0,
+                    "out_of_stock_count": 0
+                }
+        except Exception as e:
+            print(f"Error calculating stock summary: {str(e)}")
+            return {}
+    
+    async def get_stock_history(self, product_id: str, limit: int = 50) -> List[Dict]:
+        """Get stock movement history for a product"""
+        try:
+            product = await self.db.products.find_one(
+                {"id": product_id},
+                {"_id": 0, "stock_history": 1}
+            )
+            
+            if product and "stock_history" in product:
+                history = product["stock_history"]
+                # Return latest entries first
+                return sorted(history, key=lambda x: x.get("created_at", ""), reverse=True)[:limit]
+            
+            return []
+        except Exception as e:
+            print(f"Error fetching stock history: {str(e)}")
+            return []
+    
+    async def manual_stock_adjustment(
+        self,
+        product_id: str,
+        new_stock_level: int,
+        reason: str,
+        adjusted_by: str
+    ) -> Dict:
+        """Manually adjust stock to a specific level"""
+        try:
+            product = await self.db.products.find_one({"id": product_id}, {"_id": 0})
+            
+            if not product:
+                return {"success": False, "message": "Product not found"}
+            
+            current_stock = product.get("current_stock", 0)
+            adjustment = new_stock_level - current_stock
+            
+            result = await self.update_stock(
+                product_id=product_id,
+                quantity_change=adjustment,
+                transaction_type="adjustment",
+                reason=reason,
+                created_by=adjusted_by
+            )
+            
+            return result
+        except Exception as e:
+            return {"success": False, "message": f"Error adjusting stock: {str(e)}"}

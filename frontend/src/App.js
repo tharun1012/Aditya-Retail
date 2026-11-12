@@ -1,0 +1,1073 @@
+import React, { useState, useEffect, Suspense, lazy } from 'react';
+import { BrowserRouter as Router, Routes, Route, useSearchParams } from 'react-router-dom';
+import { HelmetProvider } from 'react-helmet-async';
+import { initGA, trackPageView } from './utils/analytics';
+import ToastProvider from './components/ToastProvider';
+import './App.css';
+import './mobile-responsive.css';
+import './mobile-fixes.css'; // Must be last to override all other styles
+
+// Core Components (loaded immediately for initial page)
+import Header from './components/Header';
+import TrustBadges from './components/TrustBadges';
+import WhyBuyStrip from './components/WhyBuyStrip';
+import HeroBannerCarousel from './components/HeroBannerCarousel';
+import AIFeatureShowcase from './components/AIFeatureShowcase';
+import ProductGrid from './components/ProductGrid';
+import CategoryShowcase from './components/CategoryShowcase';
+import AIChat from './components/AIChat';
+import Footer from './components/Footer';
+import AboutPage from './components/AboutPage';
+import ContactPage from './components/ContactPage';
+import PrivacyPolicyPage from './components/PrivacyPolicyPage';
+import OrderTrackingPage from './components/OrderTrackingPage';
+import { BlogListing, BlogPost } from './components/BlogPages';
+
+// Premium Theme Components
+import PremiumHero from './components/PremiumHero';
+import BannerCarousel from './components/BannerCarousel';
+import PremiumAIShowcase from './components/PremiumAIShowcase';
+import PremiumConsultationCTA from './components/PremiumConsultationCTA';
+import AuthorProfile from './components/AuthorProfile';
+
+// Lazy-loaded Admin Components (code splitting for better performance)
+const AdminLogin = lazy(() => import('./components/AdminLogin'));
+const AdminLoginPage = lazy(() => import('./components/AdminLoginPage'));
+const SimpleAdminDashboard = lazy(() => import('./components/SimpleAdminDashboard'));
+const ProductImageManager = lazy(() => import('./components/ProductImageManager'));
+const ProductManager = lazy(() => import('./components/ProductManager'));
+const EnhancedProductManager = lazy(() => import('./components/EnhancedProductManager'));
+const IncompleteProductsManager = lazy(() => import('./components/IncompleteProductsManager'));
+const AdminDashboardHome = lazy(() => import('./components/AdminDashboardHome'));
+const AnalyticsDashboard = lazy(() => import('./components/AnalyticsDashboard'));
+const OrderManagement = lazy(() => import('./components/OrderManagement'));
+const PineLabsTransactions = lazy(() => import('./components/PineLabsTransactions'));
+const AIAgentsPerformance = lazy(() => import('./components/AIAgentsPerformance'));
+const CustomerCRM = lazy(() => import('./components/CustomerCRM'));
+const MarketingCampaigns = lazy(() => import('./components/MarketingCampaigns'));
+const InventoryManagement = lazy(() => import('./components/InventoryManagement'));
+const DeliveryManagement = lazy(() => import('./components/DeliveryManagement'));
+const DeliveryReports = lazy(() => import('./components/DeliveryReports'));
+const ReportsExports = lazy(() => import('./components/ReportsExports'));
+const Settings = lazy(() => import('./components/Settings'));
+const AdminUserManagement = lazy(() => import('./components/AdminUserManagement'));
+const CashbackOfferManagement = lazy(() => import('./components/CashbackOfferManagement'));
+const LeadManagement = lazy(() => import('./components/LeadManagement'));
+const StoreLeads = lazy(() => import('./components/StoreLeads'));
+const ServiceTicketManagement = lazy(() => import('./components/ServiceTicketManagement'));
+const EnhancedRoleManagement = lazy(() => import('./components/EnhancedRoleManagement'));
+const CategoryManagement = lazy(() => import('./components/CategoryManagement'));
+const ComboOffersManagement = lazy(() => import('./components/ComboOffersManagement'));
+const PromotionsManagement = lazy(() => import('./components/PromotionsManagement'));
+const BannerManagement = lazy(() => import('./components/BannerManagement'));
+const NewProductHighlighting = lazy(() => import('./components/NewProductHighlighting'));
+const SocialMediaPostCreator = lazy(() => import('./components/SocialMediaPostCreator'));
+const AccountingDashboard = lazy(() => import('./components/AccountingDashboard'));
+const StoreManagement = lazy(() => import('./components/StoreManagement'));
+const KnowledgeBaseManager = lazy(() => import('./components/KnowledgeBaseManager'));
+const SEOManager = lazy(() => import('./components/SEOManager'));
+const AIMarketingDashboard = lazy(() => import('./components/AIMarketingDashboard'));
+const MyServiceTickets = lazy(() => import('./components/MyServiceTickets'));
+const MarketingAnalyticsDashboard = lazy(() => import('./components/MarketingAnalyticsDashboard'));
+const CustomerJourneyTracker = lazy(() => import('./components/CustomerJourneyTracker'));
+const AdminSettings = lazy(() => import('./components/AdminSettings'));
+const LeadScrapingDashboard = lazy(() => import('./components/LeadScrapingDashboard'));
+const ConsultationManagement = lazy(() => import('./components/ConsultationManagement'));
+const WebsiteAnalytics = lazy(() => import('./components/WebsiteAnalytics'));
+const BlogManagement = lazy(() => import('./components/BlogManagement'));
+const TallyImport = lazy(() => import('./components/TallyImport'));
+const FYTransitionTools = lazy(() => import('./components/FYTransitionTools'));
+const ROICalculator = lazy(() => import('./components/ROICalculator'));
+const ProductDetailPage = lazy(() => import('./components/ProductDetailPage'));
+const CustomerDashboard = lazy(() => import('./components/CustomerDashboard'));
+const DocumentNumberingSettings = lazy(() => import('./components/DocumentNumberingSettings'));
+const QuotationManagement = lazy(() => import('./components/QuotationManagement'));
+const UnifiedStoreTeamManagement = lazy(() => import('./components/UnifiedStoreTeamManagement'));
+const SalesInvoiceManagement = lazy(() => import('./components/SalesInvoiceManagement'));
+const SalesOrderList = lazy(() => import('./components/SalesOrderList'));
+const EditSalesOrder = lazy(() => import('./components/EditSalesOrder'));
+const PendingReceiptApproval = lazy(() => import('./components/PendingReceiptApproval'));
+const ComboDetailPage = lazy(() => import('./components/ComboDetailPage'));
+const AdminDataManagement = lazy(() => import('./components/Admin/AdminDataManagement'));
+const ExportCenter = lazy(() => import('./components/ExportCenter'));
+const HSNCodeManagement = lazy(() => import('./components/HSNCodeManagement'));
+const CustomerPOManagement = lazy(() => import('./components/CustomerPOManagement'));
+
+// Multi-Store Components
+const StoreLogin = lazy(() => import('./components/StoreLogin'));
+const StoreDashboard = lazy(() => import('./components/UnifiedDashboard'));
+const StoreRouter = lazy(() => import('./components/StoreRouter'));
+const StoreCreateOrder = lazy(() => import('./components/StoreInvoiceCreation'));
+const AdvancedReports = lazy(() => import('./components/AdvancedReports'));
+
+// Legal Pages
+const PrivacyPolicy = lazy(() => import('./components/PrivacyPolicy'));
+const TermsAndConditions = lazy(() => import('./components/TermsAndConditions'));
+const ReturnPolicy = lazy(() => import('./components/ReturnPolicy'));
+const ShippingPolicy = lazy(() => import('./components/ShippingPolicy'));
+
+// Customer-facing components (keep loaded for fast navigation)
+import TermsPage from './components/TermsPage';
+import FAQPage from './components/FAQPage';
+import Checkout from './components/Checkout';
+import PaymentSuccess from './components/PaymentSuccess';
+import MockPaymentPage from './components/MockPaymentPage';
+import LoginPage from './components/LoginPage';
+import ResetPassword from './components/ResetPassword';
+import ExpertConsultation from './components/ExpertConsultation';
+import AuthCallback from './components/AuthCallback';
+import ProtectedRoute from './components/ProtectedRoute';
+import DeliveryPersonLogin from './components/DeliveryPersonLogin';
+import DeliveryPersonInterface from './components/DeliveryPersonInterface';
+import AIChatWidget from './components/AIChatWidget';
+import NeuralAIChatWidget from './components/NeuralAIChatWidget';
+import BestSellersSection from './components/BestSellersSection';
+import CombosSection from './components/CombosSection';
+import AIRecommendationsSection from './components/AIRecommendationsSection';
+import SeasonalRecommendationsSection from './components/SeasonalRecommendationsSection';
+import CategoryPage from './components/CategoryPage';
+import SEOHead, { SEOConfigs } from './components/SEOHead';
+import { getHomepageSchemas } from './components/SEOSchemas';
+import LoadingFallback from './components/LoadingFallback';
+import PWAInstallPrompt from './components/PWAInstallPrompt';
+import OfflineIndicator from './components/OfflineIndicator';
+import SimpleInstallButton from './components/SimpleInstallButton';
+import MobileOptimizer from './components/MobileOptimizer';
+
+// Hooks and Context
+import { CartProvider, useCart } from './hooks/useCart';
+import { AuthProvider } from './contexts/AuthContext';
+import { useProducts } from './hooks/useProducts';
+
+// Services
+import { statusAPI } from './services/api';
+
+const HomePage = () => {
+  const [selectedCategory, setSelectedCategory] = useState(null);
+  const [isAIChatOpen, setIsAIChatOpen] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [isConsultationOpen, setIsConsultationOpen] = useState(false);
+  
+  // Use cart from context
+  const { cartCount, cartTotal, addToCart } = useCart();
+
+  // Initialize session tracking for AI recommendations
+  useEffect(() => {
+    // Generate session ID if not exists
+    if (!sessionStorage.getItem('sessionId')) {
+      sessionStorage.setItem('sessionId', `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+    }
+  }, []);
+
+  // Listen for AI chat events from carousel
+  useEffect(() => {
+    const handleAIChatEvent = () => {
+      setIsAIChatOpen(true);
+    };
+
+    window.addEventListener('openAIChat', handleAIChatEvent);
+    return () => window.removeEventListener('openAIChat', handleAIChatEvent);
+  }, []);
+
+  const handleViewProduct = (product) => {
+    setSelectedProduct(product);
+    
+    // Track product view for AI recommendations
+    try {
+      const viewedProducts = JSON.parse(localStorage.getItem('viewedProducts') || '[]');
+      
+      // Add current product to viewed list (keep last 20)
+      const updatedViews = [product.id, ...viewedProducts.filter(id => id !== product.id)].slice(0, 20);
+      localStorage.setItem('viewedProducts', JSON.stringify(updatedViews));
+      
+      // Track category views
+      if (product.category) {
+        const categoryViews = JSON.parse(localStorage.getItem('categoryViews') || '{}');
+        categoryViews[product.category] = (categoryViews[product.category] || 0) + 1;
+        localStorage.setItem('categoryViews', JSON.stringify(categoryViews));
+      }
+    } catch (error) {
+      console.error('Error tracking product view:', error);
+    }
+    
+    // Navigate to product detail page
+    if (product.id) {
+      window.location.hash = `#/product/${product.id}`;
+    }
+    
+    console.log('View product:', product);
+  };
+
+  const handleAISalesChat = (product = null) => {
+    setSelectedProduct(product);
+    setIsAIChatOpen(true);
+  };
+
+  const handleCategorySelect = (category) => {
+    setSelectedCategory(category);
+    // Scroll to products section
+    setTimeout(() => {
+      const productsSection = document.getElementById('products-section');
+      if (productsSection) {
+        productsSection.scrollIntoView({ behavior: 'smooth' });
+      }
+    }, 100);
+  };
+
+  const handleAddToCart = async (product) => {
+    try {
+      await addToCart(product.id, 1);
+      // Could add a toast notification here
+      console.log('Added to cart:', product.name);
+    } catch (error) {
+      console.error('Failed to add to cart:', error);
+      // Could show error toast here
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-cream">
+      {/* SEO Meta Tags + Organization + Website + LocalBusiness Schemas */}
+      <SEOHead {...SEOConfigs.homepage} schemas={getHomepageSchemas()} />
+      
+      <Header
+        cartCount={cartCount}
+        cartTotal={cartTotal}
+        onCategorySelect={handleCategorySelect}
+        onAIChat={() => handleAISalesChat()}
+      />
+      
+      {/* Admin-managed banners (Amazon/Flipkart style) */}
+      <div className="pb-6 md:pb-10"><BannerCarousel /></div>
+
+      {/* Premium Hero Section */}
+      <PremiumHero 
+        onConsultation={() => setIsConsultationOpen(true)}
+        onExplore={() => {
+          const productsSection = document.getElementById('products-section');
+          if (productsSection) {
+            productsSection.scrollIntoView({ behavior: 'smooth' });
+          }
+        }}
+        onViewProduct={handleViewProduct}
+      />
+      
+      {/* Premium Consultation CTA */}
+      <PremiumConsultationCTA onConsultation={() => setIsConsultationOpen(true)} />
+      
+      {/* Premium AI Feature Showcase */}
+      <PremiumAIShowcase onAgentClick={handleAISalesChat} />
+      
+      {/* Seasonal/Festival Recommendations - top of homepage */}
+      {!selectedCategory && (
+        <SeasonalRecommendationsSection
+          onViewProduct={handleViewProduct}
+          onAddToCart={handleAddToCart}
+          onAISalesChat={handleAISalesChat}
+        />
+      )}
+
+      {/* Shop by Category Section */}
+      <CategoryShowcase onCategorySelect={handleCategorySelect} />
+      
+      {/* Trust Badges */}
+      <TrustBadges />
+
+      {/* Products Section */}
+      <section id="products-section" className="bg-cream py-16">
+        <div className="max-w-[1400px] mx-auto px-6 md:px-12">
+          <div className="text-center mb-12">
+            <h2 className="font-display text-3xl md:text-4xl text-obsidian tracking-tight">
+              {selectedCategory ? `${selectedCategory} Collection` : "Featured Products"}
+            </h2>
+            <p className="font-body text-obsidian/60 mt-3">Premium appliances from world-renowned brands</p>
+          </div>
+        </div>
+        <ProductGrid
+          title=""
+          selectedCategory={selectedCategory}
+          onAddToCart={handleAddToCart}
+          onViewProduct={handleViewProduct}
+          onAISalesChat={handleAISalesChat}
+        />
+      </section>
+      
+      {/* New AI-Powered Sections - Only show on homepage (no category selected) */}
+      {!selectedCategory && (
+        <>
+          {/* Best Sellers Section */}
+          <BestSellersSection
+            onViewProduct={handleViewProduct}
+            onAddToCart={handleAddToCart}
+            onAISalesChat={handleAISalesChat}
+          />
+          
+          {/* AI Recommendations Section */}
+          <AIRecommendationsSection
+            onViewProduct={handleViewProduct}
+            onAddToCart={handleAddToCart}
+            onAISalesChat={handleAISalesChat}
+          />
+          
+          
+          {/* Combo Offers Section */}
+          <div id="combos-section">
+            <CombosSection
+              onViewProduct={handleViewProduct}
+              onAddToCart={handleAddToCart}
+            />
+          </div>
+        </>
+      )}
+      
+      <Footer />
+      
+      {/* AI Chat Modal */}
+      <AIChat
+        isOpen={isAIChatOpen}
+        onClose={() => setIsAIChatOpen(false)}
+        selectedProduct={selectedProduct}
+      />
+      
+      {/* Expert Consultation Modal */}
+      <ExpertConsultation
+        isOpen={isConsultationOpen}
+        onClose={() => setIsConsultationOpen(false)}
+      />
+    </div>
+  );
+};
+
+const AdminPage = () => {
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [adminUser, setAdminUser] = useState(null);
+
+  useEffect(() => {
+    // Check if already logged in
+    const token = localStorage.getItem('adminToken');
+    const user = localStorage.getItem('adminUser');
+    
+    if (token && user) {
+      setIsLoggedIn(true);
+      setAdminUser(JSON.parse(user));
+    }
+  }, []);
+
+  const handleLogin = (user) => {
+    setIsLoggedIn(true);
+    setAdminUser(user);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('adminToken');
+    localStorage.removeItem('adminUser');
+    setIsLoggedIn(false);
+    setAdminUser(null);
+  };
+
+  if (!isLoggedIn) {
+    return <AdminLogin onLogin={handleLogin} />;
+  }
+
+  return <SimpleAdminDashboard user={adminUser} onLogout={handleLogout} />;
+};
+
+const CategoryPageWrapper = () => {
+  const { cartCount, cartTotal, addToCart } = useCart();
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [isAIChatOpen, setIsAIChatOpen] = useState(false);
+  const [searchParams] = useSearchParams();
+
+  // Auto-open AI chat if the URL contains ?chat=open (used by generated content links)
+  useEffect(() => {
+    if (searchParams.get('chat') === 'open') {
+      setIsAIChatOpen(true);
+    }
+  }, [searchParams]);
+
+  const handleViewProduct = (product) => {
+    setSelectedProduct(product);
+    
+    // Track product view for AI recommendations
+    try {
+      const viewedProducts = JSON.parse(localStorage.getItem('viewedProducts') || '[]');
+      const updatedViews = [product.id, ...viewedProducts.filter(id => id !== product.id)].slice(0, 20);
+      localStorage.setItem('viewedProducts', JSON.stringify(updatedViews));
+      
+      if (product.category) {
+        const categoryViews = JSON.parse(localStorage.getItem('categoryViews') || '{}');
+        categoryViews[product.category] = (categoryViews[product.category] || 0) + 1;
+        localStorage.setItem('categoryViews', JSON.stringify(categoryViews));
+      }
+    } catch (error) {
+      console.error('Error tracking product view:', error);
+    }
+  };
+
+  const handleAddToCart = async (product) => {
+    try {
+      await addToCart(product.id, 1);
+      console.log('Added to cart:', product.name);
+    } catch (error) {
+      console.error('Failed to add to cart:', error);
+    }
+  };
+
+  const handleAISalesChat = (product = null) => {
+    setSelectedProduct(product);
+    setIsAIChatOpen(true);
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <Header
+        cartCount={cartCount}
+        cartTotal={cartTotal}
+        onAIChat={() => handleAISalesChat()}
+      />
+      
+      <CategoryPage
+        onViewProduct={handleViewProduct}
+        onAddToCart={handleAddToCart}
+        onAISalesChat={handleAISalesChat}
+      />
+      
+      <Footer />
+      
+      <AIChat
+        isOpen={isAIChatOpen}
+        onClose={() => setIsAIChatOpen(false)}
+        selectedProduct={selectedProduct}
+      />
+    </div>
+  );
+};
+
+const App = () => {
+  // Initialize Google Analytics
+  useEffect(() => {
+    // Google Analytics Measurement ID
+    const GA_MEASUREMENT_ID = 'G-G2M4SXT484';
+    initGA(GA_MEASUREMENT_ID);
+    trackPageView(window.location.pathname, document.title);
+  }, []);
+
+  // Check for session_id in URL (for Google OAuth callback)
+  // After Google auth, Emergent Auth redirects to: {origin}#session_id=xxx
+  // We track this as REACTIVE state so that when AuthCallback clears the hash
+  // (via history.replaceState) and navigates, the App tree re-renders correctly
+  // and switches from <AuthCallback /> back to <Routes>.
+  const [hasSessionId, setHasSessionId] = useState(() =>
+    typeof window !== 'undefined' && window.location.hash.includes('session_id=')
+  );
+
+  useEffect(() => {
+    // Watch for hash changes (back/forward navigation, manual clear)
+    const onHashChange = () => {
+      setHasSessionId(window.location.hash.includes('session_id='));
+    };
+    window.addEventListener('hashchange', onHashChange);
+
+    // Poll once per second for the first 10s — covers history.replaceState which
+    // doesn't fire hashchange. Stops as soon as session_id is gone or 10s elapse.
+    let elapsed = 0;
+    const interval = setInterval(() => {
+      const stillHasSession = window.location.hash.includes('session_id=');
+      if (!stillHasSession) {
+        setHasSessionId(false);
+        clearInterval(interval);
+      }
+      elapsed += 500;
+      if (elapsed >= 10000) clearInterval(interval);
+    }, 500);
+
+    return () => {
+      window.removeEventListener('hashchange', onHashChange);
+      clearInterval(interval);
+    };
+  }, []);
+
+  return (
+    <HelmetProvider>
+      <ToastProvider>
+        <AuthProvider>
+          <CartProvider>
+            <Router>
+              {/* PWA Components */}
+              <MobileOptimizer />
+              <OfflineIndicator />
+              <SimpleInstallButton />
+              
+              <Suspense fallback={<LoadingFallback />}>
+                {/* Handle OAuth callback with session_id - rendered inside Router so useNavigate works */}
+                {hasSessionId ? (
+                  <React.Fragment>
+                    <AuthCallback />
+                  </React.Fragment>
+                ) : (
+        <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/track-order" element={<OrderTrackingPage />} />
+          <Route path="/about" element={<AboutPage />} />
+          <Route path="/about-us" element={<AboutPage />} />
+          <Route path="/contact" element={<ContactPage />} />
+          <Route path="/contact-us" element={<ContactPage />} />
+          <Route path="/privacy" element={<PrivacyPolicyPage />} />
+          <Route path="/terms" element={<TermsPage />} />
+          <Route path="/faq" element={<FAQPage />} />
+          
+          {/* Blog Routes - SEO friendly */}
+<Route path="/blog" element={<BlogListing />} />
+<Route path="/blog/author/:authorName" element={<AuthorProfile />} />
+<Route path="/blog/:slug" element={<BlogPost />} />
+          
+          <Route path="/admin/login" element={<AdminLoginPage />} />
+          <Route path="/delivery-login" element={<DeliveryPersonLogin />} />
+          <Route path="/delivery-dashboard" element={<DeliveryPersonInterface />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/auth/callback" element={<AuthCallback />} />
+          <Route 
+            path="/admin" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <AdminDashboardHome />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/images" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <ProductImageManager />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/products" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <EnhancedProductManager />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/incomplete-products" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <IncompleteProductsManager />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/analytics" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <AnalyticsDashboard />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/orders" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <OrderManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/pine-labs" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <PineLabsTransactions />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/ai-agents" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <AIAgentsPerformance />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/customers" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <CustomerCRM />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/campaigns" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <MarketingCampaigns />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/inventory" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <InventoryManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/delivery" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <DeliveryManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/delivery-reports" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <DeliveryReports />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/reports" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager']}>
+                <ReportsExports />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/settings" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <Settings />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/team" 
+            element={
+              <ProtectedRoute requiredRole={['super_admin']}>
+                <UnifiedStoreTeamManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/stores" 
+            element={
+              <ProtectedRoute requiredRole={['super_admin']}>
+                <UnifiedStoreTeamManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/store-team" 
+            element={
+              <ProtectedRoute requiredRole={['super_admin']}>
+                <UnifiedStoreTeamManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/user-management" 
+            element={
+              <ProtectedRoute requiredRole={['super_admin']}>
+                <AdminUserManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/offers" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <CashbackOfferManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route path="/store/leads" element={<StoreLeads />} />
+          <Route 
+            path="/admin/leads" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <LeadManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/service-tickets" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <ServiceTicketManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/categories" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <CategoryManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/knowledge-base" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <KnowledgeBaseManager />
+              </ProtectedRoute>
+            } 
+          />
+
+          <Route 
+            path="/admin/combo-offers" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <ComboOffersManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/promotions" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <PromotionsManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/banners" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <BannerManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/new-products" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <NewProductHighlighting />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/social-media" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <SocialMediaPostCreator />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/seo-manager" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <SEOManager />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/ai-marketing" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <AIMarketingDashboard />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/my-service-tickets" 
+            element={<MyServiceTickets />} 
+          />
+          <Route 
+            path="/admin/marketing-analytics" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <MarketingAnalyticsDashboard />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/customer-journey" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <CustomerJourneyTracker />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/settings" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <AdminSettings />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/lead-scraping" 
+            element={
+              <ProtectedRoute requiredRole={['admin']}>
+                <LeadScrapingDashboard />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/consultations" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager', 'sales']}>
+                <ConsultationManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/website-analytics" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager', 'sales']}>
+                <WebsiteAnalytics />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/blog" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager', 'marketing']}>
+                <BlogManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/tally-import" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager', 'accountant']}>
+                <TallyImport />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/fy-transition" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager', 'accountant']}>
+                <FYTransitionTools />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/roi-calculator" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager', 'accountant']}>
+                <ROICalculator />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/accounting" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'accountant', 'store_manager', 'cashier', 'purchase_manager', 'manager']}>
+                <AccountingDashboard />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/document-numbering" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'super_admin']}>
+                <DocumentNumberingSettings />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/quotations" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'accountant', 'store_manager', 'cashier']}>
+                <QuotationManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/hsn-codes" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'accountant', 'super_admin']}>
+                <HSNCodeManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/customer-pos" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'accountant', 'store_manager', 'cashier']}>
+                <CustomerPOManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/store/customer-pos" 
+            element={
+              <ProtectedRoute requiredRole={['store_manager', 'cashier', 'sales_executive']}>
+                <CustomerPOManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/sales-invoices" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'accountant', 'manager']}>
+                <SalesInvoiceManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/sales-orders" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'accountant', 'manager', 'store_manager']}>
+                <SalesOrderList />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/sales-orders/edit/:orderId" 
+            element={
+              <ProtectedRoute requiredRole={['super_admin', 'admin', 'accountant']}>
+                <EditSalesOrder />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/pending-receipts" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'accountant']}>
+                <PendingReceiptApproval />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/store-management" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'super_admin']}>
+                <StoreManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/data-management" 
+            element={
+              <ProtectedRoute requiredRole={['super_admin']}>
+                <AdminDataManagement />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/admin/export-center" 
+            element={
+              <ProtectedRoute requiredRole={['super_admin', 'admin', 'accountant']}>
+                <ExportCenter />
+              </ProtectedRoute>
+            } 
+          />
+          <Route path="/checkout" element={<Checkout />} />
+          <Route path="/payment-success" element={<PaymentSuccess />} />
+          <Route path="/payment-failed" element={<PaymentSuccess />} />
+          <Route path="/mock-payment-page" element={<MockPaymentPage />} />
+          
+          {/* Combo Detail Page */}
+          <Route 
+            path="/combos/:comboId" 
+            element={<ComboDetailPage />} 
+          />
+          
+          {/* Legal Pages */}
+          <Route path="/privacy-policy" element={<PrivacyPolicy />} />
+          <Route path="/terms-and-conditions" element={<TermsAndConditions />} />
+          <Route path="/return-policy" element={<ReturnPolicy />} />
+          <Route path="/shipping-policy" element={<ShippingPolicy />} />
+          
+          {/* Clean category URL: /washing-machine */}
+          <Route 
+            path="/:categoryName" 
+            element={
+              <CategoryPageWrapper />
+            } 
+          />
+          
+          {/* Clean product URL with brand: /washing-machine/bosch/wga254zpin-10kg-front-load-washing-machine */}
+          <Route 
+            path="/:category/:brand/:slug" 
+            element={<ProductDetailPage />} 
+          />
+          
+          {/* Clean product URL: /washing-machine/WAU28S90IN */}
+          <Route 
+            path="/:category/:modelNumber" 
+            element={<ProductDetailPage />} 
+          />
+          
+          {/* Legacy routes — keep for backward compatibility */}
+          <Route 
+            path="/category/:categoryName" 
+            element={
+              <CategoryPageWrapper />
+            } 
+          />
+          <Route 
+            path="/product/:productId" 
+            element={<ProductDetailPage />} 
+          />
+          <Route 
+            path="/product/:category/:slug" 
+            element={<ProductDetailPage />} 
+          />
+          
+          {/* Customer Dashboard */}
+          <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/my-account" element={<CustomerDashboard />} />
+          <Route path="/my-orders" element={<CustomerDashboard />} />
+          
+          {/* Multi-Store Routes */}
+          <Route path="/store/login" element={<StoreLogin />} />
+          <Route path="/store/dashboard" element={<StoreDashboard />} />
+          <Route path="/store/create-invoice" element={<StoreCreateOrder forcedDocumentType="invoice" />} />
+          <Route path="/store/create-order" element={<StoreCreateOrder forcedDocumentType="sales_order" />} />
+          <Route path="/store/edit-order/:orderId" element={<EditSalesOrder isStoreView={true} />} />
+          <Route path="/store/edit-invoice/:orderId" element={<EditSalesOrder isStoreView={true} returnPath="/store/invoices" />} />
+          <Route path="/store/orders" element={<StoreRouter />} />
+          <Route path="/store/pending-sos" element={<StoreRouter />} />
+          <Route path="/store/inventory" element={<StoreRouter />} />
+          <Route path="/store/transfers" element={<StoreRouter />} />
+          <Route path="/store/po-requests" element={<StoreRouter />} />
+          <Route path="/store/reports" element={<StoreRouter />} />
+          <Route path="/store/deliveries" element={<StoreRouter />} />
+          <Route path="/store/service" element={<StoreRouter />} />
+          <Route path="/store/invoices" element={<StoreRouter />} />
+          <Route path="/store/all-invoices" element={<StoreRouter />} />
+          <Route path="/store/quotations" element={<StoreRouter />} />
+          <Route path="/store/customers" element={<StoreRouter />} />
+          <Route path="/store/grn" element={<StoreRouter />} />
+          <Route path="/store/purchase-orders" element={<StoreRouter />} />
+          <Route path="/store/purchase-bills" element={<StoreRouter />} />
+          <Route path="/store/material-transfer" element={<StoreRouter />} />
+          <Route path="/store/payments" element={<StoreRouter />} />
+          
+          {/* Advanced Reports (Admin) */}
+          <Route 
+            path="/admin/advanced-reports" 
+            element={
+              <ProtectedRoute requiredRole={['admin', 'manager', 'accountant']}>
+                <AdvancedReports />
+              </ProtectedRoute>
+            } 
+          />
+        </Routes>
+              )}
+            </Suspense>
+        
+        {/* Neural AI Chat Widget - Available on all pages */}
+        <NeuralAIChatWidget />
+        </Router>
+      </CartProvider>
+      </AuthProvider>
+      </ToastProvider>
+    </HelmetProvider>
+  );
+};
+
+export default App;

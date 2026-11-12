@@ -1,0 +1,54 @@
+"""Shared brand/category normaliser. Unknown values are only whitespace-tidied, never rejected."""
+import re
+
+def _k(s):
+    return re.sub(r"\s+", " ", str(s or "")).strip().lower()
+
+def _tidy(s):
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+# Official brands (as shown in the site menu)
+BRANDS = ["Bosch", "Electrolux", "Haier", "Siemens"]
+_BRAND = {_k(b): b for b in BRANDS}
+_BRAND.update({
+    "bosch limited - powertools": "Bosch",
+    "electrolux india private limited": "Electrolux",
+    "haier appliances india pvt limited": "Haier",
+})
+
+# Official categories (exactly as in the site menu)
+CATEGORIES = [
+    "Washing Machine", "Refrigerator", "Gas Hob", "Induction Hob", "Dishwasher", "Sink", "Chimney", "Oven",
+    "Mixer Grinder", "Air Fryer", "Coffee Machine", "Detergent", "Powertools", "TV", "Clothes Dryer",
+    "Warmer Drawer", "AC - Air Conditioners", "Accessories", "Microwave", "Geysers", "Vacuum Cleaners",
+]
+_CAT = {_k(c): c for c in CATEGORIES}
+_CAT.update({
+    "ref": "Refrigerator", "refrigerators": "Refrigerator",
+    "w/m": "Washing Machine", "washing_machine": "Washing Machine", "washing machines": "Washing Machine",
+    "ac": "AC - Air Conditioners", "air conditioner": "AC - Air Conditioners",
+    "microwaves": "Microwave", "microwave oven": "Microwave",
+    "detergents": "Detergent", "power tools": "Powertools", "power_tools": "Powertools",
+    "dryer": "Clothes Dryer", "geyser": "Geysers",
+})
+
+def clean_brand(brand, name=""):
+    k = _k(brand)
+    if k in _BRAND:
+        return _BRAND[k]
+    if k.startswith("bsh household"):  # parent of Bosch and Siemens: decide from the product name
+        n = _k(name)
+        for b in ("siemens", "bosch"):
+            if b in n:
+                return b.title()
+    return _tidy(brand)
+
+def clean_category(category):
+    return _CAT.get(_k(category), _tidy(category))
+
+def normalize_product_fields(d):
+    if isinstance(d.get("brand"), str):
+        d["brand"] = clean_brand(d["brand"], d.get("name", ""))
+    if isinstance(d.get("category"), str):
+        d["category"] = clean_category(d["category"])
+    return d

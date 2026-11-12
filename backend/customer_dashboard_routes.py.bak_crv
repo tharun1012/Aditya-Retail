@@ -1,0 +1,1229 @@
+from fastapi import APIRouter, HTTPException, Depends
+from typing import Optional, List
+from datetime import datetime, timezone
+from database import get_db
+from pydantic import BaseModel
+from dateutil.relativedelta import relativedelta
+import uuid
+
+router = APIRouter(prefix="/customer", tags=["Customer Dashboard"])
+
+
+@router.post("/admin/backfill-customer-ids")
+async def backfill_orphan_orders(database = Depends(get_db)):
+    """One-time admin tool: link orphan orders (where customer_id is null/missing)
+    to user accounts by matching customer_details.email to users.email."""
+    try:
+        # Find orphan orders
+        orphan_filter = {
+            "$or": [
+                {"customer_id": None},
+                {"customer_id": {"$exists": False}},
+                {"customer_id": ""},
+            ]
+        }
+        orphans = await database.orders.find(orphan_filter, {"_id": 0, "id": 1, "order_number": 1, "customer_details": 1}).to_list(None)
+
+        linked_count = 0
+        unmatched = []
+
+        for o in orphans:
+            email = (o.get("customer_details") or {}).get("email")
+            if not email:
+                unmatched.append({"order_number": o.get("order_number"), "reason": "no email"})
+                continue
+            user = await database.users.find_one({"email": email}, {"_id": 0, "id": 1})
+            if not user:
+                unmatched.append({"order_number": o.get("order_number"), "email": email, "reason": "no matching user"})
+                continue
+            await database.orders.update_one(
+                {"id": o.get("id")},
+                {"$set": {"customer_id": user["id"], "updated_at": datetime.now(timezone.utc).isoformat()}}
+            )
+            linked_count += 1
+
+        return {
+            "status": "success",
+            "total_orphans_scanned": len(orphans),
+            "linked": linked_count,
+            "unmatched_count": len(unmatched),
+            "unmatched_sample": unmatched[:20]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ProfileUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+
+class AddressCreate(BaseModel):
+    label: str  # "Home", "Office", etc.
+    address: str
+    city: str
+    state: str
+    pincode: str
+    phone: str
+    is_default: bool = False
+
+@router.get("/profile")
+async def get_customer_profile(user_id: str, database = Depends(get_db)):
+    """Get customer profile details"""
+    try:
+        user = await database.users.find_one({"$or": [{"id": user_id}, {"user_id": user_id}]})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get order stats (match by customer_id OR by user's email for legacy orders)
+        user_email = user.get("email")
+        order_query = {"$or": [{"customer_id": user_id}]}
+        if user_email:
+            order_query["$or"].append({"customer_details.email": user_email})
+        orders = await database.orders.find(order_query, {"_id": 0}).to_list(None)
+        total_orders = len(orders)
+        total_spent = sum(order.get("total_amount", 0) for order in orders)
+        
+        # Get saved addresses
+        addresses = await database.customer_addresses.find({"user_id": user_id}).to_list(None)
+        for addr in addresses:
+            addr.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "profile": {
+                "id": user.get("id") or user.get("user_id") or user_id,
+                "email": user.get("email"),
+                "first_name": user.get("first_name", ""),
+                "last_name": user.get("last_name", ""),
+                "phone": user.get("phone", ""),
+                "address": user.get("address", ""),
+                "city": user.get("city", ""),
+                "state": user.get("state", ""),
+                "pincode": user.get("pincode", ""),
+                "created_at": user.get("created_at"),
+                "stats": {
+                    "total_orders": total_orders,
+                    "total_spent": total_spent
+                },
+                "saved_addresses": addresses
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/profile")
+async def update_customer_profile(user_id: str, profile: ProfileUpdate, database = Depends(get_db)):
+    """Update customer profile"""
+    try:
+        user = await database.users.find_one({"$or": [{"id": user_id}, {"user_id": user_id}]})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Build update dict with only provided fields
+        update_data = {k: v for k, v in profile.dict().items() if v is not None}
+        update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        
+        await database.users.update_one(
+            {"id": user_id},
+            {"$set": update_data}
+        )
+        
+        return {
+            "status": "success",
+            "message": "Profile updated successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/orders")
+async def get_customer_orders(
+    user_id: str,
+    status: Optional[str] = None,
+    page: int = 1,
+    limit: int = 10,
+    database = Depends(get_db)
+):
+    """Get all orders for a customer.
+
+    Matches by customer_id OR by the user's registered email (fallback for legacy orders
+    placed before customer_id linking was fixed)."""
+    try:
+        # Resolve user's email so we can also include orphan orders that were placed
+        # without a customer_id but with the user's email in customer_details.
+        user_doc = await database.users.find_one({"id": user_id}, {"_id": 0, "email": 1})
+        user_email = (user_doc or {}).get("email")
+
+        or_conditions = [{"customer_id": user_id}]
+        if user_email:
+            or_conditions.append({"customer_details.email": user_email})
+
+        query: dict = {"$or": or_conditions}
+        if status:
+            query["order_status"] = status
+
+        # Get total count
+        total = await database.orders.count_documents(query)
+
+        # Fetch orders with pagination
+        skip = (page - 1) * limit
+        orders_cursor = database.orders.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
+        orders = await orders_cursor.to_list(None)
+
+        return {
+            "status": "success",
+            "orders": orders,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit if total > 0 else 0
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/orders/{order_id}")
+async def get_customer_order_detail(order_id: str, user_id: str, database = Depends(get_db)):
+    """Get detailed order information"""
+    try:
+        order = await database.orders.find_one({
+            "id": order_id,
+            "customer_id": user_id
+        })
+        
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        order.pop("_id", None)
+        
+        # Get shipment info if exists
+        shipment = None
+        if order.get("shipment_id"):
+            shipment = await database.shipments.find_one({"shipment_id": order["shipment_id"]})
+            if shipment:
+                shipment.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "order": order,
+            "shipment": shipment
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/orders/{order_id}/reorder")
+async def reorder(order_id: str, user_id: str, database = Depends(get_db)):
+    """Add items from a previous order to cart"""
+    try:
+        # Get original order
+        order = await database.orders.find_one({
+            "id": order_id,
+            "customer_id": user_id
+        })
+        
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Create or get cart
+        session_id = str(uuid.uuid4())
+        cart = await database.carts.find_one({"user_id": user_id})
+        
+        if not cart:
+            cart = {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "session_id": session_id,
+                "items": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            await database.carts.insert_one(cart)
+        
+        # Add items from order to cart
+        items_added = 0
+        items_unavailable = []
+        
+        for item in order.get("items", []):
+            product = await database.products.find_one({"id": item["product_id"]})
+            if product and product.get("stock", 0) > 0:
+                # Check if already in cart
+                existing_item = next(
+                    (i for i in cart.get("items", []) if i["product_id"] == item["product_id"]),
+                    None
+                )
+                
+                if existing_item:
+                    existing_item["quantity"] += item.get("quantity", 1)
+                else:
+                    cart["items"].append({
+                        "product_id": item["product_id"],
+                        "quantity": min(item.get("quantity", 1), product.get("stock", 1)),
+                        "added_at": datetime.now(timezone.utc).isoformat()
+                    })
+                items_added += 1
+            else:
+                items_unavailable.append(item.get("product_name", "Unknown"))
+        
+        # Update cart
+        await database.carts.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "items": cart["items"],
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+            }
+        )
+        
+        return {
+            "status": "success",
+            "message": f"{items_added} items added to cart",
+            "items_added": items_added,
+            "items_unavailable": items_unavailable,
+            "session_id": cart.get("session_id", session_id)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/addresses")
+async def add_address(user_id: str, address: AddressCreate, database = Depends(get_db)):
+    """Add a new saved address"""
+    try:
+        # If setting as default, unset other defaults
+        if address.is_default:
+            await database.customer_addresses.update_many(
+                {"user_id": user_id},
+                {"$set": {"is_default": False}}
+            )
+        
+        address_data = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            **address.dict(),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await database.customer_addresses.insert_one(address_data)
+        
+        return {
+            "status": "success",
+            "message": "Address added successfully",
+            "address_id": address_data["id"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/addresses/{address_id}")
+async def delete_address(address_id: str, user_id: str, database = Depends(get_db)):
+    """Delete a saved address"""
+    try:
+        result = await database.customer_addresses.delete_one({
+            "id": address_id,
+            "user_id": user_id
+        })
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Address not found")
+        
+        return {
+            "status": "success",
+            "message": "Address deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/wishlist")
+async def get_wishlist(user_id: str, database = Depends(get_db)):
+    """Get customer's wishlist"""
+    try:
+        wishlist = await database.wishlists.find_one({"user_id": user_id})
+        
+        if not wishlist:
+            return {
+                "status": "success",
+                "items": []
+            }
+        
+        # Get product details for wishlist items
+        product_ids = wishlist.get("product_ids", [])
+        products = await database.products.find({"id": {"$in": product_ids}}).to_list(None)
+        
+        for product in products:
+            product.pop("_id", None)
+        
+        return {
+            "status": "success",
+            "items": products
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/wishlist/{product_id}")
+async def add_to_wishlist(product_id: str, user_id: str, database = Depends(get_db)):
+    """Add product to wishlist"""
+    try:
+        # Check product exists
+        product = await database.products.find_one({"id": product_id})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        # Add to wishlist
+        await database.wishlists.update_one(
+            {"user_id": user_id},
+            {
+                "$addToSet": {"product_ids": product_id},
+                "$set": {"updated_at": datetime.now(timezone.utc).isoformat()},
+                "$setOnInsert": {
+                    "id": str(uuid.uuid4()),
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+            },
+            upsert=True
+        )
+        
+        return {
+            "status": "success",
+            "message": "Added to wishlist"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/wishlist/{product_id}")
+async def remove_from_wishlist(product_id: str, user_id: str, database = Depends(get_db)):
+    """Remove product from wishlist"""
+    try:
+        await database.wishlists.update_one(
+            {"user_id": user_id},
+            {"$pull": {"product_ids": product_id}}
+        )
+        
+        return {
+            "status": "success",
+            "message": "Removed from wishlist"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ INVOICE PDF GENERATION ============
+
+from fastapi.responses import StreamingResponse
+import io
+
+@router.get("/orders/{order_id}/invoice")
+async def download_invoice_pdf(order_id: str, user_id: str, database = Depends(get_db)):
+    """
+    Generate and download invoice PDF for an order
+    """
+    try:
+        # Get order
+        order = await database.orders.find_one({
+            "$or": [
+                {"id": order_id, "customer_id": user_id},
+                {"order_id": order_id, "customer_id": user_id},
+                {"order_number": order_id}
+            ]
+        })
+        
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Generate PDF using reportlab
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib import colors
+        from reportlab.lib.units import inch, cm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+        
+        # Create PDF buffer
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, 
+                               rightMargin=1*cm, leftMargin=1*cm,
+                               topMargin=1*cm, bottomMargin=1*cm)
+        
+        # Styles
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle('Title', parent=styles['Heading1'], 
+                                     fontSize=20, alignment=TA_CENTER, spaceAfter=12)
+        header_style = ParagraphStyle('Header', parent=styles['Heading2'], 
+                                      fontSize=12, alignment=TA_LEFT, spaceAfter=6)
+        normal_style = ParagraphStyle('Normal', parent=styles['Normal'], 
+                                      fontSize=10, alignment=TA_LEFT)
+        right_style = ParagraphStyle('Right', parent=styles['Normal'], 
+                                     fontSize=10, alignment=TA_RIGHT)
+        
+        elements = []
+        
+        # Company Header
+        elements.append(Paragraph("TAX INVOICE", title_style))
+        elements.append(Spacer(1, 0.3*cm))
+        
+        # Invoice Details Table
+        order_number = order.get('order_number') or order.get('id', 'N/A')
+        created_at = order.get('created_at')
+        if isinstance(created_at, datetime):
+            invoice_date = created_at.strftime('%d-%m-%Y')
+        elif isinstance(created_at, str):
+            try:
+                from dateutil import parser
+                invoice_date = parser.parse(created_at).strftime('%d-%m-%Y')
+            except Exception:
+                invoice_date = created_at[:10] if len(created_at) >= 10 else 'N/A'
+        else:
+            invoice_date = 'N/A'
+        
+        invoice_info = [
+            ['Invoice No:', order_number, 'Invoice Date:', invoice_date],
+            ['Payment:', order.get('payment_method', 'N/A').upper(), 'Status:', order.get('payment_status', 'N/A').upper()],
+        ]
+        
+        info_table = Table(invoice_info, colWidths=[2.5*cm, 6*cm, 2.5*cm, 6*cm])
+        info_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        elements.append(info_table)
+        elements.append(Spacer(1, 0.5*cm))
+        
+        # Bill To / Ship To
+        customer_name = order.get('customer_name') or order.get('customer_details', {}).get('name', 'N/A')
+        customer_email = order.get('customer_email') or order.get('customer_details', {}).get('email', 'N/A')
+        customer_phone = order.get('customer_phone') or order.get('customer_details', {}).get('phone', 'N/A')
+        
+        shipping = order.get('shipping_address') or order.get('billing_address') or {}
+        shipping_addr = shipping.get('address') or shipping.get('address_line1') or 'N/A'
+        shipping_city = shipping.get('city', '')
+        shipping_state = shipping.get('state', '')
+        shipping_pincode = shipping.get('pincode', '')
+        
+        address_info = [
+            ['BILL TO:', '', 'SHIP TO:', ''],
+            [customer_name, '', customer_name, ''],
+            [customer_email, '', shipping_addr, ''],
+            [customer_phone, '', f"{shipping_city} {shipping_state} {shipping_pincode}".strip(), ''],
+        ]
+        
+        addr_table = Table(address_info, colWidths=[8.5*cm, 0.5*cm, 8.5*cm, 0.5*cm])
+        addr_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (2, 0), (2, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(addr_table)
+        elements.append(Spacer(1, 0.5*cm))
+        
+        # Items Table
+        items_header = ['#', 'Product', 'HSN', 'Qty', 'Price', 'Tax', 'Total']
+        items_data = [items_header]
+        
+        subtotal = 0
+        total_tax = 0
+        
+        for idx, item in enumerate(order.get('items', []), 1):
+            name = item.get('product_name') or item.get('name', 'Item')
+            hsn = item.get('hsn_code', 'N/A')
+            qty = item.get('quantity', 1)
+            price = float(item.get('price', 0))
+            tax_rate = float(item.get('tax_rate', 18))
+            tax_amt = float(item.get('tax', price * qty * tax_rate / 100))
+            total = float(item.get('total', price * qty + tax_amt))
+            
+            items_data.append([
+                str(idx),
+                name[:40] + '...' if len(name) > 40 else name,
+                hsn[:8] if hsn else 'N/A',
+                str(qty),
+                f"₹{price:,.0f}",
+                f"₹{tax_amt:,.0f}",
+                f"₹{total:,.0f}"
+            ])
+            subtotal += price * qty
+            total_tax += tax_amt
+        
+        items_table = Table(items_data, colWidths=[0.8*cm, 7*cm, 2*cm, 1.5*cm, 2.5*cm, 2*cm, 2.5*cm])
+        items_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('ALIGN', (3, 1), (-1, -1), 'RIGHT'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ]))
+        elements.append(items_table)
+        elements.append(Spacer(1, 0.5*cm))
+        
+        # Totals
+        grand_total = float(order.get('total_amount', subtotal + total_tax))
+        shipping_charges = float(order.get('shipping_charges', 0))
+        discount = float(order.get('discount_amount', 0))
+        
+        totals_data = [
+            ['', '', '', '', '', 'Subtotal:', f"₹{subtotal:,.0f}"],
+            ['', '', '', '', '', 'Tax:', f"₹{total_tax:,.0f}"],
+            ['', '', '', '', '', 'Shipping:', f"₹{shipping_charges:,.0f}"],
+        ]
+        if discount > 0:
+            totals_data.append(['', '', '', '', '', 'Discount:', f"-₹{discount:,.0f}"])
+        totals_data.append(['', '', '', '', '', 'GRAND TOTAL:', f"₹{grand_total:,.0f}"])
+        
+        totals_table = Table(totals_data, colWidths=[0.8*cm, 7*cm, 2*cm, 1.5*cm, 2.5*cm, 2*cm, 2.5*cm])
+        totals_table.setStyle(TableStyle([
+            ('FONTNAME', (5, 0), (6, -2), 'Helvetica'),
+            ('FONTNAME', (5, -1), (6, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('ALIGN', (5, 0), (6, -1), 'RIGHT'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(totals_table)
+        elements.append(Spacer(1, 1*cm))
+        
+        # Footer
+        elements.append(Paragraph("Thank you for your business!", ParagraphStyle('Footer', parent=styles['Normal'], fontSize=12, alignment=TA_CENTER)))
+        elements.append(Spacer(1, 0.3*cm))
+        elements.append(Paragraph("This is a computer-generated invoice and does not require a signature.", ParagraphStyle('FooterSmall', parent=styles['Normal'], fontSize=8, alignment=TA_CENTER, textColor=colors.grey)))
+        
+        # Build PDF
+        doc.build(elements)
+        
+        # Return PDF
+        buffer.seek(0)
+        filename = f"Invoice_{order_number}.pdf"
+        
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except ImportError as e:
+        # reportlab not installed
+        raise HTTPException(status_code=500, detail="PDF generation library not available. Please install reportlab.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating invoice: {str(e)}")
+
+
+# ============================================
+# MY PRODUCTS & WARRANTY TRACKER
+# ============================================
+
+class ProductRegistration(BaseModel):
+    invoice_number: str
+    serial_number: Optional[str] = None
+    product_name: Optional[str] = None
+    purchase_date: Optional[str] = None
+    notes: Optional[str] = None
+
+@router.post("/my-products/register")
+async def register_product(user_id: str, registration: ProductRegistration, database = Depends(get_db)):
+    """Register a product for warranty tracking using invoice or serial number"""
+    try:
+        # Validate user exists
+        user = await database.users.find_one({"$or": [{"id": user_id}, {"user_id": user_id}]})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Try to find the invoice
+        invoice = await database.offline_invoices.find_one({
+            "invoice_number": registration.invoice_number
+        })
+        
+        if not invoice:
+            # Also try orders collection
+            invoice = await database.orders.find_one({
+                "order_number": registration.invoice_number
+            })
+        
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found. Please check the invoice number.")
+        
+        # Verify customer ownership via email or phone
+        customer = invoice.get("customer", {})
+        user_email = user.get("email", "").lower()
+        user_phone = user.get("phone", "")
+        
+        customer_email = (customer.get("email") or "").lower()
+        customer_phone = customer.get("phone", "")
+        
+        ownership_verified = False
+        if user_email and customer_email and user_email == customer_email:
+            ownership_verified = True
+        elif user_phone and customer_phone and user_phone == customer_phone:
+            ownership_verified = True
+        
+        if not ownership_verified:
+            raise HTTPException(status_code=403, detail="This invoice doesn't appear to belong to your account. Please verify your email/phone matches the invoice.")
+        
+        # Register products from the invoice
+        registered_products = []
+        items = invoice.get("items", [])
+        
+        for item in items:
+            # Check if product is already registered
+            existing = await database.registered_products.find_one({
+                "user_id": user_id,
+                "invoice_number": registration.invoice_number,
+                "product_name": item.get("product_name")
+            })
+            
+            if existing:
+                registered_products.append({
+                    "product_name": item.get("product_name"),
+                    "status": "already_registered"
+                })
+                continue
+            
+            # Calculate warranty dates
+            purchase_date = invoice.get("created_at", datetime.now(timezone.utc).isoformat())
+            if isinstance(purchase_date, str):
+                try:
+                    purchase_date_obj = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
+                except Exception:
+                    purchase_date_obj = datetime.now(timezone.utc)
+            else:
+                purchase_date_obj = purchase_date
+            
+            # Default warranty: 12 months
+            warranty_months = 12
+            
+            # Check serial inventory for warranty info
+            serial_numbers = item.get("serial_numbers", [])
+            if serial_numbers:
+                for sn in serial_numbers:
+                    serial_info = await database.serial_inventory.find_one({"serial_number": sn})
+                    if serial_info and serial_info.get("warranty_months"):
+                        warranty_months = serial_info.get("warranty_months")
+                        break
+            
+            warranty_end_date = purchase_date_obj + relativedelta(months=warranty_months)
+            
+            # Create registration record
+            product_registration = {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "invoice_number": registration.invoice_number,
+                "invoice_id": invoice.get("id"),
+                "product_id": item.get("product_id"),
+                "product_name": item.get("product_name"),
+                "hsn_code": item.get("hsn_code"),
+                "serial_numbers": serial_numbers,
+                "purchase_date": purchase_date_obj.isoformat(),
+                "warranty_start_date": purchase_date_obj.isoformat(),
+                "warranty_end_date": warranty_end_date.isoformat(),
+                "warranty_months": warranty_months,
+                "quantity": item.get("quantity", 1),
+                "rate": item.get("rate", 0),
+                "store_code": invoice.get("store_code"),
+                "store_name": invoice.get("store_details", {}).get("name"),
+                "notes": registration.notes,
+                "status": "active",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+            await database.registered_products.insert_one(product_registration)
+            registered_products.append({
+                "product_name": item.get("product_name"),
+                "warranty_end_date": warranty_end_date.strftime("%Y-%m-%d"),
+                "status": "registered"
+            })
+        
+        return {
+            "status": "success",
+            "message": f"Registered {len([p for p in registered_products if p['status'] == 'registered'])} product(s)",
+            "registered_products": registered_products
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/my-products")
+async def get_my_products(user_id: str, database = Depends(get_db)):
+    """Get all registered products for warranty tracking"""
+    try:
+        products = await database.registered_products.find(
+            {"user_id": user_id, "status": {"$ne": "removed"}},
+            {"_id": 0}
+        ).sort("created_at", -1).to_list(None)
+        
+        # Calculate warranty status for each product
+        now = datetime.now(timezone.utc)
+        for product in products:
+            warranty_end = product.get("warranty_end_date")
+            if warranty_end:
+                try:
+                    warranty_end_date = datetime.fromisoformat(warranty_end.replace('Z', '+00:00'))
+                    days_remaining = (warranty_end_date - now).days
+                    if days_remaining < 0:
+                        product["warranty_status"] = "expired"
+                        product["warranty_days_remaining"] = 0
+                    elif days_remaining < 30:
+                        product["warranty_status"] = "expiring_soon"
+                        product["warranty_days_remaining"] = days_remaining
+                    else:
+                        product["warranty_status"] = "active"
+                        product["warranty_days_remaining"] = days_remaining
+                except Exception:
+                    product["warranty_status"] = "unknown"
+        
+        return {
+            "status": "success",
+            "products": products,
+            "total": len(products)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# SMART REMINDERS & QUICK ORDERS (CONSUMABLES)
+# ============================================
+
+@router.get("/consumables/suggestions")
+async def get_consumable_suggestions(user_id: str, database = Depends(get_db)):
+    """Get smart consumable suggestions based on registered products"""
+    try:
+        # Get user's registered products
+        products = await database.registered_products.find(
+            {"user_id": user_id, "status": "active"},
+            {"_id": 0}
+        ).to_list(None)
+        
+        suggestions = []
+        
+        # Define consumable mappings for common appliances
+        consumable_mappings = {
+            "washing machine": [
+                {"name": "Washing Machine Descaler", "frequency_days": 90, "category": "cleaning"},
+                {"name": "Liquid Detergent", "frequency_days": 30, "category": "detergent"},
+                {"name": "Fabric Softener", "frequency_days": 45, "category": "detergent"}
+            ],
+            "dishwasher": [
+                {"name": "Dishwasher Salt", "frequency_days": 60, "category": "salt"},
+                {"name": "Dishwasher Rinse Aid", "frequency_days": 45, "category": "cleaning"},
+                {"name": "Dishwasher Detergent Tablets", "frequency_days": 30, "category": "detergent"},
+                {"name": "Dishwasher Cleaner", "frequency_days": 90, "category": "cleaning"}
+            ],
+            "water purifier": [
+                {"name": "RO Filter Cartridge", "frequency_days": 180, "category": "filter"},
+                {"name": "Sediment Filter", "frequency_days": 90, "category": "filter"},
+                {"name": "Carbon Filter", "frequency_days": 180, "category": "filter"}
+            ],
+            "air conditioner": [
+                {"name": "AC Filter", "frequency_days": 90, "category": "filter"},
+                {"name": "AC Coil Cleaner", "frequency_days": 180, "category": "cleaning"}
+            ],
+            "refrigerator": [
+                {"name": "Refrigerator Deodorizer", "frequency_days": 90, "category": "cleaning"},
+                {"name": "Refrigerator Cleaner", "frequency_days": 60, "category": "cleaning"}
+            ],
+            "chimney": [
+                {"name": "Chimney Filter", "frequency_days": 90, "category": "filter"},
+                {"name": "Chimney Cleaner", "frequency_days": 60, "category": "cleaning"}
+            ],
+            "vacuum cleaner": [
+                {"name": "Vacuum Cleaner Bags", "frequency_days": 60, "category": "bags"},
+                {"name": "HEPA Filter", "frequency_days": 180, "category": "filter"}
+            ]
+        }
+        
+        for product in products:
+            product_name = (product.get("product_name") or "").lower()
+            purchase_date = product.get("purchase_date")
+            
+            # Match product to consumables
+            for appliance, consumables in consumable_mappings.items():
+                if appliance in product_name:
+                    for consumable in consumables:
+                        # Calculate next reminder date
+                        if purchase_date:
+                            try:
+                                purchase_date_obj = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
+                                days_since_purchase = (datetime.now(timezone.utc) - purchase_date_obj).days
+                                cycles_passed = days_since_purchase // consumable["frequency_days"]
+                                next_reminder = purchase_date_obj + relativedelta(days=(cycles_passed + 1) * consumable["frequency_days"])
+                                days_until = (next_reminder - datetime.now(timezone.utc)).days
+                            except Exception:
+                                days_until = consumable["frequency_days"]
+                                next_reminder = datetime.now(timezone.utc) + relativedelta(days=consumable["frequency_days"])
+                        else:
+                            days_until = consumable["frequency_days"]
+                            next_reminder = datetime.now(timezone.utc) + relativedelta(days=consumable["frequency_days"])
+                        
+                        suggestions.append({
+                            "product_name": product.get("product_name"),
+                            "product_id": product.get("product_id"),
+                            "consumable_name": consumable["name"],
+                            "category": consumable["category"],
+                            "frequency_days": consumable["frequency_days"],
+                            "next_reminder_date": next_reminder.strftime("%Y-%m-%d"),
+                            "days_until_needed": max(0, days_until),
+                            "urgency": "high" if days_until <= 7 else "medium" if days_until <= 30 else "low"
+                        })
+        
+        # Sort by urgency
+        urgency_order = {"high": 0, "medium": 1, "low": 2}
+        suggestions.sort(key=lambda x: (urgency_order.get(x["urgency"], 3), x["days_until_needed"]))
+        
+        return {
+            "status": "success",
+            "suggestions": suggestions,
+            "total": len(suggestions)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class QuickOrderRequest(BaseModel):
+    items: List[dict]  # [{product_name, quantity}]
+    notes: Optional[str] = None
+
+
+@router.post("/consumables/quick-order")
+async def create_quick_order(user_id: str, order_request: QuickOrderRequest, database = Depends(get_db)):
+    """Create a quick order for consumables"""
+    try:
+        user = await database.users.find_one({"$or": [{"id": user_id}, {"user_id": user_id}]})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Create a consumable order request
+        order_id = str(uuid.uuid4())
+        order = {
+            "id": order_id,
+            "user_id": user_id,
+            "customer_name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get("name") or user.get("email"),
+            "customer_email": user.get("email"),
+            "customer_phone": user.get("phone"),
+            "order_type": "consumable_request",
+            "items": order_request.items,
+            "notes": order_request.notes,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await database.consumable_orders.insert_one(order)
+        
+        # Send notification to store
+        notification = {
+            "id": str(uuid.uuid4()),
+            "type": "consumable_order",
+            "title": "New Consumable Order Request",
+            "message": f"Customer {order['customer_name']} requested {len(order_request.items)} consumable item(s)",
+            "recipient_type": "store",
+            "data": {
+                "order_id": order_id,
+                "customer_name": order["customer_name"],
+                "customer_phone": order.get("customer_phone"),
+                "items": order_request.items
+            },
+            "is_read": False,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await database.notifications.insert_one(notification)
+        
+        return {
+            "status": "success",
+            "message": "Your order request has been submitted. Our team will contact you shortly.",
+            "order_id": order_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# AI SERVICE REQUEST
+# ============================================
+
+class ServiceRequest(BaseModel):
+    registered_product_id: Optional[str] = None
+    product_name: str
+    issue_description: str
+    issue_type: str = "general"  # general, warranty, installation, repair
+    preferred_date: Optional[str] = None
+    preferred_time_slot: Optional[str] = None  # morning, afternoon, evening
+    contact_phone: Optional[str] = None
+
+
+@router.post("/service-request")
+async def create_service_request(user_id: str, request: ServiceRequest, database = Depends(get_db)):
+    """Create a service request from customer dashboard"""
+    try:
+        user = await database.users.find_one({"$or": [{"id": user_id}, {"user_id": user_id}]})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get registered product details if provided
+        registered_product = None
+        if request.registered_product_id:
+            registered_product = await database.registered_products.find_one({
+                "id": request.registered_product_id,
+                "user_id": user_id
+            })
+        
+        # Generate ticket number
+        today = datetime.now(timezone.utc)
+        ticket_count = await database.service_tickets.count_documents({
+            "created_at": {
+                "$gte": today.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            }
+        })
+        ticket_number = f"SRV-{today.strftime('%Y%m%d')}-{ticket_count + 1:04d}"
+        
+        # Determine priority based on issue type and warranty status
+        priority = "normal"
+        if registered_product:
+            warranty_status = registered_product.get("warranty_status")
+            if warranty_status == "expiring_soon":
+                priority = "high"
+            elif request.issue_type == "warranty":
+                priority = "high"
+        
+        service_ticket = {
+            "id": str(uuid.uuid4()),
+            "ticket_number": ticket_number,
+            "user_id": user_id,
+            "customer_name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get("name") or user.get("email"),
+            "customer_email": user.get("email"),
+            "customer_phone": request.contact_phone or user.get("phone"),
+            "registered_product_id": request.registered_product_id,
+            "product_name": request.product_name,
+            "serial_numbers": registered_product.get("serial_numbers") if registered_product else [],
+            "invoice_number": registered_product.get("invoice_number") if registered_product else None,
+            "issue_description": request.issue_description,
+            "issue_type": request.issue_type,
+            "preferred_date": request.preferred_date,
+            "preferred_time_slot": request.preferred_time_slot,
+            "priority": priority,
+            "status": "open",
+            "assigned_technician": None,
+            "resolution_notes": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await database.service_tickets.insert_one(service_ticket)
+        try:
+            from service_mail import send_company_mail
+            await send_company_mail(database, service_ticket, registered_product, user)
+        except Exception as company_mail_error:
+            print(f"Warning: company service mail failed: {company_mail_error}")
+
+        
+        # Send confirmation email
+        try:
+            from email_notification_service import email_notification_service
+            await email_notification_service.send_service_ticket_confirmation(
+                customer_email=user.get("email"),
+                customer_name=service_ticket["customer_name"],
+                ticket_number=ticket_number,
+                issue_description=request.issue_description,
+                product_name=request.product_name,
+                brand="",
+                priority=priority.capitalize()
+            )
+        except Exception as email_error:
+            print(f"Warning: Failed to send service confirmation email: {email_error}")
+        
+        return {
+            "status": "success",
+            "message": "Service request submitted successfully",
+            "ticket_number": ticket_number,
+            "ticket_id": service_ticket["id"],
+            "priority": priority
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/service-requests")
+async def get_service_requests(user_id: str, database = Depends(get_db)):
+    """Get all service requests for a customer"""
+    try:
+        tickets = await database.service_tickets.find(
+            {"user_id": user_id},
+            {"_id": 0}
+        ).sort("created_at", -1).to_list(None)
+        
+        return {
+            "status": "success",
+            "tickets": tickets,
+            "total": len(tickets)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# MY INVOICES
+# ============================================
+
+@router.get("/my-invoices")
+async def get_my_invoices(
+    user_id: str,
+    page: int = 1,
+    limit: int = 20,
+    database = Depends(get_db)
+):
+    """Get all invoices associated with the customer"""
+    try:
+        user = await database.users.find_one({"$or": [{"id": user_id}, {"user_id": user_id}]})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_email = (user.get("email") or "").lower()
+        user_phone = user.get("phone", "")
+        
+        # Query invoices by customer email or phone
+        query = {
+            "document_type": "invoice",
+            "$or": []
+        }
+        
+        if user_email:
+            query["$or"].append({"customer.email": {"$regex": f"^{user_email}$", "$options": "i"}})
+        if user_phone:
+            query["$or"].append({"customer.phone": user_phone})
+        
+        if not query["$or"]:
+            return {
+                "status": "success",
+                "invoices": [],
+                "total": 0,
+                "page": page,
+                "pages": 0
+            }
+        
+        skip = (page - 1) * limit
+        total = await database.offline_invoices.count_documents(query)
+        
+        invoices = await database.offline_invoices.find(
+            query,
+            {
+                "_id": 0,
+                "id": 1,
+                "invoice_number": 1,
+                "total_amount": 1,
+                "status": 1,
+                "payment_status": 1,
+                "payment_mode": 1,
+                "items": 1,
+                "store_details": 1,
+                "created_at": 1,
+                "delivery_assigned_at": 1,
+                "delivered_at": 1
+            }
+        ).sort("created_at", -1).skip(skip).limit(limit).to_list(None)
+        
+        # Simplify items for display
+        for inv in invoices:
+            inv["items_summary"] = [
+                {"name": item.get("product_name"), "qty": item.get("quantity")}
+                for item in inv.get("items", [])[:3]
+            ]
+            inv["items_count"] = len(inv.get("items", []))
+            if inv["items_count"] > 3:
+                inv["items_summary"].append({"name": f"+{inv['items_count'] - 3} more", "qty": ""})
+        
+        return {
+            "status": "success",
+            "invoices": invoices,
+            "total": total,
+            "page": page,
+            "pages": (total + limit - 1) // limit
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/my-invoices/{invoice_id}/download")
+async def download_my_invoice(invoice_id: str, user_id: str, database = Depends(get_db)):
+    """Download invoice PDF"""
+    from fastapi.responses import StreamingResponse
+    from invoice_pdf_generator import generate_invoice_pdf
+    from io import BytesIO
+    
+    try:
+        user = await database.users.find_one({"$or": [{"id": user_id}, {"user_id": user_id}]})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_email = (user.get("email") or "").lower()
+        user_phone = user.get("phone", "")
+        
+        # Get the invoice
+        invoice = await database.offline_invoices.find_one({"id": invoice_id})
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        
+        # Verify ownership
+        customer = invoice.get("customer", {})
+        customer_email = (customer.get("email") or "").lower()
+        customer_phone = customer.get("phone", "")
+        
+        ownership_verified = False
+        if user_email and customer_email and user_email == customer_email:
+            ownership_verified = True
+        elif user_phone and customer_phone and user_phone == customer_phone:
+            ownership_verified = True
+        
+        if not ownership_verified:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Remove MongoDB _id
+        invoice.pop("_id", None)
+        
+        # Generate PDF
+        pdf_bytes = generate_invoice_pdf(invoice, "offline")
+        
+        buffer = BytesIO(pdf_bytes)
+        filename = f"{invoice.get('invoice_number', 'Invoice')}.pdf"
+        
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,195 @@
+BOSCH WASHING MACHINE ERROR CODES - TROUBLESHOOTING GUIDE
+
+Model: WAJ2846IIN, WAK2406IIN, WAT2846IIN
+Series: Bosch Serie 4 & Serie 6 Front Load Washing Machines
+
+===========================================
+COMMON ERROR CODES AND SOLUTIONS
+===========================================
+
+ERROR CODE: E18
+Description: Drainage Problem - Water is not draining from the machine
+Possible Causes:
+1. Blocked drain hose
+2. Clogged drain filter
+3. Faulty drain pump
+4. Kinked drainage pipe
+
+TROUBLESHOOTING STEPS:
+Step 1: Check the drain hose
+- Ensure the drain hose is not kinked or bent
+- Verify the hose is positioned correctly (not more than 1 meter high)
+- Check for blockages inside the hose
+
+Step 2: Clean the drain filter
+- Open the service flap at the bottom front of the machine
+- Place a shallow container underneath
+- Turn the drain filter counter-clockwise to remove
+- Clean any debris, lint, or foreign objects
+- Re-install the filter and close the flap
+
+Step 3: Inspect the drain pump
+- If steps 1-2 don't resolve the issue, the drain pump may be faulty
+- Listen for unusual noises from the pump area
+- Contact authorized Bosch service center
+
+Step 4: Check drainage pipe connection
+- Ensure the sink/drain pipe is not clogged
+- Remove any blockages from the connection point
+
+===========================================
+
+ERROR CODE: E17
+Description: Water Inlet Problem - Water is not filling properly
+Possible Causes:
+1. Water tap is closed or water pressure is too low
+2. Inlet hose is kinked or blocked
+3. Inlet filter is clogged
+4. Faulty inlet valve
+
+TROUBLESHOOTING STEPS:
+Step 1: Check water supply
+- Ensure the water tap is fully open
+- Verify adequate water pressure (minimum 1 bar, maximum 10 bar)
+
+Step 2: Inspect inlet hose
+- Check for kinks or bends in the hose
+- Ensure hose connections are tight
+
+Step 3: Clean inlet filter
+- Turn off water supply
+- Disconnect inlet hose from the machine
+- Remove and clean the filter mesh at the inlet valve
+- Reconnect hose and turn on water supply
+
+Step 4: Test inlet valve
+- If problem persists, inlet valve may be faulty
+- Contact authorized service center
+
+===========================================
+
+ERROR CODE: E02
+Description: Motor Problem
+Possible Causes:
+1. Overloaded drum
+2. Unbalanced load
+3. Motor malfunction
+
+TROUBLESHOOTING STEPS:
+Step 1: Check load size
+- Remove some items if drum is overloaded
+- Maximum load: 8kg for Serie 6, 6kg for Serie 4
+
+Step 2: Redistribute clothes
+- Open door and rearrange clothes evenly
+- Ensure heavy items are mixed with lighter ones
+
+Step 3: Reset machine
+- Turn off machine
+- Wait 30 seconds
+- Turn back on and restart cycle
+
+Step 4: Contact service
+- If error persists, motor may need inspection
+- Call Bosch service center
+
+===========================================
+
+ERROR CODE: E04
+Description: Unbalanced Load Detection
+Solution:
+- Open the door and redistribute the laundry evenly
+- Ensure the machine is level (use spirit level)
+- Adjust machine feet if necessary
+- Don't wash single heavy items alone (add towels to balance)
+
+===========================================
+
+ERROR CODE: E23
+Description: Water in Base Tray (Leak Detection)
+Possible Causes:
+1. Leak in inlet/drain hose
+2. Damaged door seal
+3. Loose hose connections
+
+TROUBLESHOOTING STEPS:
+Step 1: Turn off water supply immediately
+Step 2: Unplug the machine
+Step 3: Check all hose connections for leaks
+Step 4: Inspect door seal for damage
+Step 5: Contact service center - DO NOT use machine until repaired
+
+===========================================
+
+GENERAL MAINTENANCE TIPS:
+
+1. CLEAN DRAIN FILTER MONTHLY
+   - Prevents E18 errors
+   - Improves drainage performance
+   - Extends pump life
+
+2. CHECK INLET FILTER QUARTERLY
+   - Prevents E17 errors
+   - Maintains water flow
+   - Protects inlet valve
+
+3. CLEAN DETERGENT DRAWER REGULARLY
+   - Remove and rinse under running water
+   - Prevents detergent buildup
+   - Improves wash quality
+
+4. WIPE DOOR SEAL AFTER EACH WASH
+   - Prevents mold and odor
+   - Extends seal life
+   - Maintains hygiene
+
+5. RUN TUB CLEAN CYCLE MONTHLY
+   - Use Bosch Washing Machine Cleaner
+   - Run at 90°C empty cycle
+   - Removes detergent residue and bacteria
+
+===========================================
+
+SPECIFICATIONS:
+
+BOSCH WAJ2846IIN (Serie 6):
+- Capacity: 8 kg
+- Spin Speed: 1200 RPM
+- Energy Rating: 5 Star
+- Features: VarioDrum, EcoSilence Drive, SpeedPerfect, AllergyPlus
+- Dimensions: 848 x 598 x 590 mm (H x W x D)
+
+BOSCH WAK2406IIN (Serie 4):
+- Capacity: 6 kg
+- Spin Speed: 1000 RPM
+- Energy Rating: 5 Star
+- Features: VarioDrum, ActiveWater Plus
+- Dimensions: 848 x 598 x 550 mm (H x W x D)
+
+===========================================
+
+WARRANTY INFORMATION:
+
+Standard Warranty: 2 years on product, 10 years on motor
+Extended Warranty: Available for purchase
+
+For Service: Call 1800-266-1880 (Toll Free)
+Email: service.in@bosch-home.com
+Website: www.bosch-home.in/customer-service
+
+===========================================
+
+IMPORTANT SAFETY NOTES:
+
+⚠️ Always unplug the machine before maintenance
+⚠️ Do not open the door during operation if water is visible
+⚠️ Contact authorized service center for repairs
+⚠️ Do not attempt to repair electrical components yourself
+⚠️ Keep children away from the machine during operation
+
+===========================================
+
+This document is for troubleshooting common issues only. For detailed installation, operation, and advanced troubleshooting, refer to the complete user manual or contact Bosch service center.
+
+Document Version: 2.0
+Last Updated: December 2024

@@ -1,0 +1,295 @@
+const BASE_URL = 'https://adityaretail.com';
+
+// 1. Product Schema (Most Important) - includes Review/Rating
+export const generateProductSchema = (product) => {
+  const brand = product.brand || 'Aditya Retail';
+  const price = product.price || 0;
+  const originalPrice = product.original_price || product.originalPrice || product.mrp || price;
+  const stockQty = product.stock || product.stock_quantity || product.current_stock || 0;
+  const category = product.category || '';
+  const slug = product.slug || '';
+  const modelNumber = product.model_number || product.modelNumber || '';
+  const productUrl = modelNumber && category
+    ? `${BASE_URL}/${encodeURIComponent(category.toLowerCase().replace(/\s+/g, '-'))}/${modelNumber}`
+    : slug && category
+    ? `${BASE_URL}/${encodeURIComponent(category.toLowerCase().replace(/\s+/g, '-'))}/${slug}`
+    : `${BASE_URL}/product/${product.id}`;
+  const image = product.images?.length > 0 ? product.images[0] : (product.image || `${BASE_URL}/placeholder-product.png`);
+  const images = product.images?.length > 0 ? product.images : [image];
+  const rating = product.rating || product.average_rating || 0;
+  const reviewCount = product.reviews_count || product.reviewsCount || product.total_reviews || 0;
+
+  const schema = {
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    'name': product.name,
+    'image': images,
+    'description': product.description || `${product.name} by ${brand}`,
+    'brand': {
+      '@type': 'Brand',
+      'name': brand
+    },
+    'category': category,
+    'url': productUrl,
+    ...(modelNumber && { 'sku': modelNumber, 'mpn': modelNumber }),
+    'offers': {
+      '@type': 'Offer',
+      'url': productUrl,
+      'priceCurrency': 'INR',
+      'price': price,
+      ...(originalPrice > price && {
+        'priceValidUntil': new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+      }),
+      'availability': stockQty > 0 ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+      'itemCondition': 'https://schema.org/NewCondition',
+      'seller': {
+        '@type': 'Organization',
+        'name': 'Aditya Retail'
+      }
+    }
+  };
+
+  // 2. Add AggregateRating (Review/Rating Schema) if we have review data
+  if (rating > 0 && reviewCount > 0) {
+    schema.aggregateRating = {
+      '@type': 'AggregateRating',
+      'ratingValue': String(rating),
+      'bestRating': '5',
+      'worstRating': '1',
+      'reviewCount': String(reviewCount)
+    };
+  }
+
+  return schema;
+};
+
+// 2. Review Schema (individual reviews for a product)
+export const generateReviewSchemas = (reviews) => {
+  if (!reviews || reviews.length === 0) return [];
+  return reviews.slice(0, 10).map(review => ({
+    '@type': 'Review',
+    'author': {
+      '@type': 'Person',
+      'name': review.user_name || review.userName || 'Customer'
+    },
+    'datePublished': review.created_at || review.createdAt || new Date().toISOString(),
+    'reviewBody': review.review_text || review.reviewText || review.comment || '',
+    'name': review.review_title || review.reviewTitle || '',
+    'reviewRating': {
+      '@type': 'Rating',
+      'ratingValue': String(review.rating || 5),
+      'bestRating': '5',
+      'worstRating': '1'
+    }
+  }));
+};
+
+// 3. Breadcrumb Schema
+export const generateBreadcrumbSchema = (items) => {
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    'itemListElement': [
+      {
+        '@type': 'ListItem',
+        'position': 1,
+        'name': 'Home',
+        'item': `${BASE_URL}/`
+      },
+      ...items.map((item, index) => ({
+        '@type': 'ListItem',
+        'position': index + 2,
+        'name': item.label,
+        ...(item.url ? { 'item': `${BASE_URL}${item.url}` } : {})
+      }))
+    ]
+  };
+};
+
+// 4. ItemList Schema (for category/listing pages)
+export const generateItemListSchema = (products, categoryName) => {
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'ItemList',
+    'name': `${categoryName} - Aditya Retail`,
+    'description': `Browse ${categoryName} from top brands like Bosch and Siemens at Aditya Retail`,
+    'url': `${BASE_URL}/${categoryName.toLowerCase().replace(/ /g, '-')}`,
+    'numberOfItems': products.length,
+    'itemListElement': products.slice(0, 30).map((product, index) => {
+      const modelNum = product.model_number || product.modelNumber || '';
+      const slug = product.slug || '';
+      const category = product.category || categoryName;
+      const catSlug = category.toLowerCase().replace(/\s+/g, '-');
+      const brandSlug = product.brand ? product.brand.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') : '';
+      const productUrl = slug && brandSlug
+        ? `${BASE_URL}/${catSlug}/${brandSlug}/${slug}`
+        : modelNum
+        ? `${BASE_URL}/${catSlug}/${modelNum}`
+        : slug
+        ? `${BASE_URL}/${catSlug}/${slug}`
+        : `${BASE_URL}/product/${product.id}`;
+
+      return {
+        '@type': 'ListItem',
+        'position': index + 1,
+        'item': {
+          '@type': 'Product',
+          'name': product.name,
+          'url': productUrl,
+          'image': product.images?.[0] || product.image || '',
+          'brand': {
+            '@type': 'Brand',
+            'name': product.brand || 'Aditya Retail'
+          },
+          'offers': {
+            '@type': 'Offer',
+            'priceCurrency': 'INR',
+            'price': product.price || 0,
+            'availability': (product.stock || product.stock_quantity || product.current_stock || 0) > 0
+              ? 'https://schema.org/InStock'
+              : 'https://schema.org/OutOfStock'
+          }
+        }
+      };
+    })
+  };
+};
+
+// 5. Organization Schema
+export const organizationSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'Organization',
+  'name': 'Aditya Retail',
+  'url': BASE_URL,
+  'logo': `${BASE_URL}/aditya-logo.png`,
+  'description': 'Premium home appliances retailer — authorized dealer for Bosch, Siemens and other top brands across India.',
+  'foundingDate': '2015',
+  'address': {
+    '@type': 'PostalAddress',
+    'streetAddress': 'HRBR Layout, Kalyan Nagar',
+    'addressLocality': 'Bengaluru',
+    'addressRegion': 'Karnataka',
+    'postalCode': '560043',
+    'addressCountry': 'IN'
+  },
+  'contactPoint': [
+    {
+      '@type': 'ContactPoint',
+      'telephone': '+91-9845012345',
+      'contactType': 'customer service',
+      'areaServed': 'IN',
+      'availableLanguage': ['English', 'Hindi', 'Kannada']
+    },
+    {
+      '@type': 'ContactPoint',
+      'telephone': '+91-9845012345',
+      'contactType': 'sales',
+      'areaServed': 'IN',
+      'availableLanguage': ['English', 'Hindi', 'Kannada']
+    }
+  ],
+  'sameAs': []
+};
+
+// 6. Website Schema (enables Sitelinks search box)
+export const websiteSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  'name': 'Aditya Retail',
+  'url': BASE_URL,
+  'description': 'Shop premium home appliances from Bosch, Siemens and more at Aditya Retail.',
+  'publisher': {
+    '@type': 'Organization',
+    'name': 'Aditya Retail',
+    'logo': {
+      '@type': 'ImageObject',
+      'url': `${BASE_URL}/aditya-logo.png`
+    }
+  },
+  'potentialAction': {
+    '@type': 'SearchAction',
+    'target': {
+      '@type': 'EntryPoint',
+      'urlTemplate': `${BASE_URL}/category/all?search={search_term_string}`
+    },
+    'query-input': 'required name=search_term_string'
+  }
+};
+
+// 7. FAQ Schema
+export const generateFAQSchema = (faqItems) => {
+  // faqItems should be array of { question, answer }
+  if (!faqItems || faqItems.length === 0) return null;
+
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'FAQPage',
+    'mainEntity': faqItems.map(item => ({
+      '@type': 'Question',
+      'name': item.question || item.q,
+      'acceptedAnswer': {
+        '@type': 'Answer',
+        'text': item.answer || item.a
+      }
+    }))
+  };
+};
+
+// 8. LocalBusiness Schema
+export const localBusinessSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'LocalBusiness',
+  '@id': `${BASE_URL}/#localbusiness`,
+  'name': 'Aditya Retail',
+  'image': `${BASE_URL}/aditya-logo.png`,
+  'url': BASE_URL,
+  'telephone': '+91-9845012345',
+  'description': 'Premium home appliances store — authorized dealer for Bosch, Siemens. Washing machines, refrigerators, chimneys, ovens, dishwashers with best prices and warranty.',
+  'priceRange': '₹₹₹',
+  'address': {
+    '@type': 'PostalAddress',
+    'streetAddress': 'HRBR Layout, Kalyan Nagar',
+    'addressLocality': 'Bengaluru',
+    'addressRegion': 'Karnataka',
+    'postalCode': '560043',
+    'addressCountry': 'IN'
+  },
+  'geo': {
+    '@type': 'GeoCoordinates',
+    'latitude': '13.0206',
+    'longitude': '77.6400'
+  },
+  'openingHoursSpecification': [
+    {
+      '@type': 'OpeningHoursSpecification',
+      'dayOfWeek': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+      'opens': '10:00',
+      'closes': '20:00'
+    },
+    {
+      '@type': 'OpeningHoursSpecification',
+      'dayOfWeek': 'Sunday',
+      'opens': '10:00',
+      'closes': '18:00'
+    }
+  ],
+  'hasMap': 'https://maps.google.com/?q=Aditya+Retail+Bengaluru',
+  'aggregateRating': {
+    '@type': 'AggregateRating',
+    'ratingValue': '4.7',
+    'bestRating': '5',
+    'reviewCount': '150'
+  }
+};
+
+// Helper: Generate combined homepage schemas (Organization + Website + LocalBusiness)
+export const getHomepageSchemas = () => [
+  organizationSchema,
+  websiteSchema,
+  localBusinessSchema
+];
+
+// Helper: Render multiple schemas as JSON-LD script tags content
+export const schemasToJsonLd = (schemas) => {
+  return schemas.filter(Boolean).map(s => JSON.stringify(s));
+};

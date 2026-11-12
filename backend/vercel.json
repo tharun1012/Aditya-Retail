@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "name": "aditya-retail-backend",
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "50mb",
+        "runtime": "python3.11"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.py"
+    }
+  ],
+  "env": {
+    "MONGO_URL": "@mongo_url",
+    "DB_NAME": "@db_name",
+    "EMERGENT_LLM_KEY": "@emergent_llm_key",
+    "PHONEPE_MERCHANT_ID": "@phonepe_merchant_id",
+    "PHONEPE_SALT_KEY": "@phonepe_salt_key",
+    "PHONEPE_SALT_INDEX": "@phonepe_salt_index",
+    "PHONEPE_ENVIRONMENT": "@phonepe_environment",
+    "SENDGRID_API_KEY": "@sendgrid_api_key",
+    "GOOGLE_MAPS_API_KEY": "@google_maps_api_key",
+    "JWT_SECRET_KEY": "@jwt_secret_key"
+  }
+}

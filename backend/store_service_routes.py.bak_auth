@@ -1,0 +1,124 @@
+import asyncio, re, uuid
+from datetime import datetime, timezone
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from database import get_db
+from leads_management_routes import require_lead_admin
+
+router = APIRouter(prefix="/store-service", tags=["store-service"])
+_lock = asyncio.Lock()
+ISSUES = {"installation", "repair", "warranty", "general"}
+BRANDS = {"bosch": "Bosch", "siemens": "Siemens"}
+ADMIN_ROLES = {"admin", "super_admin"}
+
+
+class StoreTicketIn(BaseModel):
+    customer_name: str
+    customer_phone: str
+    customer_email: Optional[str] = ""
+    address: str
+    city: Optional[str] = ""
+    pincode: Optional[str] = ""
+    brand: str
+    model: str
+    product_name: str
+    issue_type: str = "general"
+    issue_description: Optional[str] = ""
+    preferred_date: Optional[str] = ""
+    preferred_time_slot: Optional[str] = ""
+    store_code: Optional[str] = None  # used only when an admin raises the ticket
+
+
+async def store_ctx(auth=Depends(require_lead_admin), db=Depends(get_db)):
+    role = auth.get("role")
+    keys = [v for v in (auth.get("sub"), auth.get("email"), auth.get("user_id"), auth.get("id")) if v]
+    user = None
+    for v in keys:
+        user = await db.users.find_one({"$or": [{"email": v}, {"id": v}, {"user_id": v}]}, {"_id": 0})
+        if user:
+            break
+    code = (user or {}).get("store_code") or auth.get("store_code")
+    name = (user or {}).get("store_name") or auth.get("store_name")
+    is_admin = role in ADMIN_ROLES
+    if not is_admin and not code:
+        raise HTTPException(403, "No store is assigned to this user")
+    return {"role": role, "email": (user or {}).get("email") or auth.get("sub"),
+            "store_code": code, "store_name": name, "is_admin": is_admin}
+
+
+async def next_ticket_number(db):
+    ymd = datetime.now(timezone.utc).strftime("%Y%m%d")
+    last = await db.service_tickets.find(
+        {"ticket_number": {"$regex": rf"^SRV-{ymd}-\d{{4}}$"}}, {"ticket_number": 1, "_id": 0}
+    ).sort("ticket_number", -1).limit(1).to_list(1)
+    n = int(last[0]["ticket_number"][-4:]) + 1 if last else 1
+    return f"SRV-{ymd}-{n:04d}"
+
+
+@router.post("/tickets")
+async def create_ticket(body: StoreTicketIn, ctx=Depends(store_ctx), db=Depends(get_db)):
+    brand = BRANDS.get((body.brand or "").strip().lower())
+    if not brand:
+        raise HTTPException(400, "Brand must be Bosch or Siemens")
+    issue = (body.issue_type or "general").lower()
+    if issue not in ISSUES:
+        raise HTTPException(400, "Invalid issue type")
+    phone = re.sub(r"\D", "", body.customer_phone or "")[-10:]
+    if len(phone) != 10:
+        raise HTTPException(400, "Enter a 10-digit phone number")
+    model = (body.model or "").strip().upper()
+    if len(model) < 4:
+        raise HTTPException(400, "Enter the model number")
+    if not (body.customer_name or "").strip() or not (body.address or "").strip():
+        raise HTTPException(400, "Customer name and address are required")
+    if issue != "installation" and not (body.issue_description or "").strip():
+        raise HTTPException(400, "Describe the issue")
+
+    store_code, store_name = ctx["store_code"], ctx["store_name"]
+    if ctx["is_admin"]:
+        store_code = (body.store_code or store_code or "").strip()
+        if not store_code:
+            raise HTTPException(400, "store_code is required")
+    name = (body.product_name or "").strip()
+    if brand.lower() not in name.lower():
+        name = f"{brand} {name}"
+    if model not in name.upper():
+        name = f"{name} {model}"
+
+    now = datetime.now(timezone.utc).isoformat()
+    async with _lock:
+        ticket_number = await next_ticket_number(db)
+        ticket = {
+            "id": str(uuid.uuid4()), "ticket_number": ticket_number, "source": "store",
+            "store_code": store_code, "store_name": store_name, "raised_by": ctx["email"],
+            "customer_name": body.customer_name.strip(), "customer_phone": phone,
+            "contact_email": (body.customer_email or "").strip(),
+            "product_name": name, "serial_numbers": [], "invoice_number": None,
+            "issue_description": (body.issue_description or "").strip(), "issue_type": issue,
+            "preferred_date": body.preferred_date or "", "preferred_time_slot": body.preferred_time_slot or "",
+            "priority": "normal", "status": "open", "assigned_technician": None, "resolution_notes": None,
+            "created_at": now, "updated_at": now,
+        }
+        await db.service_tickets.insert_one(ticket)
+
+    try:
+        from service_mail import send_company_mail
+        addr = {"address_line1": body.address.strip(), "city": (body.city or "").strip() or "Bangalore",
+                "pincode": (body.pincode or "").strip()}
+        await send_company_mail(db, dict(ticket), {"brand": brand, "model_number": model}, {"address": addr})
+    except Exception as e:
+        print(f"Warning: store service mail failed: {e}")
+
+    saved = await db.service_tickets.find_one({"ticket_number": ticket_number}, {"_id": 0})
+    return {"status": "success", "ticket": saved}
+
+
+@router.get("/tickets")
+async def list_tickets(store_code: Optional[str] = Query(None), ctx=Depends(store_ctx), db=Depends(get_db)):
+    if ctx["is_admin"]:
+        q = {"store_code": store_code} if store_code else {"source": "store"}
+    else:
+        q = {"store_code": ctx["store_code"]}
+    tickets = await db.service_tickets.find(q, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    return {"status": "success", "tickets": tickets, "total": len(tickets)}

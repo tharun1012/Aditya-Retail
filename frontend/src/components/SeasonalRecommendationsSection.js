@@ -1,0 +1,289 @@
+import React, { useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config/api';
+import { 
+  Snowflake, Sun, Cloud, Sparkles, Gift, Heart, 
+  Flame, Wind, Home, PartyPopper
+} from 'lucide-react';
+import ProductCard from './ProductCard';
+import { trackFestive } from '../utils/trackFestive';
+
+const COLOUR_WORDS = {
+  'orange': ['orange'], 'white': ['white'], 'red': ['red', 'maroon'],
+  'royal blue': ['blue', 'navy'], 'yellow': ['yellow', 'gold'], 'green': ['green'],
+  'grey': ['grey', 'gray', 'silver'], 'peacock green': ['green', 'teal'], 'pink': ['pink', 'rose']
+};
+
+
+const SeasonalRecommendationsSection = ({ onViewProduct, onAddToCart, onAISalesChat }) => {
+  const [recommendations, setRecommendations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [seasonInfo, setSeasonInfo] = useState({
+    season: '',
+    festival: '',
+    icon: Sun,
+    theme: {},
+    message: ''
+  });
+
+  const ICONS = { sparkles: Sparkles, party: PartyPopper, sun: Sun, heart: Heart,
+    gift: Gift, snowflake: Snowflake, cloud: Cloud, wind: Wind, flame: Flame, home: Home };
+
+  useEffect(() => {
+    loadThemeAndProducts();
+  }, []);
+
+  // Single source of truth: /api/promotions/themes/active
+  const loadThemeAndProducts = async () => {
+    let info = {
+      season: 'Festive Picks',
+      festival: '',
+      icon: Sparkles,
+      theme: { from: 'from-orange-400', to: 'to-red-500', bg: 'bg-orange-50' },
+      message: 'Handpicked for you',
+      searchCategories: []
+    };
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/promotions/themes/active`);
+      const data = await res.json();
+      if (data.status === 'success' && data.theme) {
+        const t = data.theme;
+        info = {
+          season: t.title || info.season,
+          festival: t.theme_type === 'festival' ? (t.title || '') : '',
+          icon: ICONS[t.icon] || Sparkles,
+          theme: {
+            from: t.gradient_from || info.theme.from,
+            to: t.gradient_to || info.theme.to,
+            bg: t.background_color || info.theme.bg
+          },
+          message: t.subtitle || info.message,
+          colour: ((t.subtitle || '').match(/Wear (.+)$/) || [])[1] || '',
+          dealLabel: t.name === 'navratri' && /Wear (.+)$/.test(t.subtitle || '')
+            ? `Today's ${(t.subtitle.match(/Wear (.+)$/)[1])} deal` : '',
+          searchCategories: (t.categories || []).filter(c => c.toLowerCase() !== 'all categories')
+        };
+      }
+    } catch (error) {
+      console.error('Error fetching active theme:', error);
+    }
+    setSeasonInfo(info);
+    await fetchFallbackSeasonalProducts(info.searchCategories, info.colour);
+    setLoading(false);
+  };
+
+  const fetchFallbackSeasonalProducts = async (categories = [], colour = '') => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/products`);
+      const data = await response.json();
+      
+      if (data.status === 'success' && data.products) {
+        // Get all active products
+        const activeProducts = data.products.filter(p => p.is_active !== false);
+        
+        // Filter by season/festival appropriate categories
+        let seasonal = activeProducts.filter(p => {
+          const category = (p.category || '').toLowerCase();
+          const name = (p.name || '').toLowerCase();
+          
+          return categories.some(searchCat => 
+            category.includes(searchCat.toLowerCase()) || 
+            name.includes(searchCat.toLowerCase())
+          );
+        });
+        
+        // If not enough products found, include all brands' products with good discounts or new arrivals
+        if (seasonal.length < 8) {
+          const additionalProducts = activeProducts
+            .filter(p => !seasonal.find(s => s.id === p.id))
+            .sort((a, b) => {
+              // Prioritize new products and discounted items
+              const aScore = (a.is_new ? 10 : 0) + (a.original_price && a.price < a.original_price ? 5 : 0);
+              const bScore = (b.is_new ? 10 : 0) + (b.original_price && b.price < b.original_price ? 5 : 0);
+              return bScore - aScore;
+            });
+          
+          seasonal = [...seasonal, ...additionalProducts].slice(0, 8);
+        }
+        
+        // Ensure brand diversity
+        const diverseProducts = [];
+        const brandCounts = {};
+        
+        for (const product of seasonal) {
+          const brand = product.brand || 'Unknown';
+          brandCounts[brand] = (brandCounts[brand] || 0);
+          
+          if (brandCounts[brand] < 3 && diverseProducts.length < 8) {
+            diverseProducts.push(product);
+            brandCounts[brand]++;
+          }
+        }
+        
+        // Fill remaining slots
+        if (diverseProducts.length < 8) {
+          const remaining = seasonal.filter(p => !diverseProducts.find(d => d.id === p.id));
+          for (const p of remaining) {
+            if (diverseProducts.length < 8) diverseProducts.push(p);
+          }
+        }
+        
+        // Today's colour first (matches product colour field or name)
+        const words = COLOUR_WORDS[(colour || '').toLowerCase()];
+        let finalList = diverseProducts;
+        if (words) {
+          const re = new RegExp(`\\b(${words.join('|')})\\b`, 'i');
+          const hit = (p) => re.test(`${p.colour || ''} ${p.color || ''} ${p.name || ''}`);
+          const matched = activeProducts.filter(hit).slice(0, 4);
+          const rest = diverseProducts.filter((p) => !matched.find((m) => m.id === p.id));
+          finalList = [...matched, ...rest].slice(0, 8);
+        }
+        setRecommendations(finalList);
+      }
+    } catch (error) {
+      console.error('Fallback seasonal products error:', error);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="py-16 bg-white">
+        <div className="max-w-7xl mx-auto px-4">
+          <div className="animate-pulse">
+            <div className="h-8 bg-gray-200 rounded w-64 mb-8"></div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-96 bg-gray-200 rounded-lg"></div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (recommendations.length === 0) return null;
+
+  const Icon = seasonInfo.icon;
+
+  return (
+    <section className={`py-16 ${seasonInfo.theme.bg} border-t border-b`}>
+      <div className="max-w-7xl mx-auto px-4">
+        {/* Section Header */}
+        <div className="flex items-center justify-between mb-12">
+          <div className="flex items-center space-x-4">
+            <div className={`p-3 bg-gradient-to-r ${seasonInfo.theme.from} ${seasonInfo.theme.to} rounded-full shadow-lg`}>
+              <Icon className="h-8 w-8 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center space-x-2">
+                <h2 className="text-4xl font-bold text-gray-900">
+                  {seasonInfo.season}
+                </h2>
+                {seasonInfo.festival && (
+                  <span className="text-3xl">
+                    {seasonInfo.festival === 'Christmas' && '🎄'}
+                    {seasonInfo.festival === 'Diwali' && '🪔'}
+                    {seasonInfo.festival === 'Holi' && '🎨'}
+                    {seasonInfo.festival === 'Valentine\'s Day' && '💝'}
+                    {seasonInfo.festival === 'New Year' && '🎉'}
+                  </span>
+                )}
+              </div>
+              <p className="text-gray-600 mt-1">{seasonInfo.message}</p>
+            </div>
+          </div>
+          <div className="hidden md:flex items-center space-x-2">
+            <span className={`bg-gradient-to-r ${seasonInfo.theme.from} ${seasonInfo.theme.to} text-white px-4 py-2 rounded-full text-sm font-bold shadow-lg`}>
+              {seasonInfo.festival ? 'Festival Special' : 'Season Special'}
+            </span>
+          </div>
+        </div>
+
+        {/* Seasonal Banner */}
+        <div className={`mb-8 bg-gradient-to-r ${seasonInfo.theme.from} ${seasonInfo.theme.to} rounded-2xl p-6 text-white shadow-xl`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-4">
+              <Icon className="h-12 w-12" />
+              <div>
+                <h3 className="text-2xl font-bold mb-1">
+                  {seasonInfo.festival ? `${seasonInfo.festival}` : `Best for ${seasonInfo.season}`}
+                </h3>
+                <p className="text-white/90">
+                  {seasonInfo.festival 
+                    ? 'Exclusive deals on festival essentials - Limited time only!' 
+                    : `Must-have appliances for ${seasonInfo.season.toLowerCase()} season`}
+                </p>
+              </div>
+            </div>
+            <div className="hidden lg:block">
+              <div className="bg-white/20 backdrop-blur-sm px-6 py-3 rounded-xl border border-white/30">
+                <p className="text-sm font-semibold">AI Curated Selection</p>
+                <p className="text-xs text-white/80">Based on seasonal needs</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Products Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          {recommendations.map((product, index) => (
+            <div key={product.id} className="relative group"
+              onClickCapture={() => { if (seasonInfo.dealLabel && index < 4) trackFestive('deal_click'); }}>
+              {/* Today's colour deal badge */}
+              {seasonInfo.dealLabel && index < 4 && (
+                <div className="absolute -top-2 -right-2 z-10">
+                  <div className="text-white px-3 py-1 rounded-full text-xs font-bold shadow-lg"
+                    style={{ backgroundColor: 'rgb(var(--brand-600))' }}>
+                    {seasonInfo.dealLabel}
+                  </div>
+                </div>
+              )}
+              {/* Seasonal Badge */}
+              {index === 0 && (
+                <div className="absolute -top-2 -left-2 z-10">
+                  <div className={`bg-gradient-to-r ${seasonInfo.theme.from} ${seasonInfo.theme.to} text-white px-3 py-1 rounded-full text-xs font-bold shadow-lg flex items-center space-x-1`}>
+                    <Icon className="h-3 w-3" />
+                    <span>Must Buy</span>
+                  </div>
+                </div>
+              )}
+              <ProductCard
+                product={product}
+                onViewProduct={onViewProduct}
+                onAddToCart={onAddToCart}
+                onAISalesChat={onAISalesChat}
+              />
+            </div>
+          ))}
+        </div>
+
+        {/* Additional Info */}
+        <div className="mt-12 grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className={`${seasonInfo.theme.bg} border-2 border-current rounded-xl p-6 text-center`}>
+            <Icon className="h-10 w-10 mx-auto mb-3 text-gray-700" />
+            <h4 className="font-bold text-gray-900 mb-2">Season Perfect</h4>
+            <p className="text-sm text-gray-600">
+              Specially selected for this festive season
+            </p>
+          </div>
+          <div className={`${seasonInfo.theme.bg} border-2 border-current rounded-xl p-6 text-center`}>
+            <Sparkles className="h-10 w-10 mx-auto mb-3 text-gray-700" />
+            <h4 className="font-bold text-gray-900 mb-2">AI Powered</h4>
+            <p className="text-sm text-gray-600">
+              Smart recommendations based on weather & trends
+            </p>
+          </div>
+          <div className={`${seasonInfo.theme.bg} border-2 border-current rounded-xl p-6 text-center`}>
+            <Gift className="h-10 w-10 mx-auto mb-3 text-gray-700" />
+            <h4 className="font-bold text-gray-900 mb-2">Special Offers</h4>
+            <p className="text-sm text-gray-600">
+              Exclusive seasonal discounts & combos
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
+
+export default SeasonalRecommendationsSection;

@@ -1,0 +1,56 @@
+import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+import { Wallet } from 'lucide-react';
+
+const API = process.env.REACT_APP_BACKEND_URL;
+const cache = new Map();
+const stamp = new Map();
+const TTL = 60000;
+let queue = new Set();
+let waiters = [];
+let timer = null;
+
+const load = (id) => new Promise((resolve) => {
+  if (cache.has(id) && Date.now() - (stamp.get(id) || 0) < TTL) return resolve(cache.get(id));
+  queue.add(id);
+  waiters.push([id, resolve]);
+  if (!timer) {
+    timer = setTimeout(async () => {
+      const ids = [...queue];
+      const w = waiters;
+      queue = new Set(); waiters = []; timer = null;
+      try {
+        const r = await axios.post(`${API}/api/offers/pine-live-summary`, { product_ids: ids });
+        const map = r.data?.summary || {};
+        ids.forEach((i) => { cache.set(i, map[i] || null); stamp.set(i, Date.now()); });
+      } catch (e) { /* do not cache failures */ }
+      w.forEach(([i, res]) => res(cache.has(i) ? cache.get(i) : null));
+    }, 50);
+  }
+});
+
+const inr = (n) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
+// Live Pine Labs Offer Discovery summary for a product card.
+const OfferTag = ({ productId }) => {
+  const [d, setD] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (productId) load(productId).then((x) => alive && setD(x));
+    return () => { alive = false; };
+  }, [productId]);
+  if (!d) return null;
+  return (
+    <div data-testid="offer-tag" className="-mt-2 mb-3 flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+      <Wallet className="w-3 h-3 mt-0.5 shrink-0" />
+      <div className="min-w-0">
+        <div className="font-semibold">
+          {d.no_cost ? 'No Cost EMI available' : `EMI from ₹${inr(d.from_emi)}/mo`}
+        </div>
+        <div className="text-[10px] text-amber-700">{d.bank_count} banks · Pine Labs</div>
+      </div>
+    </div>
+  );
+};
+
+export default OfferTag;

@@ -1,0 +1,972 @@
+"""
+AI-powered Cashback / Bank / Offer management.
+
+Admin uploads brand PDF → Gemini extracts structured offers → mapped to products.
+Public endpoints return applicable offers per product / cart.
+"""
+import os
+import re
+import json
+import uuid
+import shutil
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
+
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
+from pydantic import BaseModel, Field
+from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/offers", tags=["cashback-offers"])
+
+MONGO_URL = os.environ.get('MONGO_URL')
+DB_NAME = os.environ.get('DB_NAME', 'startup_template')
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
+
+WHATSAPP_NUMBER = os.environ.get('CASHBACK_WHATSAPP_NUMBER', '919844577440')
+UPLOAD_DIR = "/tmp/cashback_uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+OFFER_TYPES = ["cashback", "bank_offer", "no_cost_emi", "partner_offer", "exchange_offer", "extended_warranty", "seasonal_offer", "upi_offer"]
+
+# Default full bank list to display when the source says "All Banks" or is empty
+DEFAULT_ELIGIBLE_BANKS = os.environ.get(
+    "DEFAULT_ELIGIBLE_BANKS",
+    "HDFC, ICICI, Axis, SBI, Kotak, American Express, Bank of Baroda, Yes Bank, IndusInd, IDFC First, RBL"
+)
+
+
+def _expand_bank_names(raw: Optional[str]) -> Optional[str]:
+    """If `raw` is a generic label like 'All Banks', return the friendly bank list."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in ("all banks", "all bank", "any bank", "all cards", "any card"):
+        return DEFAULT_ELIGIBLE_BANKS
+    return text
+
+
+# -------------------- MODELS --------------------
+class CashbackOffer(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    offer_type: str = "cashback"  # cashback | bank_offer | no_cost_emi | partner_offer
+    title: str
+    description: str = ""
+    amount_upto: Optional[float] = None
+    amount_type: str = "flat"  # flat | percentage | upto
+    min_purchase: Optional[float] = None
+    valid_bank: Optional[str] = None
+    valid_from: Optional[str] = None
+    valid_till: Optional[str] = None
+    brand: Optional[str] = None
+    categories: List[str] = []
+    product_ids: List[str] = []
+    sku: Optional[str] = None
+    terms: Optional[str] = None
+    tenure: Optional[str] = None
+    redeem_location: str = "offline_store"
+    whatsapp_message: Optional[str] = None
+    source_pdf: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    is_active: bool = True
+
+
+class OfferUpdate(BaseModel):
+    offer_type: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    amount_upto: Optional[float] = None
+    amount_type: Optional[str] = None
+    min_purchase: Optional[float] = None
+    valid_bank: Optional[str] = None
+    valid_from: Optional[str] = None
+    valid_till: Optional[str] = None
+    brand: Optional[str] = None
+    categories: Optional[List[str]] = None
+    product_ids: Optional[List[str]] = None
+    terms: Optional[str] = None
+    tenure: Optional[str] = None
+    redeem_location: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+# -------------------- HELPERS --------------------
+def _clean(doc: Dict[str, Any]) -> Dict[str, Any]:
+    if not doc:
+        return doc
+    doc.pop("_id", None)
+    return doc
+
+
+def _build_whatsapp_link(offer_title: str, product_name: str = "") -> str:
+    msg_parts = [f"Hi Aditya Retail, I'd like to know more about the offer: {offer_title}"]
+    if product_name:
+        msg_parts.append(f"Product: {product_name}")
+    msg_parts.append("Please share the details for redemption at your offline store.")
+    encoded = "%0A".join([p.replace(" ", "%20") for p in msg_parts])
+    return f"https://wa.me/{WHATSAPP_NUMBER}?text={encoded}"
+
+
+# -------------------- AI PDF EXTRACTION --------------------
+def _excel_rows(path: str) -> List[List[Any]]:
+    """Read Excel into a list of rows (list of cell values)."""
+    ext = path.lower().rsplit(".", 1)[-1]
+    rows: List[List[Any]] = []
+    if ext == "xlsx":
+        import openpyxl
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            for r in ws.iter_rows(values_only=True):
+                rows.append(list(r))
+    elif ext == "xls":
+        import xlrd
+        book = xlrd.open_workbook(path)
+        for sheet in book.sheets():
+            for i in range(sheet.nrows):
+                rows.append(list(sheet.row_values(i)))
+    return rows
+
+
+def _find_header_row(rows: List[List[Any]]) -> int:
+    """Find the header row index by looking for common column names."""
+    header_keywords = {
+        "sku", "product_sku", "product code", "product_code", "model", "model no",
+        "article", "article no", "material", "material no", "item code", "item_code",
+        "oem", "brand", "category", "level1", "level2", "level 1", "level 2",
+        "cashback", "cb amt", "cb amount", "min amt", "min amount", "min_amount",
+        "max_amount", "max amount", "max amt", "bank", "mrp", "dealer price",
+        "list price", "discount", "offer", "tenure",
+    }
+    for i, row in enumerate(rows[:30]):  # scan first 30 rows
+        cells_lower = [str(c).strip().lower() for c in row if c is not None]
+        matches = sum(1 for c in cells_lower if any(kw in c for kw in header_keywords))
+        if matches >= 3:
+            return i
+    return -1
+
+
+def _col_index(headers: List[str], *keywords: str) -> Optional[int]:
+    """Return first column index whose lowered header contains any of the keywords."""
+    for i, h in enumerate(headers):
+        hl = str(h).strip().lower()
+        if any(kw in hl for kw in keywords):
+            return i
+    return None
+
+
+def _row_based_extract(path: str, brand_hint: str = "") -> Optional[List[Dict[str, Any]]]:
+    """
+    For large product-level Excel offer sheets (e.g., Bosch per-SKU cashback),
+    parse each row directly into an offer without hitting the LLM.
+    Returns None if the file doesn't match a product-list pattern.
+    """
+    rows = _excel_rows(path)
+    if len(rows) < 15:
+        return None  # Too small — let LLM handle it
+
+    header_idx = _find_header_row(rows)
+    if header_idx < 0:
+        return None
+    headers = [str(c) if c is not None else "" for c in rows[header_idx]]
+
+    idx_sku = _col_index(headers, "sku", "product code", "product_code", "model", "article", "material", "item code", "item_code")
+    idx_brand = _col_index(headers, "oem", "brand")
+    idx_cat1 = _col_index(headers, "level1", "category")
+    idx_cat2 = _col_index(headers, "level2", "subcategory")
+    idx_min = _col_index(headers, "min amt", "min_amount", "min amount")
+    idx_max = _col_index(headers, "max_amount", "max amount", "max amt")
+    # Prefer "cb amt" (actual amount) over "cb" (percentage)
+    idx_cb_amt = _col_index(headers, "cb amt", "cashback amt", "cashback amount")
+    idx_cb_pct = _col_index(headers, " cb", "cashback %", "cashback percent")
+    # Bank/terms columns — "Remarks (Banks...)" contains EMI terms, not bank names
+    idx_terms = _col_index(headers, "remarks (banks", "remarks (other banks")
+    idx_tenure = _col_index(headers, "tenure")
+    # Detect the "eligible banks" from the legend row (row above headers) if present
+    legend_row = rows[header_idx - 1] if header_idx > 0 else []
+    eligible_banks_default = None
+    for c in legend_row:
+        if c and isinstance(c, str) and any(w in c.lower() for w in ["all banks", "hdfc", "icici", "sbi", "axis", "kotak", "amex", "citibank"]):
+            eligible_banks_default = str(c).strip()
+            break
+
+    if idx_sku is None:
+        return None  # Not a product-list format
+
+    offers: List[Dict[str, Any]] = []
+    for r in rows[header_idx + 1:]:
+        if not any(c not in (None, "", "#N/A") for c in r):
+            continue
+
+        def get(i, row=r):
+            return row[i] if i is not None and i < len(row) else None
+
+        sku = get(idx_sku)
+        if not sku or str(sku).strip() in ("", "#N/A"):
+            continue
+        sku = str(sku).strip()
+
+        brand = str(get(idx_brand) or brand_hint or "").strip().title() or None
+        cat1 = str(get(idx_cat1) or "").strip()
+        cat2 = str(get(idx_cat2) or "").strip()
+        categories = [c for c in [cat1, cat2] if c]
+
+        cb_amt_raw = get(idx_cb_amt)
+        cb_pct_raw = get(idx_cb_pct)
+        min_amt = get(idx_min)
+        _ = get(idx_max)  # noqa (max amount currently unused)
+        terms_text = get(idx_terms)
+        tenure = get(idx_tenure)
+
+        # Convert cashback amount to a numeric value
+        amount_upto = None
+        amount_type = "flat"
+        try:
+            if isinstance(cb_amt_raw, (int, float)) and cb_amt_raw > 0:
+                amount_upto = float(cb_amt_raw)
+                amount_type = "flat"
+            elif isinstance(cb_pct_raw, (int, float)) and 0 < cb_pct_raw <= 1:
+                amount_upto = round(cb_pct_raw * 100, 2)
+                amount_type = "percentage"
+        except Exception:
+            pass
+
+        # Skip rows that have no actual offer amount and no EMI text
+        emi_only = isinstance(cb_amt_raw, str) and "emi" in cb_amt_raw.lower()
+        if amount_upto is None and not emi_only:
+            continue
+
+        # Decide offer type
+        offer_type = "cashback"
+        if emi_only:
+            offer_type = "no_cost_emi"
+            amount_upto = None
+        elif terms_text and isinstance(terms_text, str) and "emi" in terms_text.lower():
+            offer_type = "no_cost_emi"
+
+        title_parts = [str(brand) if brand else "", cat1]
+        title_parts = [t for t in title_parts if t]
+        title = (" ".join(title_parts) + f" · {sku}")[:120]
+
+        # Build description with clean parts
+        desc_parts = []
+        if amount_upto and amount_type == "flat":
+            desc_parts.append(f"Cashback ₹{int(amount_upto)}")
+        elif amount_upto and amount_type == "percentage":
+            desc_parts.append(f"{amount_upto}% cashback")
+        elif offer_type == "no_cost_emi":
+            desc_parts.append("No Cost EMI available")
+        if isinstance(min_amt, (int, float)) and min_amt > 0:
+            desc_parts.append(f"Min purchase ₹{int(min_amt)}")
+        description = " · ".join(desc_parts)
+
+        offers.append({
+            "offer_type": offer_type,
+            "title": title,
+            "description": description,
+            "amount_upto": amount_upto,
+            "amount_type": amount_type,
+            "min_purchase": float(min_amt) if isinstance(min_amt, (int, float)) else None,
+            "valid_bank": eligible_banks_default,
+            "terms": str(terms_text).strip() if terms_text and isinstance(terms_text, str) and terms_text.strip() not in ("", "#N/A", "NO") else None,
+            "tenure": str(tenure).strip() if tenure and str(tenure).strip() not in ("", "#N/A") else None,
+            "brand": brand,
+            "categories": categories,
+            "sku": sku,
+            "redeem_location": "offline_store" if offer_type == "cashback" else "online",
+        })
+    return offers if offers else None
+
+
+def _excel_to_text(path: str) -> str:
+    """Convert Excel (.xlsx or .xls) into markdown-style text for LLM ingestion.
+    Truncates to 80 rows to fit LLM context window."""
+    rows = _excel_rows(path)
+    lines: List[str] = []
+    max_rows = 80
+    for i, row in enumerate(rows[:max_rows]):
+        cells = [str(c).strip() if c is not None else "" for c in row]
+        if any(cells):
+            lines.append(" | ".join(cells))
+    if len(rows) > max_rows:
+        lines.append(f"\n(... {len(rows) - max_rows} additional rows omitted ...)")
+    return "\n".join(lines).strip()
+
+
+async def extract_offers_from_file(file_path: str, brand_hint: str = "") -> List[Dict[str, Any]]:
+    """Use direct row-parsing (for large product-list Excel) or Gemini (for PDFs/unstructured Excel)."""
+    ext = file_path.lower().rsplit(".", 1)[-1]
+    is_excel = ext in ("xlsx", "xls")
+
+    # Fast path: structured per-SKU Excel offer sheets
+    if is_excel:
+        try:
+            direct = _row_based_extract(file_path, brand_hint=brand_hint)
+            if direct:
+                logger.info(f"Row-based extraction: {len(direct)} offers")
+                return direct
+        except Exception as e:
+            logger.warning(f"Row-based extraction failed, falling back to LLM: {e}")
+
+    # LLM path: PDFs or unstructured Excel
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContentWithMimeType
+
+        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY not configured")
+
+        prompt = f"""You are an expert at extracting promotional offers from Indian retail/brand marketing documents.
+
+Extract ALL cashback, bank offers, no-cost EMI, exchange offers, and partner offers from the {'spreadsheet content below' if is_excel else 'attached PDF'}.
+
+For each offer, output STRICT JSON with these fields:
+- offer_type: one of ["cashback", "bank_offer", "no_cost_emi", "partner_offer", "exchange_offer"]
+- title: short offer name (max 60 chars)
+- description: full offer text
+- amount_upto: numeric cashback/discount amount (₹). null if not applicable.
+- amount_type: "flat" | "percentage" | "upto"
+- min_purchase: minimum purchase amount in ₹ (null if none)
+- valid_bank: bank name (HDFC, ICICI, SBI, Axis, Kotak, etc.) or null
+- valid_from: YYYY-MM-DD or null
+- valid_till: YYYY-MM-DD or null
+- brand: product brand (Bosch, Samsung, LG, Whirlpool, IFB, Faber, Siemens, Sony, etc.){f' — likely: {brand_hint}' if brand_hint else ''}
+- categories: list of applicable product categories (e.g., ["Refrigerator", "Washing Machine", "Chimney"])
+- redeem_location: "offline_store" for cashback (since online payment gateway doesn't support cashback), else "online"
+
+Return ONLY a JSON array like: [{{...}}, {{...}}]. No markdown, no code fences, no explanations.
+If no offers found, return: []
+"""
+
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"cashback-extract-{uuid.uuid4()}",
+            system_message="You are a precise offer-extraction assistant. Always output valid JSON only.",
+        ).with_model("gemini", "gemini-2.5-flash")
+
+        if is_excel:
+            spreadsheet_text = _excel_to_text(file_path)
+            if not spreadsheet_text.strip():
+                return []
+            full_prompt = f"{prompt}\n\n---SPREADSHEET CONTENT---\n{spreadsheet_text}"
+            response = await asyncio.wait_for(
+                chat.send_message(UserMessage(text=full_prompt)),
+                timeout=75,
+            )
+        else:
+            pdf_file = FileContentWithMimeType(file_path=file_path, mime_type="application/pdf")
+            response = await asyncio.wait_for(
+                chat.send_message(UserMessage(text=prompt, file_contents=[pdf_file])),
+                timeout=75,
+            )
+
+        text = str(response or "").strip()
+        # Strip code fences if any
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+        # Find first `[` and last `]`
+        start = text.find("[")
+        end = text.rfind("]")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+
+        offers = json.loads(text)
+        if not isinstance(offers, list):
+            raise ValueError("Model did not return a list")
+
+        # Sanitize each offer
+        cleaned = []
+        for o in offers:
+            if not isinstance(o, dict):
+                continue
+            if o.get("offer_type") not in OFFER_TYPES:
+                o["offer_type"] = "cashback"
+            # Cashback → default redemption offline
+            if o.get("offer_type") == "cashback" and not o.get("redeem_location"):
+                o["redeem_location"] = "offline_store"
+            elif not o.get("redeem_location"):
+                o["redeem_location"] = "online"
+            if not o.get("brand") and brand_hint:
+                o["brand"] = brand_hint
+            cleaned.append(o)
+
+        return cleaned
+    except json.JSONDecodeError as e:
+        logger.error(f"File extract JSON parse failed: {e} | raw: {text[:500] if 'text' in locals() else ''}")
+        raise HTTPException(status_code=422, detail=f"AI returned invalid JSON: {str(e)}")
+    except asyncio.TimeoutError:
+        logger.error("LLM extraction timed out after 75s")
+        raise HTTPException(status_code=504, detail="AI extraction timed out. Try a smaller file or use per-SKU column format (sku, cb amt, bank).")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"File extraction failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
+
+
+# Back-compat alias
+extract_offers_from_pdf = extract_offers_from_file
+
+
+async def _map_offers_to_products(offers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Populate product_ids for each offer.
+    Priority: match by SKU (model_number) first, then by brand+category.
+    Batched: collects all SKUs upfront and does a single DB query."""
+    # Batch SKU lookup
+    all_skus = list({str(o["sku"]).strip() for o in offers if o.get("sku")})
+    sku_to_ids: Dict[str, List[str]] = {}
+    if all_skus:
+        try:
+            sku_regex = [re.compile(f"^{re.escape(s)}$", re.IGNORECASE) for s in all_skus]
+            docs = await db.products.find({
+                "$or": [
+                    {"model_number": {"$in": sku_regex}},
+                    {"sku": {"$in": sku_regex}},
+                    {"model": {"$in": sku_regex}},
+                ]
+            }, {"id": 1, "model_number": 1, "sku": 1, "model": 1}).to_list(length=2000)
+            for d in docs:
+                pid = d.get("id")
+                if not pid:
+                    continue
+                for key in ("model_number", "sku", "model"):
+                    val = d.get(key)
+                    if val:
+                        sku_to_ids.setdefault(str(val).lower(), []).append(pid)
+        except Exception as e:
+            logger.warning(f"SKU batch lookup failed: {e}")
+
+    for offer in offers:
+        product_ids: List[str] = []
+        sku = offer.get("sku")
+        if sku:
+            product_ids = sku_to_ids.get(str(sku).lower(), [])
+
+        # Fallback: match by brand + category
+        if not product_ids:
+            query: Dict[str, Any] = {}
+            if offer.get("brand"):
+                query["brand"] = {"$regex": f"^{re.escape(offer['brand'])}$", "$options": "i"}
+            cats = offer.get("categories") or []
+            if cats:
+                query["category"] = {"$in": [re.compile(f"^{re.escape(c)}$", re.IGNORECASE) for c in cats]}
+            if query:
+                try:
+                    docs = await db.products.find(query, {"id": 1}).to_list(length=500)
+                    product_ids = [d.get("id") for d in docs if d.get("id")]
+                except Exception:
+                    pass
+
+        offer["product_ids"] = product_ids
+    return offers
+
+
+# -------------------- ADMIN ENDPOINTS --------------------
+@router.post("/admin/upload-pdf")
+async def upload_pdf(
+    file: UploadFile = File(...),
+    brand: str = Form(""),
+):
+    """Admin: upload a brand cashback file (PDF or Excel), extract offers via AI, save + map to products."""
+    save_path = None
+    try:
+        fname = (file.filename or "").lower()
+        allowed_ext = (".pdf", ".xlsx", ".xls")
+        if not fname.endswith(allowed_ext):
+            raise HTTPException(status_code=400, detail="Only PDF, XLSX, or XLS files are supported")
+
+        # Save file locally
+        save_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{file.filename}")
+        with open(save_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        # Extract via AI (with 85s overall budget to stay under Cloudflare's 100s limit)
+        try:
+            extracted = await asyncio.wait_for(
+                extract_offers_from_file(save_path, brand_hint=brand),
+                timeout=85,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Overall extraction timed out for {file.filename}")
+            raise HTTPException(
+                status_code=504,
+                detail="Extraction took too long. Please split the file into smaller chunks or use a per-SKU cashback sheet (columns: sku, cb amt, bank).",
+            )
+
+        if not extracted:
+            return {"status": "success", "offers_extracted": 0, "offers": [], "message": "No offers found in file"}
+
+        # Map to products
+        mapped = await _map_offers_to_products(extracted)
+
+        # Bulk build + insert
+        to_insert = []
+        for o in mapped:
+            offer = CashbackOffer(
+                offer_type=o.get("offer_type") or "cashback",
+                title=(o.get("title") or "Special Offer")[:120],
+                description=o.get("description") or "",
+                amount_upto=o.get("amount_upto"),
+                amount_type=o.get("amount_type") or "flat",
+                min_purchase=o.get("min_purchase"),
+                valid_bank=o.get("valid_bank"),
+                valid_from=o.get("valid_from"),
+                valid_till=o.get("valid_till"),
+                brand=o.get("brand") or brand or None,
+                categories=o.get("categories") or [],
+                product_ids=o.get("product_ids") or [],
+                sku=o.get("sku"),
+                terms=o.get("terms"),
+                tenure=o.get("tenure"),
+                redeem_location=o.get("redeem_location") or "offline_store",
+                source_pdf=file.filename,
+            )
+            offer.whatsapp_message = _build_whatsapp_link(offer.title)
+            to_insert.append(offer.dict())
+
+        if to_insert:
+            await db.cashback_offers.insert_many(to_insert, ordered=False)
+
+        # Return summary + first 10 as preview (avoid huge response bodies)
+        matched_products = sum(1 for o in to_insert if o.get("product_ids"))
+        return {
+            "status": "success",
+            "offers_extracted": len(to_insert),
+            "offers_matched_to_products": matched_products,
+            "offers": [_clean(dict(o)) for o in to_insert[:10]],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"upload_pdf unexpected failure: {e}", exc_info=True)
+        # ALWAYS return a valid JSON response so Cloudflare doesn't reject it
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)[:300]}")
+    finally:
+        # Best-effort cleanup
+        if save_path and os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+            except Exception:
+                pass
+
+
+@router.get("/admin/list")
+async def list_offers_admin(
+    active_only: bool = False,
+    brand: Optional[str] = None,
+    offer_type: Optional[str] = None,
+):
+    """Admin: list all cashback offers with filters."""
+    query: Dict[str, Any] = {}
+    if active_only:
+        query["is_active"] = True
+    if brand:
+        query["brand"] = {"$regex": f"^{re.escape(brand)}$", "$options": "i"}
+    if offer_type:
+        query["offer_type"] = offer_type
+
+    docs = await db.cashback_offers.find(query).sort("created_at", -1).to_list(length=500)
+    return {"status": "success", "offers": [_clean(d) for d in docs], "count": len(docs)}
+
+
+@router.get("/admin/product-search")
+async def product_search_for_offers(
+    q: str = "",
+    brand: str = "",
+    category: str = "",
+    ids: str = "",
+    limit: int = 25,
+):
+    """Admin: search products by model/name for the offer model-picker.
+    Pass ids=a,b,c to resolve selected product ids into details."""
+    projection = {"_id": 0, "id": 1, "name": 1, "model_number": 1, "sku": 1,
+                  "model": 1, "brand": 1, "category": 1, "price": 1}
+    if ids:
+        id_list = [i.strip() for i in ids.split(",") if i.strip()]
+        docs = await db.products.find({"id": {"$in": id_list}}, projection).to_list(length=500)
+        return {"status": "success", "products": docs}
+
+    and_clauses: List[Dict[str, Any]] = []
+    if q.strip():
+        rx = {"$regex": re.escape(q.strip()), "$options": "i"}
+        and_clauses.append({"$or": [{"name": rx}, {"model_number": rx}, {"sku": rx}, {"model": rx}]})
+    brands = [b.strip() for b in brand.split(",") if b.strip()]
+    if brands:
+        and_clauses.append({"$or": [{"brand": {"$regex": re.escape(b), "$options": "i"}} for b in brands]})
+    cats = [c.strip() for c in category.split(",") if c.strip()]
+    if cats:
+        and_clauses.append({"$or": [{"category": {"$regex": re.escape(c), "$options": "i"}} for c in cats]})
+    query: Dict[str, Any] = {"$and": and_clauses} if and_clauses else {}
+    docs = await db.products.find(query, projection).limit(max(1, min(limit, 50))).to_list(length=50)
+    return {"status": "success", "products": docs}
+
+
+@router.post("/admin/create")
+async def create_offer(offer: CashbackOffer):
+    """Admin: manually create an offer."""
+    if not offer.whatsapp_message:
+        offer.whatsapp_message = _build_whatsapp_link(offer.title)
+    doc = offer.dict()
+    await db.cashback_offers.insert_one(doc)
+    return {"status": "success", "offer": _clean(doc)}
+
+
+@router.put("/admin/{offer_id}")
+async def update_offer(offer_id: str, patch: OfferUpdate):
+    """Admin: update / deactivate an offer."""
+    updates = {k: v for k, v in patch.dict().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    updates["updated_at"] = datetime.now(timezone.utc)
+    result = await db.cashback_offers.update_one({"id": offer_id}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Offer not found")
+    doc = await db.cashback_offers.find_one({"id": offer_id})
+    return {"status": "success", "offer": _clean(doc)}
+
+
+@router.delete("/admin/{offer_id}")
+async def delete_offer(offer_id: str):
+    """Admin: hard-delete an offer."""
+    result = await db.cashback_offers.delete_one({"id": offer_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Offer not found")
+    return {"status": "success"}
+
+
+@router.post("/admin/bulk-delete")
+async def bulk_delete_offers(payload: Dict[str, Any]):
+    """Admin: bulk-delete offers by brand, source_pdf, or offer_type.
+    Body: { brand?: str, source_pdf?: str, offer_type?: str, all?: bool }
+    Pass all=true to wipe ALL offers (use with caution).
+    """
+    query: Dict[str, Any] = {}
+    if payload.get("all") is True:
+        query = {}
+    else:
+        if payload.get("brand"):
+            query["brand"] = {"$regex": f"^{re.escape(payload['brand'])}$", "$options": "i"}
+        if payload.get("source_pdf"):
+            query["source_pdf"] = payload["source_pdf"]
+        if payload.get("offer_type"):
+            query["offer_type"] = payload["offer_type"]
+        if not query:
+            raise HTTPException(status_code=400, detail="Pass at least one filter (brand, source_pdf, offer_type) or all=true")
+
+    result = await db.cashback_offers.delete_many(query)
+    return {"status": "success", "deleted": result.deleted_count}
+
+
+# -------------------- PUBLIC ENDPOINTS --------------------
+def _serialize_public(o: Dict[str, Any], product_name: str = "") -> Dict[str, Any]:
+    o = _clean(dict(o))
+    # Expand generic "All Banks" -> friendly bank list
+    o["valid_bank"] = _expand_bank_names(o.get("valid_bank"))
+    # Regenerate WhatsApp link with product context (if provided)
+    if product_name:
+        o["whatsapp_message"] = _build_whatsapp_link(o.get("title", ""), product_name)
+    elif not o.get("whatsapp_message"):
+        o["whatsapp_message"] = _build_whatsapp_link(o.get("title", ""))
+    o.pop("source_pdf", None)
+    return o
+
+
+@router.get("/product/{product_id}")
+async def offers_for_product(product_id: str):
+    """Public: return active offers applicable to a specific product.
+
+    Logic:
+      - SKU-level offers (product_ids includes this product_id) always apply
+      - Brand/category-wide offers (empty product_ids) also apply if brand or category matches
+    """
+    product = await db.products.find_one({"id": product_id})
+    if not product:
+        return {"status": "success", "offers": []}
+
+    brand = (product.get("brand") or "").strip()
+    category = (product.get("category") or "").strip()
+    name = product.get("name", "")
+
+    or_clauses: List[Dict[str, Any]] = [{"product_ids": product_id}]
+    # Truly brand-wide offers have NO sku AND empty product_ids
+    non_sku_filter = [
+        {"$or": [{"sku": None}, {"sku": {"$exists": False}}, {"sku": ""}]},
+        {"$or": [{"product_ids": {"$exists": False}}, {"product_ids": {"$size": 0}}]},
+    ]
+    # An offer's categories, if specified, MUST include this product's category.
+    # Otherwise (categories missing/empty), the offer is treated as brand-wide.
+    category_gate: Dict[str, Any]
+    if category:
+        category_gate = {
+            "$or": [
+                {"categories": {"$exists": False}},
+                {"categories": {"$size": 0}},
+                {"categories": {"$regex": f"^{re.escape(category)}$", "$options": "i"}},
+            ]
+        }
+    else:
+        # No category on product → only match offers that are also category-less
+        category_gate = {
+            "$or": [
+                {"categories": {"$exists": False}},
+                {"categories": {"$size": 0}},
+            ]
+        }
+
+    if brand:
+        or_clauses.append({
+            "$and": non_sku_filter + [
+                # Word-boundary regex so a multi-brand offer field like
+                # "Bosch, Electrolux, Siemens" matches any of those brand values.
+                {"brand": {"$regex": rf"(^|[,/\s]){re.escape(brand)}([,/\s]|$)", "$options": "i"}},
+                category_gate,
+            ]
+        })
+    if category:
+        # Category-wide offers (no brand set on offer) — still must match this category
+        or_clauses.append({
+            "$and": non_sku_filter + [
+                {"$or": [{"brand": None}, {"brand": {"$exists": False}}, {"brand": ""}]},
+                {"categories": {"$regex": f"^{re.escape(category)}$", "$options": "i"}},
+            ]
+        })
+
+    query: Dict[str, Any] = {"is_active": True, "$or": or_clauses}
+    docs = await db.cashback_offers.find(query).sort("created_at", -1).to_list(length=50)
+    # De-dupe by id
+    seen = set()
+    unique = []
+    for d in docs:
+        if d["id"] in seen:
+            continue
+        seen.add(d["id"])
+        unique.append(_serialize_public(d, product_name=name))
+    return {"status": "success", "offers": unique, "count": len(unique)}
+
+
+@router.post("/cart")
+async def offers_for_cart(payload: Dict[str, Any]):
+    """Public: return active offers applicable to a cart (product_ids list).
+
+    Same SKU-isolation logic as `offers_for_product`:
+      - SKU-level offers apply only if their product_ids intersect the cart
+      - Brand/category-wide offers only apply if they have no SKU field set
+    """
+    ids = payload.get("product_ids") or []
+    if not ids:
+        return {"status": "success", "offers": []}
+
+    # Fetch products in cart to gather brands & categories
+    prods = await db.products.find({"id": {"$in": ids}}).to_list(length=100)
+    brands = list({(p.get("brand") or "").strip() for p in prods if p.get("brand")})
+    cats = list({(p.get("category") or "").strip() for p in prods if p.get("category")})
+
+    non_sku_filter = [
+        {"$or": [{"sku": None}, {"sku": {"$exists": False}}, {"sku": ""}]},
+        {"$or": [{"product_ids": {"$exists": False}}, {"product_ids": {"$size": 0}}]},
+    ]
+
+    or_clauses: List[Dict[str, Any]] = [{"product_ids": {"$in": ids}}]
+
+    # Category gate: offer's categories (if any) must intersect cart's categories.
+    if cats:
+        category_gate: Dict[str, Any] = {
+            "$or": [
+                {"categories": {"$exists": False}},
+                {"categories": {"$size": 0}},
+                {"categories": {"$in": [re.compile(f"^{re.escape(c)}$", re.IGNORECASE) for c in cats]}},
+            ]
+        }
+    else:
+        category_gate = {
+            "$or": [
+                {"categories": {"$exists": False}},
+                {"categories": {"$size": 0}},
+            ]
+        }
+
+    if brands:
+        or_clauses.append({
+            "$and": non_sku_filter + [
+                # Word-boundary regex handles comma-separated multi-brand offer values
+                # (e.g. offer.brand = "Bosch, Electrolux, Siemens" matches all three).
+                {"$or": [
+                    {"brand": {"$regex": rf"(^|[,/\s]){re.escape(b)}([,/\s]|$)", "$options": "i"}}
+                    for b in brands
+                ]},
+                category_gate,
+            ]
+        })
+    if cats:
+        or_clauses.append({
+            "$and": non_sku_filter + [
+                {"$or": [{"brand": None}, {"brand": {"$exists": False}}, {"brand": ""}]},
+                {"categories": {"$in": [re.compile(f"^{re.escape(c)}$", re.IGNORECASE) for c in cats]}},
+            ]
+        })
+
+    docs = await db.cashback_offers.find({"is_active": True, "$or": or_clauses}).sort("created_at", -1).to_list(length=50)
+    seen = set()
+    unique = []
+    for d in docs:
+        if d["id"] in seen:
+            continue
+        seen.add(d["id"])
+        unique.append(_serialize_public(d))
+    return {"status": "success", "offers": unique, "count": len(unique)}
+
+
+@router.post("/summary")
+async def offers_summary(payload: Dict[str, Any]):
+    """Public: batched best-offer summary for product grids. Reuses offers_for_product."""
+    import asyncio as _asyncio
+    ids = list(dict.fromkeys(payload.get("product_ids") or []))[:60]
+
+    async def _one(pid):
+        r = await offers_for_product(pid)
+        return pid, r.get("offers", [])
+
+    res = await _asyncio.gather(*[_one(i) for i in ids])
+    out = {}
+    for pid, offs in res:
+        if not offs:
+            continue
+        def _amt(o):
+            try:
+                return float(o.get("amount_upto") or 0)
+            except Exception:
+                return 0
+        top = max(offs, key=_amt)
+        out[pid] = {"count": len(offs), "top": top}
+    return {"status": "success", "summary": out}
+
+
+import time as _time
+import json as _json
+import asyncio as _aio
+import urllib.request as _ur
+
+_PL_CACHE: Dict[str, Any] = {}
+
+
+def _pl_call(code, paise):
+    from pine_labs_routes import get_auth_token, PLURAL_API_BASE
+    tok = get_auth_token()
+    if not tok:
+        return None
+    amt = {"currency": "INR", "value": paise}
+    bodies = []
+    if code:
+        bodies.append({"order_amount": amt, "product_details": [{"product_code": code, "product_amount": amt}]})
+    bodies.append({"order_amount": amt})
+    for body in bodies:
+        req = _ur.Request(
+            PLURAL_API_BASE + "/affordability/v1/offer/discovery",
+            data=_json.dumps(body).encode(),
+            headers={"Authorization": "Bearer " + str(tok), "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with _ur.urlopen(req, timeout=20) as r:
+                return _json.loads(r.read().decode())
+        except Exception:
+            continue
+    return None
+
+
+def _pl_shape(data):
+    issuers = []
+    best = None
+    no_cost = False
+    for iss in (data or {}).get("issuers", []):
+        rows = []
+        for t in iss.get("tenures", []):
+            emi = (t.get("monthly_emi_amount") or {}).get("value")
+            if emi is None:
+                continue
+            interest = (t.get("interest_amount") or {}).get("value")
+            rate = t.get("interest_rate_percentage")
+            zero = (interest == 0) or (rate == 0)
+            fee = (t.get("processing_fee_amount") or {}).get("value") or 0
+            progs = sorted({p.get("program_type") for p in t.get("issuer_offer_parameters", []) if p.get("program_type")})
+            row = {"months": t.get("tenure_value"), "emi": emi / 100.0, "rate": rate,
+                   "no_cost": bool(zero), "fee": fee / 100.0, "programs": progs}
+            rows.append(row)
+            if (t.get("tenure_value") or 0) > 0:
+                no_cost = no_cost or zero
+                if best is None or row["emi"] < best["emi"]:
+                    best = row
+        rows.sort(key=lambda x: x["months"] or 0)
+        if rows:
+            issuers.append({"name": iss.get("display_name") or iss.get("name"), "type": iss.get("issuer_type"), "tenures": rows})
+    if not issuers:
+        return None
+    return {
+        "bank_count": len({str(i["name"]) for i in issuers}),
+        "banks": sorted({str(i["name"]) for i in issuers})[:4],
+        "max_months": max([t["months"] or 0 for i in issuers for t in i["tenures"]] or [0]),
+        "from_emi": best["emi"] if best else None,
+        "from_months": best["months"] if best else None,
+        "no_cost": no_cost,
+        "issuers": issuers,
+    }
+
+
+async def _pl_get(product_id):
+    p = await db.products.find_one({"id": product_id})
+    if not p:
+        return None
+    try:
+        price = float(p.get("price") or 0)
+    except Exception:
+        price = 0
+    if price <= 0:
+        return None
+    from pine_labs_routes import _SKU_OK
+    explicit = str(p.get("brand_emi_sku") or "").strip()
+    model = str(p.get("model_number") or p.get("modelNumber") or "").strip().upper()
+    code = explicit or model
+    if not code or not _SKU_OK.match(code):
+        code = ""
+    paise = int(round(price * 100))
+    key = "%s|%s" % (code, paise)
+    hit = _PL_CACHE.get(key)
+    if hit and hit[0] > _time.time():
+        return hit[1]
+    data = await _aio.to_thread(_pl_call, code, paise)
+    shaped = _pl_shape(data)
+    _PL_CACHE[key] = (_time.time() + (60 if shaped else 15), shaped)
+    return shaped
+
+
+@router.get("/pine-live/{product_id}")
+async def pine_live_product(product_id: str):
+    """Public: live Pine Labs Offer Discovery result for one product."""
+    return {"status": "success", "source": "pine_labs_live", "offer": await _pl_get(product_id)}
+
+
+@router.post("/pine-live-summary")
+async def pine_live_summary(payload: Dict[str, Any]):
+    """Public: batched live Pine Labs summary for product grids."""
+    ids = list(dict.fromkeys(payload.get("product_ids") or []))[:40]
+    sem = _aio.Semaphore(5)
+
+    async def _one(pid):
+        async with sem:
+            return pid, await _pl_get(pid)
+
+    res = await _aio.gather(*[_one(i) for i in ids])
+    out = {}
+    for pid, o in res:
+        if o:
+            out[pid] = {k: o.get(k) for k in ("bank_count", "banks", "from_emi", "from_months", "max_months", "no_cost")}
+    return {"status": "success", "source": "pine_labs_live", "summary": out}
